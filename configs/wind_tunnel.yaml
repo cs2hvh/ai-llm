@@ -1,0 +1,118 @@
+# Wind-tunnel proxy model config — Phase 2 prep for muP / muTransfer.
+#
+# A ~68M-parameter proxy (the 131k vocab embedding table dominates at
+# hidden_dim=384; transformer body is ~17M of the 68M). Used ONLY for
+# sweeping LR and init hyperparameters under muP. The optimal LR found
+# here transfers zero-shot to the 250M pilot (width_mult=3) and 1B base
+# (width_mult=8) per `docs/mup_design.md`.
+#
+# Why we keep the full vocab even though it inflates param count:
+# tokenization / embedding gradients are part of what we're sweeping,
+# and using a tiny test vocab would make the sweep's results not
+# representative of pilot/base training dynamics.
+#
+# Architecture rules:
+#   - hidden_dim = 384 (mup.base_width = 256 → width_mult = 1.5)
+#   - layers = 8  (vs pilot/base 16, halved to fit ~30M)
+#   - FFN ratio = 4× (same as pilot/base)
+#   - GQA 3:1 (same as pilot)
+#   - head_dim = 64 (same as pilot/base — keeps RoPE behavior comparable)
+#   - vocab_size = 131072 (full production tokenizer, NOT a tiny test vocab —
+#     we want token-level dynamics representative of the real run)
+#   - context_length = 2048 (half of pilot's 4096 to keep sweep fast)
+#   - rope_base = 130000 (same as pilot)
+#
+# Sweep grid (executed by scripts/wind_tunnel_sweep.py):
+#   - LR ∈ {5e-4, 1e-3, 2e-3, 4e-3, 8e-3} (log-spaced)
+#   - init_std ∈ {0.01, 0.02} (Llama range)
+#   - 200M tokens/cell (μP literature: HP signal is clear at 100-300M for
+#     a 30M model — 1B was overkill and tripled the budget unnecessarily)
+#   - ~1 hr/cell on 1× H200 SXM at ~50K tok/sec effective throughput (single
+#     device, micro_batch=8, seq_len=2048 → ~16K tok/step → ~12K steps)
+#   - Total sweep cost: 10 cells × ~$4 each ≈ $40 on H200 SXM secure cloud
+#   - SKU choice (2026-05-11): B200 is "Unavailable" on Secure Cloud per
+#     dashboard; H200 SXM is "Low" availability at $3.99/hr — same throughput
+#     class as B200, ~33% cheaper, and currently grabbable.
+#
+# Param count: ~30M (verified empirically; tests/test_smoke.py-style check
+# would put this between 25-40M).
+
+name: myllm-wind-tunnel-68m
+arch: llama_decoder
+
+# Architecture
+layers: 8
+hidden_dim: 384
+ffn_dim: 1536           # 4× hidden
+num_heads: 6
+num_kv_heads: 2         # GQA 3:1
+head_dim: 64
+vocab_size: 131072
+tie_embeddings: true
+
+context_length: 2048
+
+# Position
+position: rope
+rope_base: 130000.0
+
+# Norm + activation
+norm: rmsnorm
+norm_eps: 1.0e-5
+activation: swiglu
+
+# Init
+init_std: 0.02          # swept by the wind-tunnel script
+scaled_init_for_residuals: false
+
+# Stability
+z_loss_coef: 1.0e-4
+qk_norm: true           # use the same QK-norm setting as pilot/base
+                        # (we want HP transfer to apply with QK-norm ON)
+
+# muP — base_width=256 → width_mult = 384/256 = 1.5
+mup:
+  base_width: 256
+  apply_attn_output_mult: true
+  apply_ffn_output_mult: true
+  apply_lm_head_output_mult: true
+
+# Training (peak_lr is swept; this is just the starting value for the grid)
+optimizer:
+  type: adamw
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 0.1
+  eps: 1.0e-8
+
+lr_schedule:
+  type: wsd
+  peak_lr: 1.0e-3       # swept
+  end_lr_ratio: 0.1
+  warmup_steps: 100
+  decay_fraction: 0.15
+
+batch:
+  global_tokens: 524288   # 512K tokens/step → 1B tokens = ~2K steps
+  sequence_length: 2048
+
+grad_clip_global_norm: 1.0
+mixed_precision: bfloat16
+
+# Token budget for each sweep cell.
+target_tokens: 200_000_000     # 200M per cell (μP convention for 30M model)
+
+# Checkpointing — we don't need persistent checkpoints from sweep runs,
+# just final loss numbers. Save sparsely to save R2 churn.
+checkpoint_every_steps: 5000
+keep_last_n: 1
+keep_every_n_steps: 10000
+
+# Compute target (planning). Numbers below are honest: 200M tokens at
+# ~50K tok/sec ≈ 4000 sec ≈ 1.1 hr/cell. At $3.99/hr H200 SXM secure cloud
+# (live price 2026-05-11), each cell costs ~$4.40.
+expected_pod: 1x_H200_SXM
+expected_hours_per_cell: 1.1
+expected_cost_usd_per_cell: 5
+expected_total_cells: 10
+expected_total_cost_usd: 45    # full sweep budget (10 cells × ~$4.40, round up)

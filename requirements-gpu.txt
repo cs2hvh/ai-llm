@@ -1,0 +1,11 @@
+# GPU-pod deps. Install on RunPod after base image, in addition to requirements.txt.
+# CUDA 12 assumed. Pin to RunPod's actual CUDA at pod-launch time.
+
+# JAX with CUDA 12 wheels (use the official find-links for current versions):
+#   pip install --upgrade "jax[cuda12]>=0.4.30,<0.5"
+jax[cuda12]>=0.4.30,<0.5
+
+# FlashAttention via JAX-Pallas is built in; no separate dep needed.
+
+# Optional: TensorFlow GPU only if running TF-backed inference on the pod.
+# tensorflow[and-cuda]>=2.18,<3.0

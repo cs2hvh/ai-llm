@@ -1,0 +1,81 @@
+# Decay-phase distillation recipe — R0 from 2026-05-11 dossier.
+#
+# This config defines HOW the train_step.py distillation path is activated
+# during the last 15% of pretraining (the WSD decay phase). The teacher
+# strategy (which teachers, why) is locked in docs/teacher_distillation_strategy.md.
+#
+# Activation: the training loop reads this YAML and switches the
+# distill_alpha + teacher_weights of make_train_step() when it crosses the
+# decay-phase boundary. During the stable phase (first 85% of training)
+# alpha stays at 1.0, teacher data is not streamed, train_step takes the
+# CE-only path.
+
+name: myllm-distill-decay-v1
+phase: decay        # this config only applies during the decay phase
+
+# When in training to activate distillation. Expressed as the fraction of
+# total_steps at which distillation kicks in. 0.85 matches our WSD decay
+# boundary (decay_fraction: 0.15 in pilot/base configs).
+activation_fraction: 0.85
+
+# Loss-mixing coefficient. 0.3 = 30% cross-entropy + 70% multi-teacher KL.
+# Matches docs/teacher_distillation_strategy.md decision.
+alpha: 0.3
+
+# Teacher softmax temperature. 1.0 = use teacher's natural distribution.
+# Higher = softer (more uniform). We use 1.0; the playbook's 2.0
+# "temperature-scaled distillation" only matters when teacher and student
+# are similar in capacity, which they are not (671B teacher → 1B student).
+temperature: 1.0
+
+# Top-K cached per token per teacher. 8 captures >99% of teacher's
+# probability mass at typical sharpness, balances quality vs storage:
+#   K=4:  2.4 TB / teacher → 7.2 TB total, 92% mass captured
+#   K=8:  4.8 TB / teacher → 14.4 TB total, 99% mass captured  ← chosen
+#   K=16: 9.6 TB / teacher → 28.8 TB total, 99.7% mass captured
+top_k: 8
+
+# Multi-teacher ensemble: same set as docs/teacher_distillation_strategy.md.
+# Weights are loose priors; uniform (1.0 each) is the default starting point.
+teachers:
+  - id: deepseek-v4-pro-base
+    hf_model: deepseek-ai/DeepSeek-V4-Pro-Base
+    license: MIT
+    weight: 1.0
+    role: primary
+    # The R2 prefix under which this teacher's cached top-K shards live.
+    # The cache is content-addressed by (corpus_sha, top_k, tokenizer_sha).
+    r2_prefix: distillation_cache/deepseek-v4-pro-base/k8/
+
+  - id: qwen3p6-27b-base
+    hf_model: Qwen/Qwen3.6-27B
+    license: Apache-2.0
+    weight: 1.0
+    role: secondary-multilingual
+    r2_prefix: distillation_cache/qwen3p6-27b-base/k8/
+
+  - id: mistral-medium-3p5-128b-base
+    hf_model: mistralai/Mistral-Medium-3.5-128B
+    license: Apache-2.0
+    weight: 1.0
+    role: secondary-eu
+    r2_prefix: distillation_cache/mistral-medium-3p5-128b-base/k8/
+
+# Cache format — see docs/teacher_logit_cache_format.md for the binary spec.
+cache_format: arrow_v1   # versioned so we can evolve without silent breakage
+
+# Token range over which the cache must exist. If the loop tries to read
+# a position outside this range, training fails fast (no silent fallback
+# to CE-only without warning).
+covered_token_range:
+  start_step: 850000      # for a 1M-step training run (=> 1T tokens at 1M tok/step)
+  end_step: 1000000
+
+# Validation: assert these properties before declaring the cache "ready".
+validation:
+  per_teacher_logit_dtype: bfloat16
+  per_teacher_indices_dtype: uint32
+  expected_total_size_tb_min: 12.0    # 3 teachers × 4.8 TB = 14.4; warn below 12
+  expected_total_size_tb_max: 18.0    # warn above 18 (something duplicated?)
+  per_position_topk_logits_sum_p_min: 0.95   # softmax(top-8) should sum >0.95
+  # If less, top-K is too small (teacher has flat tail) — bump K.

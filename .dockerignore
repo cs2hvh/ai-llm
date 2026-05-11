@@ -1,0 +1,18 @@
+# Keep build context small.
+.venv/
+.env
+.env.*
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+artifacts/
+checkpoints/
+wandb/
+mlruns/
+*.safetensors
+*.gguf
+*.ckpt

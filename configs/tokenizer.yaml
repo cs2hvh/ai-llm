@@ -1,0 +1,82 @@
+# Tokenizer training config — Phase 1.
+# v2 (2026-05-10): updated per playbook alignment review (docs/playbook_alignment.md).
+#
+# Changes from v1:
+#   - vocab_size: 128000 -> 131072 (Llama-3.x compatibility)
+#   - algorithm: byte_level_bpe -> sentencepiece_unigram (better cross-lingual)
+#   - normalizer: null -> nfkc (canonical Unicode form)
+#   - pre_tokenizer: gpt_regex -> metaspace (SentencePiece-style)
+#   - byte_fallback: true (handles arbitrary scripts without OOV)
+
+name: myllm-spm-unigram-131k-v2
+algorithm: sentencepiece_unigram
+vocab_size: 131072
+
+normalizer: nfkc
+
+pre_tokenizer:
+  type: metaspace
+  replacement: "▁"
+  prepend_scheme: always
+
+decoder:
+  type: metaspace
+  replacement: "▁"
+
+byte_fallback: true
+
+# Special tokens — populated at runtime from myllm.data.special_tokens.
+# Listed here for human reference only; the runtime list is the source of truth.
+special_tokens_reference:
+  - "<|bos|>"
+  - "<|eos|>"
+  - "<|pad|>"
+  - "<|unk|>"        # required for Unigram model
+  - "<|im_start|>"
+  - "<|im_end|>"
+  - "<|tool_call|>"
+  - "<|tool_result|>"
+reserved_slots: 16
+
+# Training corpus mixture (~30GB sample, stratified).
+# v3 (2026-05-10): swapped starcoderdata (gated) for codeparrot/github-code-clean
+# (open), pinned sangraha config to "verified" (high-quality subset), enabled
+# trust_remote_code on mc4 (ships a custom loader script).
+training_corpus:
+  - { source: HuggingFaceFW/fineweb-edu,      share: 0.40, role: english_web,  text_field: text }
+  - { source: codeparrot/github-code-clean,    share: 0.20, role: code,           text_field: code, trust_remote_code: true }
+  - { source: ai4bharat/sangraha,              share: 0.20, role: indic,          text_field: text, config_name: verified, split: hin }
+  - { source: allenai/c4,                      share: 0.05, role: multilingual,   text_field: text, config_name: multilingual }
+  - { source: open-web-math/open-web-math,     share: 0.05, role: math,           text_field: text }
+  - { source: wikimedia/wikipedia,             share: 0.10, role: encyclopedic,   text_field: text, config_name: 20231101.en }
+
+# Languages — English-primary plus 6 secondary, locked per user 2026-05-10.
+languages:
+  - { code: en, share: 0.70, name: English }
+  - { code: hi, share: 0.06, name: Hindi }
+  - { code: es, share: 0.05, name: Spanish }
+  - { code: zh, share: 0.05, name: Chinese (Simplified) }
+  - { code: ar, share: 0.05, name: Arabic }
+  - { code: fr, share: 0.05, name: French }
+  - { code: de, share: 0.04, name: German }
+
+# Validation gates
+validation:
+  bytes_per_token_max_ratio_vs_cl100k: 1.6
+  roundtrip_exactness_required: true
+  per_language_compression_floor: 0.85
+  # Round-trip tests. Mix of common tokens (should be in vocab) and rarer
+  # CJK/Arabic characters (will exercise byte-fallback path). After the
+  # 2026-05-10 v2-smoke fix, *all* of these must round-trip exactly — if a
+  # character drops, byte-fallback decoding is broken.
+  code_pattern_smoketests:
+    - "for i in range(10):\n    print(i)\n"
+    - "kubectl apply -f deployment.yaml"
+    - "नमस्ते, आप कैसे हैं?"
+    - "你好,请问最近怎么样?"
+    - "السلام عليكم"
+    # byte-fallback regression tests — these characters are unlikely
+    # to be in the trained vocab and must round-trip via <0xXX> bytes.
+    - "人工智能是一门具有挑战性和创造性的学科。"
+    - "الذكاء الاصطناعي يغير العالم بسرعة كبيرة."
+    - "🦙 emoji + ✨ symbols + 𓀀 obscure-script"

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.eggs/
+build/
+dist/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Local artifacts (push to object storage instead)
+artifacts/
+*.safetensors
+*.gguf
+*.ckpt
+checkpoints/
+wandb/
+mlruns/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# OS
+.DS_Store
+Thumbs.db

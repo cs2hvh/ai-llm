@@ -1,0 +1,253 @@
+"""Loss functions for language-model training.
+
+Cross-entropy is the primary loss. We add a small ``z-loss`` term that
+penalises the log-partition function. This stabilises late-training dynamics
+by preventing logit norms from drifting (PaLM 2022, Chowdhery et al.).
+
+R0 (2026-05-11): added top-K logit distillation loss for the decay-phase
+multi-teacher recipe locked in ``docs/teacher_distillation_strategy.md``.
+The teacher logits are pre-cached offline (top-8 per token per teacher);
+during training we mix cross-entropy and per-teacher KL divergence at the
+caller-specified ``alpha`` ratio.
+
+All ops go through ``keras.ops`` so the same code runs on JAX or TF.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+
+def cross_entropy_with_z_loss(
+    logits: Any,
+    labels: Any,
+    *,
+    ignore_index: int | None = None,
+    z_loss_coef: float = 1.0e-4,
+) -> tuple[Any, dict[str, Any]]:
+    """Token-level cross-entropy + z-loss.
+
+    Args:
+        logits: ``[batch, seq, vocab]`` un-normalised logits.
+        labels: ``[batch, seq]`` int targets.
+        ignore_index: if set, positions equal to this value contribute 0 loss
+            and 0 weight (typically the pad-token id).
+        z_loss_coef: weight on the z-loss term ``mean(logsumexp(logits)^2)``.
+
+    Returns:
+        ``(loss, metrics_dict)``. The metrics dict contains ``ce`` and
+        ``z_loss`` for separate logging.
+    """
+    from keras import ops
+
+    log_z = ops.logsumexp(logits, axis=-1)  # [b, s]
+    log_softmax = logits - log_z[..., None]
+    # Gather log-prob at target positions.
+    labels_one_hot = ops.one_hot(labels, num_classes=ops.shape(logits)[-1])
+    nll = -ops.sum(labels_one_hot * log_softmax, axis=-1)  # [b, s]
+
+    if ignore_index is not None:
+        weight = ops.cast(ops.not_equal(labels, ignore_index), nll.dtype)
+        nll_sum = ops.sum(nll * weight)
+        denom = ops.maximum(ops.sum(weight), ops.cast(1.0, weight.dtype))
+        ce = nll_sum / denom
+        z_loss = ops.sum((log_z * log_z) * weight) / denom
+    else:
+        ce = ops.mean(nll)
+        z_loss = ops.mean(log_z * log_z)
+
+    total = ce + z_loss_coef * z_loss
+    return total, {"ce": ce, "z_loss": z_loss}
+
+
+def kl_div_topk_loss(
+    student_logits: Any,
+    teacher_topk_logits: Any,
+    teacher_topk_indices: Any,
+    *,
+    temperature: float = 1.0,
+    ignore_index: int | None = None,
+    labels: Any | None = None,
+) -> Any:
+    """KL divergence between student and teacher distributions on the
+    teacher's top-K vocab positions.
+
+    The teacher's distribution is given by ``softmax(teacher_topk_logits / T)``
+    over K positions specified by ``teacher_topk_indices``. The student's
+    distribution at those same K positions is gathered from its full-vocab
+    logits and renormalised, then we compute KL(teacher || student).
+
+    This is the standard "restricted top-K" distillation loss (Hinton et
+    al. 2015; used in essentially every distilled small-LLM cited in
+    ``docs/ai_research_dossier_2026-05-11.md``). The "mass outside top-K"
+    in the teacher's full distribution is implicitly dropped — fine when K
+    is large enough to capture the bulk (K=8 typically gets >99% of the
+    mass on real LLM distributions).
+
+    Args:
+        student_logits:        ``[B, S, V]`` student's full-vocab logits.
+        teacher_topk_logits:   ``[B, S, K]`` teacher's top-K logit values
+                               (pre-cached offline; same vocab as student).
+        teacher_topk_indices:  ``[B, S, K]`` int indices into ``V``.
+        temperature:           teacher-side softmax temperature. ``1.0``
+                               matches the teacher's natural distribution;
+                               ``>1`` softens it (more mass on tail).
+        ignore_index, labels:  if both provided, positions where
+                               ``labels == ignore_index`` contribute zero
+                               loss (typically pad-token id).
+
+    Returns:
+        Scalar KL divergence, averaged over (B*S) effective positions.
+    """
+    from keras import ops
+
+    # Student's logits at the teacher's top-K positions: [B, S, K]
+    student_at_topk = ops.take_along_axis(
+        student_logits, teacher_topk_indices, axis=-1
+    )
+
+    # Teacher distribution over top-K (with temperature).
+    teacher_logits_T = teacher_topk_logits / temperature
+    teacher_log_z = ops.logsumexp(teacher_logits_T, axis=-1, keepdims=True)
+    teacher_log_p = teacher_logits_T - teacher_log_z
+    teacher_p = ops.exp(teacher_log_p)
+
+    # Student distribution renormalised over the same K positions.
+    student_log_z = ops.logsumexp(student_at_topk, axis=-1, keepdims=True)
+    student_log_p = student_at_topk - student_log_z
+
+    # KL(teacher || student) = sum_k p_t * (log p_t - log p_s)
+    kl_per_position = ops.sum(
+        teacher_p * (teacher_log_p - student_log_p), axis=-1
+    )  # [B, S]
+
+    if ignore_index is not None and labels is not None:
+        weight = ops.cast(
+            ops.not_equal(labels, ignore_index), kl_per_position.dtype
+        )
+        denom = ops.maximum(ops.sum(weight), ops.cast(1.0, weight.dtype))
+        return ops.sum(kl_per_position * weight) / denom
+    return ops.mean(kl_per_position)
+
+
+def multi_teacher_kl_loss(
+    student_logits: Any,
+    teacher_topk_logits_per_teacher: Any,
+    teacher_topk_indices_per_teacher: Any,
+    *,
+    teacher_weights: tuple[float, ...] | None = None,
+    temperature: float = 1.0,
+    ignore_index: int | None = None,
+    labels: Any | None = None,
+) -> Any:
+    """Average KL loss across multiple teachers.
+
+    Teachers are stacked along a leading axis. We compute the top-K KL per
+    teacher and average (weighted, if ``teacher_weights`` is provided).
+
+    Args:
+        student_logits: ``[B, S, V]``.
+        teacher_topk_logits_per_teacher:  ``[T, B, S, K]``.
+        teacher_topk_indices_per_teacher: ``[T, B, S, K]`` int.
+        teacher_weights:   optional ``[T]`` weights (default: uniform).
+        temperature, ignore_index, labels: as in ``kl_div_topk_loss``.
+
+    Returns:
+        Scalar weighted-average KL.
+    """
+    from keras import ops
+
+    n_teachers = ops.shape(teacher_topk_logits_per_teacher)[0]
+
+    # Iterate teachers via Python loop — JAX/JIT folds it. The teacher
+    # axis is small (1-3) so an explicit loop is clearer than a vmap.
+    losses = []
+    for t in range(int(n_teachers)):
+        losses.append(
+            kl_div_topk_loss(
+                student_logits,
+                teacher_topk_logits_per_teacher[t],
+                teacher_topk_indices_per_teacher[t],
+                temperature=temperature,
+                ignore_index=ignore_index,
+                labels=labels,
+            )
+        )
+    stacked = ops.stack(losses)  # [T]
+
+    if teacher_weights is None:
+        return ops.mean(stacked)
+    weights = ops.cast(ops.convert_to_tensor(teacher_weights), stacked.dtype)
+    weights = weights / ops.sum(weights)
+    return ops.sum(stacked * weights)
+
+
+def distillation_mixed_loss(
+    student_logits: Any,
+    labels: Any,
+    teacher_topk_logits_per_teacher: Any | None,
+    teacher_topk_indices_per_teacher: Any | None,
+    *,
+    alpha: float = 0.3,
+    teacher_weights: tuple[float, ...] | None = None,
+    temperature: float = 1.0,
+    ignore_index: int | None = None,
+    z_loss_coef: float = 1.0e-4,
+) -> tuple[Any, dict[str, Any]]:
+    """Combined cross-entropy + multi-teacher KL distillation loss.
+
+    Loss = ``α · CE(student, labels) + (1 - α) · mean_t KL(teacher_t || student)``
+
+    When teacher data is absent (None), the function collapses to plain
+    cross-entropy + z-loss — i.e. the stable phase of training, before
+    decay-phase distillation kicks in.
+
+    Args:
+        student_logits:                ``[B, S, V]``.
+        labels:                        ``[B, S]`` int.
+        teacher_topk_logits_per_teacher,
+        teacher_topk_indices_per_teacher:
+            ``[T, B, S, K]`` or ``None`` for "no teacher this batch".
+        alpha:           CE weight. ``1.0`` → pure CE (no distillation).
+                         ``0.3`` is our locked decay-phase value
+                         (``docs/teacher_distillation_strategy.md``).
+        teacher_weights: per-teacher weights; defaults to uniform.
+        temperature:     teacher softmax temperature.
+        ignore_index:    pad-token id.
+        z_loss_coef:     z-loss weight on the CE term (unchanged from
+                         non-distillation path).
+
+    Returns:
+        ``(loss, metrics_dict)`` — metrics include ``ce``, ``z_loss``,
+        ``kl`` (zero when no teacher), ``alpha``.
+    """
+    from keras import ops
+
+    ce_total, ce_metrics = cross_entropy_with_z_loss(
+        student_logits, labels,
+        ignore_index=ignore_index,
+        z_loss_coef=z_loss_coef,
+    )
+
+    if teacher_topk_logits_per_teacher is None or teacher_topk_indices_per_teacher is None:
+        # No teachers this batch — return CE alone (with zero KL recorded
+        # so metrics stay consistent across phases).
+        metrics = dict(ce_metrics)
+        metrics["kl"] = ops.cast(0.0, ce_total.dtype)
+        metrics["alpha"] = ops.cast(1.0, ce_total.dtype)
+        return ce_total, metrics
+
+    kl_total = multi_teacher_kl_loss(
+        student_logits,
+        teacher_topk_logits_per_teacher,
+        teacher_topk_indices_per_teacher,
+        teacher_weights=teacher_weights,
+        temperature=temperature,
+        ignore_index=ignore_index,
+        labels=labels,
+    )
+
+    total = alpha * ce_total + (1.0 - alpha) * kl_total
+    metrics = dict(ce_metrics)
+    metrics["kl"] = kl_total
+    metrics["alpha"] = ops.cast(alpha, ce_total.dtype)
+    return total, metrics
