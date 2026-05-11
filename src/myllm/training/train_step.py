@@ -99,13 +99,40 @@ def make_train_step(
     def train_step(
         state: dict[str, Any], batch: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        import jax.numpy as jnp
+
         (loss, (metrics, new_non_trainable)), grads = grad_fn(
             state["trainable_variables"],
             state["non_trainable_variables"],
             batch,
         )
+
+        # NaN-skip: if loss or any gradient is non-finite, skip the optimizer
+        # update entirely. This makes training robust to occasional bad batches
+        # (poisoned doc, rare-token underflow, etc.) — gradient clipping does
+        # NOT help here because the gradients are already NaN/Inf before clip
+        # runs, so clipping propagates them through. Industry-standard pattern.
+        #
+        # When skipped, the step counter still advances (consuming the bad
+        # batch from the data iterator) but trainable_variables + opt_state
+        # are unchanged, so the model survives the spike.
+        loss_finite = jnp.isfinite(loss)
+        grads_finite = jax.tree.reduce(
+            lambda a, b: a & b,
+            jax.tree.map(lambda g: jnp.all(jnp.isfinite(g)), grads),
+            jnp.array(True),
+        )
+        step_ok = loss_finite & grads_finite
+
+        # Zero out gradients on bad-batch steps so the optimizer's m/v moments
+        # stay clean. This is equivalent to optimizer.update on g=0.
+        safe_grads = jax.tree.map(
+            lambda g: jnp.where(step_ok, g, jnp.zeros_like(g)),
+            grads,
+        )
+
         updates, new_opt_state = optimizer.update(
-            grads, state["opt_state"], state["trainable_variables"]
+            safe_grads, state["opt_state"], state["trainable_variables"]
         )
         # Apply the watchdog recovery multiplier on top of the optimizer
         # schedule. lr_recovery_multiplier is 1.0 in normal training and gets
@@ -120,7 +147,13 @@ def make_train_step(
             "step": state["step"] + 1,
             "lr_recovery_multiplier": state["lr_recovery_multiplier"],
         }
-        metrics_out = {"loss": loss, **metrics}
+        # Expose `nan_skipped` (0/1) in metrics so the loop can count + log
+        # how many bad batches we silently dropped.
+        metrics_out = {
+            "loss": loss,
+            "nan_skipped": jnp.where(step_ok, jnp.float32(0.0), jnp.float32(1.0)),
+            **metrics,
+        }
         return new_state, metrics_out
 
     return train_step
