@@ -1,5 +1,23 @@
 # MyLLM — Project Handoff & Review Brief
-*Snapshot date: 2026-05-11 (revised: 2026-05-11 PM)*
+*Snapshot date: 2026-05-11 (revised: 2026-05-12 after second external review + dossier verification)*
+
+## 2026-05-12 changelog (since first version)
+
+After a second external review (enterprise 2026 research review, archived as `docs/MyLLM_Enterprise_2026_Research_Review.pdf`) plus an independent dossier WebFetch verification pass:
+
+**Confirmed factual corrections** (the v1 of this doc had wrong info):
+- Mistral-Medium-3.5-128B is NOT Apache-2.0. License is "Modified MIT" with $20M monthly revenue cap that applies to derivatives. **Dropped from teacher plan.**
+- Qwen3.6-27B is NOT a base text-only model. It's multimodal (vision encoder) + thinking-mode-default (`<think>` traces). **Dropped from teacher plan.**
+- DeepSeek-V4-Pro-Base specs confirmed: 1.6T params (49B activated MoE), 1M context, 32T+ pretrain tokens, MIT, uses Muon optimizer. **Kept as primary teacher.**
+- Frontier 1B-class token budgets verified: Llama 3.2 1B/3B = 9T, OLMo 2 1B = 4T, SmolLM3 3B = 11.2T. **Our 1T plan is below frontier — reframed as "internal v1" with continuation path.**
+
+**Locked teacher plan v2** (replaces the 3-teacher plan in §2):
+- **Primary**: DeepSeek-V4-Pro-Base (MIT) — sole teacher for Phase 3 canary
+- **Secondary**: Olmo-3-1125-32B (Apache-2.0, 32B dense, 5.5T tokens, 64k context) — added for Phase 3 production after canary passes
+- Phase 3 canary scope: 1 teacher × 20B tokens, $300-500 cache cost, before committing to 2-teacher production
+- α-annealing 0.7→0.3 (not constant 0.3) per external review
+
+See `docs/teacher_distillation_strategy.md` v2 for full reasoning.
 
 ---
 
@@ -37,7 +55,7 @@ Phase 3 (base 1B):
 - MMLU ≥ 42% (Llama 3.2 1B parity)
 - Belebele ≥ 50% on English, ≥ 35% on Hindi
 - HumanEval+ ≥ 15% (modest for a 1B base)
-- Distillation "invisible" — model behavior shouldn't read as a thin DeepSeek/Qwen/Mistral wrapper
+- Distillation "invisible" — model behavior shouldn't read as a thin DeepSeek/Olmo wrapper (v2: was DeepSeek/Qwen/Mistral; teacher set narrowed 2026-05-12)
 
 ---
 
@@ -92,7 +110,7 @@ loss = α · CE(student, gold) + (1-α) · mean_t KL(softmax(teacher_t_topK) || 
 - α = 0.3 (literature anchor)
 - Temperature = 1.0
 - top-K = 8
-- Three teachers: **DeepSeek-V4-Pro-Base** (MIT), **Qwen 3.6-27B** (Apache-2.0), **Mistral-Medium-3.5-128B** (Apache-2.0)
+- Two teachers (v2, locked 2026-05-12): **DeepSeek-V4-Pro-Base** (MIT) + **Olmo-3-1125-32B** (Apache-2.0). Phase 3 canary uses ONLY DeepSeek-V4-Pro-Base; Olmo-3 added for production if canary passes. Previously locked Qwen3.6-27B + Mistral-Medium-3.5-128B were dropped after license/modality verification.
 - All teachers are **base, not chat-tuned**, to preserve "invisibility" (model shouldn't read as any specific teacher)
 
 Top-K logits are cached offline (~$15-25K compute) in Arrow IPC shards, mmap'd at runtime.
@@ -283,7 +301,8 @@ llm-build/
 | Phase 2a | Wind-tunnel sweep (10 cells × 200M tokens, 67M proxy, 1× H200 SXM) | $20-30 | ~5-10 hr |
 | Phase 2b | Pilot 250M (5-10B tokens, 1× H200 SXM or 8× H100) | $200-500 | 1-2 days |
 | Phase 3 | Base 1B at 1T tokens (8× B200 if available, else 8× H100/H200 SXM) | $11-25K | 9-30 days |
-| Phase 3 caching | Teacher logit cache for distillation (3 teachers × 200B tokens × top-K=8) | $15-25K | 3-7 days (one-time) |
+| Phase 3 caching (canary, 1 teacher) | DeepSeek-V4-Pro-Base × 20B tokens × top-K=8 | ~$500 | <1 day |
+| Phase 3 caching (production, 2 teachers) | DeepSeek + Olmo-3-32B × 150B tokens × top-K=8 | $5-10K | 5-10 days (one-time) |
 | **Phase 3 total (compute only)** | | **$26-50K** | **~2-5 weeks** |
 
 If we cut to **500B tokens** for Phase 3 v1, halve the base cost: ~$13-25K total including cache. Discussed as an option.
