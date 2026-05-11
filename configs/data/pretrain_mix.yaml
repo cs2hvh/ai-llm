@@ -144,12 +144,22 @@ decontamination:
       sample_size: 200
   report_csv_path: artifacts/decontamination_report.csv
 
-# Production batch settings (pilot 250M + base 1B both use these).
-# NOTE: wind-tunnel sweep uses seq_len=2048 via configs/wind_tunnel.yaml's
-# context_length; the pilot/base context_length is 4096 to match this.
+# Batch settings shared across wind-tunnel / pilot / base.
+#
+# IMPORTANT (P0-3 fix, 2026-05-12 audit):
+# `sequence_length` is now DERIVED at runtime from `model_cfg.context_length + 1`.
+# The value below is informational only; run_pretrain.py overrides it with
+# `model_cfg.context_length + 1` after validating any explicit value matches.
+# If you set it here it MUST match `model_cfg.context_length + 1` of whatever
+# model config you launch with, else startup will error.
+#
+# Why this is shared: the packer + filter chain don't care about model size;
+# only sequence packing does, and that's derived. micro_batch_per_device
+# also belongs here because it's a data-side property (how many sequences
+# per device per step).
 batch:
   micro_batch_per_device: 8
-  sequence_length: 4096
+  # sequence_length intentionally omitted — derived from model config.
   grad_accum_steps: 1
 
 data_seed: 1234

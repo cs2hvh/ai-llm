@@ -86,6 +86,7 @@ class TestCellCommand:
             tokenizer_path="tok.json",
             checkpoint_root="ckpts",
             log_path="log.txt",
+            sequence_length=2048,  # bypass yaml read (path is a stub)
         )
         assert "--peak-lr-override" in cmd
         assert "--init-std-override" in cmd
@@ -99,13 +100,15 @@ class TestCellCommand:
         """Sweep cells must not log to W&B — they'd flood the project with
         10 disposable runs."""
         cmd = wt.cell_command(
-            self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt"
+            self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt",
+            sequence_length=2048,
         )
         assert "--no-wandb" in cmd
 
     def test_argv_includes_run_name_with_cell_id(self):
         cmd = wt.cell_command(
-            self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt"
+            self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt",
+            sequence_length=2048,
         )
         rn_idx = cmd.index("--run-name")
         assert "lr1e-3_init2e-2" in cmd[rn_idx + 1]
@@ -121,6 +124,58 @@ class TestCellCommand:
         steps_idx = cmd.index("--total-steps")
         # 200M / (8 × 2048) = 200M / 16384 ≈ 12207
         assert int(cmd[steps_idx + 1]) == pytest.approx(12207, abs=1)
+
+
+# --------------------------------------------------------------------------- #
+# Sequence-length authoritative-source regression (P0-3 fix, 2026-05-12 audit)
+# --------------------------------------------------------------------------- #
+class TestSequenceLengthFromModelConfig:
+    """Before the P0-3 fix, cell_command hardcoded sequence_length=2048 and
+    NEVER read the model config. If wind_tunnel.yaml said context_length=4096,
+    cells would still compute total_steps assuming seq_len=2048 — wrong by 2×.
+
+    These tests prove cell_command now reads context_length from the model
+    yaml authoritatively."""
+
+    def test_sequence_length_defaults_to_model_context_length(self, tmp_path):
+        """No explicit sequence_length → reads from model_config yaml."""
+        model_yaml = tmp_path / "proxy_model.yaml"
+        model_yaml.write_text("context_length: 1024\nhidden_dim: 256\n")
+
+        cell = wt.SweepCell("c1", 1e-3, 0.02, tokens=10_000_000)
+        cmd = wt.cell_command(
+            cell, str(model_yaml), "d.yaml", "t.json", "ckpts", "log.txt",
+            micro_batch_per_device=8,
+        )
+        # total_steps = 10M / (8 * 1024) = 1220
+        steps_idx = cmd.index("--total-steps")
+        assert int(cmd[steps_idx + 1]) == pytest.approx(1220, abs=1)
+
+    def test_sequence_length_explicit_overrides_yaml(self, tmp_path):
+        """Explicit sequence_length= bypasses the yaml read (back-compat)."""
+        model_yaml = tmp_path / "proxy_model.yaml"
+        model_yaml.write_text("context_length: 1024\n")  # would give 1220
+
+        cell = wt.SweepCell("c1", 1e-3, 0.02, tokens=10_000_000)
+        cmd = wt.cell_command(
+            cell, str(model_yaml), "d.yaml", "t.json", "ckpts", "log.txt",
+            micro_batch_per_device=8,
+            sequence_length=2048,  # explicit override
+        )
+        steps_idx = cmd.index("--total-steps")
+        assert int(cmd[steps_idx + 1]) == pytest.approx(610, abs=1)
+
+    def test_missing_context_length_raises(self, tmp_path):
+        """A model yaml without context_length is a config error — we'd
+        rather error loud at sweep-launch time than silently use a default."""
+        model_yaml = tmp_path / "bad_model.yaml"
+        model_yaml.write_text("hidden_dim: 256\n")  # no context_length
+
+        cell = wt.SweepCell("c1", 1e-3, 0.02, tokens=10_000_000)
+        with pytest.raises(ValueError, match="missing required 'context_length'"):
+            wt.cell_command(
+                cell, str(model_yaml), "d.yaml", "t.json", "ckpts", "log.txt",
+            )
 
 
 # --------------------------------------------------------------------------- #

@@ -50,12 +50,26 @@ class LoopConfig:
 
 
 # State keys we persist + restore. Updated to match the post-mesh state schema.
+#
+# 2026-05-12 audit P0-4 fix: `data_position` is now persisted so the data
+# stream's corpus position survives pod restarts. For
+# `SequentialCorpusPositions`-tracked streams, this is the cumulative token
+# count the data iterator has emitted. The loop reads this at resume time
+# and reconstructs the data cursor before iterating; without it, the model
+# resumes at step N but the data stream restarts at offset 0, breaking
+# distillation's corpus-position alignment.
+#
+# Caveat: HFStreamLoader streaming reads don't expose a shard cursor we
+# can checkpoint. The current pattern is "skip_first N docs" which is O(N)
+# at resume time. The proper long-term fix is pre-tokenized packed shards
+# with random-access by token offset — tracked as Phase B work.
 _PERSIST_KEYS = (
     "trainable_variables",
     "non_trainable_variables",
     "opt_state",
     "step",
     "lr_recovery_multiplier",
+    "data_position",
 )
 
 
@@ -81,9 +95,12 @@ def run(
     """
     ckpt = CheckpointManager(checkpoint_config)
 
-    # Ensure recovery multiplier is present.
+    # Ensure recovery multiplier + data_position are present (P0-4 fix).
+    # data_position tracks cumulative tokens emitted by the data iterator;
+    # restored from checkpoint on resume so the corpus cursor doesn't reset.
     state = dict(initial_state)
     state.setdefault("lr_recovery_multiplier", 1.0)
+    state.setdefault("data_position", 0)
 
     # Resume from latest complete checkpoint if any.
     resume_step = ckpt.latest_complete_step()
@@ -91,8 +108,32 @@ def run(
         log.info("resuming_from_checkpoint", step=resume_step)
         restored = ckpt.restore(resume_step)
         state = {**state, **restored, "step": resume_step}
+        # Old checkpoints may not have data_position — default to 0 with a
+        # WARN so the operator knows the data stream will restart from the
+        # beginning (model + opt_state still resume correctly, just the
+        # data alignment is reset).
+        if "data_position" not in restored:
+            log.warning(
+                "checkpoint_missing_data_position",
+                step=resume_step,
+                msg="restored checkpoint predates P0-4 fix; data stream "
+                    "will restart from offset 0. Distillation corpus-position "
+                    "alignment may be off until next checkpoint cycle."
+            )
+            state["data_position"] = 0
     else:
         log.info("starting_fresh", step=state.get("step", 0))
+
+    # If the decay_phase has a stateful position tracker (SequentialCorpusPositions),
+    # seed it with the restored data_position so the next batch's corpus
+    # offset is correct.
+    if decay_phase is not None and getattr(decay_phase, "position_fn", None) is not None:
+        if hasattr(decay_phase.position_fn, "_pos"):
+            decay_phase.position_fn._pos = int(state["data_position"])
+            log.info(
+                "decay_phase_position_resumed",
+                position=int(state["data_position"]),
+            )
 
     target_steps = loop_config.total_steps
     recovery_count = 0
@@ -116,6 +157,37 @@ def run(
 
         state, metrics = train_step_fn(state, batch)
         loss = float(metrics["loss"])
+        nan_skipped = float(metrics.get("nan_skipped", 0.0))
+
+        # P0-4 fix: bump data_position by the number of tokens this batch
+        # consumed (batch_size × seq_len). If the decay_phase position_fn
+        # is the stateful SequentialCorpusPositions, it already tracks its
+        # own _pos, so we read from there to stay in sync; otherwise we
+        # derive from input_ids shape.
+        if decay_phase is not None and getattr(decay_phase, "position_fn", None) is not None:
+            pf = decay_phase.position_fn
+            if hasattr(pf, "_pos"):
+                state["data_position"] = int(pf._pos)
+        else:
+            ids = batch.get("input_ids")
+            if ids is not None and hasattr(ids, "shape") and len(ids.shape) == 2:
+                state["data_position"] = int(state["data_position"]) + int(ids.shape[0]) * int(ids.shape[1])
+
+        # If train_step atomically reverted because of non-finite loss/grads
+        # (P0-1 audit fix), DO NOT feed the NaN loss into the watchdog — it
+        # would trigger a phantom spike-recovery. The state is already
+        # unchanged from before this batch, so the right behavior is to
+        # log + advance and let the next batch try.
+        if nan_skipped > 0.0:
+            log.warning(
+                "nan_batch_skipped",
+                step=int(state["step"]),
+                loss=loss,
+                msg="train_step atomically reverted params + opt_state; "
+                    "batch dropped. If this fires repeatedly, dump batch "
+                    "provenance and investigate the data source.",
+            )
+            continue
 
         # Watchdog ───────────────────────────────────────────────────────────
         if watchdog is not None:

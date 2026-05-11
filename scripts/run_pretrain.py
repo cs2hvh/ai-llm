@@ -292,28 +292,101 @@ def batch_pairs(
     micro_batch: int,
     sequence_length_minus_one: int,
 ):
-    """Group input/label pairs into micro-batches as numpy arrays."""
+    """Group (input, label, segment_ids, loss_mask) tuples into micro-batches.
+
+    Yields ``{"input_ids", "labels", "segment_ids", "loss_mask"}`` dicts of
+    numpy int32 arrays with shape ``[micro_batch, sequence_length_minus_one]``.
+
+    Accepts either:
+      - 4-tuples ``(input, label, segment_ids, loss_mask)`` from the
+        post-2026-05-12 make_input_label_pairs (P0-2 fix).
+      - 2-tuples ``(input, label)`` from older callers — segment_ids
+        defaults to all-zeros (single segment per pack) and loss_mask
+        defaults to all-ones (no boundary masking).
+    """
     import numpy as np
 
     inputs: list[list[int]] = []
     labels: list[list[int]] = []
-    for inp, lab in pairs:
+    seg_ids: list[list[int]] = []
+    masks: list[list[int]] = []
+    for item in pairs:
+        if len(item) == 4:
+            inp, lab, sid, msk = item
+        else:
+            inp, lab = item
+            sid = [0] * len(inp)
+            msk = [1] * len(inp)
         inputs.append(inp)
         labels.append(lab)
+        seg_ids.append(sid)
+        masks.append(msk)
         if len(inputs) == micro_batch:
             yield {
                 "input_ids": np.asarray(inputs, dtype=np.int32),
                 "labels": np.asarray(labels, dtype=np.int32),
+                "segment_ids": np.asarray(seg_ids, dtype=np.int32),
+                "loss_mask": np.asarray(masks, dtype=np.int32),
             }
             inputs.clear()
             labels.clear()
+            seg_ids.clear()
+            masks.clear()
 
 
 # --------------------------------------------------------------------------- #
 # Model + optimizer init
 # --------------------------------------------------------------------------- #
-def init_model_and_optimizer(model_cfg: ModelConfig, opt_cfg: OptimizerConfig, total_steps: int):
-    """Construct model, build it (allocate weights), wire optimizer."""
+def resolve_wsd_schedule_params(
+    peak_lr: float,
+    total_steps: int,
+    *,
+    lr_schedule_cfg: dict | None = None,
+) -> dict:
+    """Resolve WSD schedule parameters from yaml + sensible defaults.
+
+    Returns dict with keys: ``warmup_steps``, ``decay_steps``, ``stable_steps``,
+    ``end_lr``. Pure function — testable without JAX/Keras.
+
+    P0 audit (2026-05-12): this used to be hardcoded inline in
+    ``init_model_and_optimizer``, silently overriding yaml lr_schedule.
+    Factored out so it can be unit-tested.
+
+    Defaults when fields are absent:
+        warmup_steps = min(2000, total_steps // 10)
+        decay_fraction = 0.15
+        end_lr_ratio = 0.1
+    """
+    schedule_cfg = lr_schedule_cfg or {}
+    default_warmup = max(1, min(2000, total_steps // 10))
+    warmup_steps = int(schedule_cfg.get("warmup_steps", default_warmup))
+    decay_fraction = float(schedule_cfg.get("decay_fraction", 0.15))
+    end_lr_ratio = float(schedule_cfg.get("end_lr_ratio", 0.1))
+    decay_steps = max(1, int(total_steps * decay_fraction))
+    stable_steps = max(0, total_steps - warmup_steps - decay_steps)
+    end_lr = peak_lr * end_lr_ratio
+    return {
+        "warmup_steps": warmup_steps,
+        "decay_steps": decay_steps,
+        "stable_steps": stable_steps,
+        "end_lr": end_lr,
+    }
+
+
+def init_model_and_optimizer(
+    model_cfg: ModelConfig,
+    opt_cfg: OptimizerConfig,
+    total_steps: int,
+    *,
+    lr_schedule_cfg: dict | None = None,
+):
+    """Construct model, build it (allocate weights), wire optimizer.
+
+    ``lr_schedule_cfg`` is the optional yaml `lr_schedule` block. When set,
+    its fields override the hardcoded WSD defaults. P0 audit (2026-05-12)
+    flagged that this used to be ignored — pilot's configured warmup/decay
+    were silently overridden by hardcoded values.
+    """
     from myllm.model.transformer import build_model
 
     log.info("building_model", name=model_cfg.name, params_estimate=model_cfg.param_count_estimate())
@@ -321,14 +394,26 @@ def init_model_and_optimizer(model_cfg: ModelConfig, opt_cfg: OptimizerConfig, t
 
     # Warmup-Stable-Decay schedule (playbook recommendation): linear warmup,
     # then constant peak_lr through the stable phase, then linear decay over
-    # the last ~15%. Doesn't commit to total_steps upfront — any stable-phase
+    # the last fraction. Doesn't commit to total_steps upfront — any stable-phase
     # checkpoint can be cooled in 10-15% of remaining compute.
     import optax  # noqa: F811
 
-    warmup_steps = max(1, min(2000, total_steps // 10))
-    decay_steps = max(1, int(total_steps * 0.15))
-    stable_steps = max(0, total_steps - warmup_steps - decay_steps)
-    end_lr = opt_cfg.peak_lr * 0.1
+    sched = resolve_wsd_schedule_params(
+        opt_cfg.peak_lr, total_steps, lr_schedule_cfg=lr_schedule_cfg
+    )
+    warmup_steps = sched["warmup_steps"]
+    decay_steps = sched["decay_steps"]
+    stable_steps = sched["stable_steps"]
+    end_lr = sched["end_lr"]
+    log.info(
+        "lr_schedule_resolved",
+        warmup_steps=warmup_steps,
+        stable_steps=stable_steps,
+        decay_steps=decay_steps,
+        peak_lr=opt_cfg.peak_lr,
+        end_lr=end_lr,
+        source="yaml lr_schedule" if lr_schedule_cfg else "hardcoded defaults",
+    )
 
     lr_fn = optax.join_schedules(
         schedules=[
@@ -501,23 +586,58 @@ def main() -> int:
         log.info("init_std_overridden", value=args.init_std_override)
 
     micro_batch = int(data_cfg["batch"]["micro_batch_per_device"])
+
+    # P0-3 fix (2026-05-12 audit): make model_cfg.context_length authoritative
+    # for ALL sequence-length math. Previously data_cfg.batch.sequence_length
+    # and model_cfg.context_length could drift independently, causing silent
+    # corruption (RoPE tables too short for the packed sequence length, or
+    # total_steps math assuming a different seq_len than the runtime uses).
+    #
+    # Invariant: the packer produces sequences of length `context_length + 1`,
+    # because after the next-token shift in `make_input_label_pairs` the
+    # model sees exactly `context_length` tokens (which matches RoPE).
+    # So:  packed_seq_len = model_cfg.context_length + 1
+    #
+    # If data_cfg.batch.sequence_length is set explicitly, validate it
+    # matches. If unset, derive from model_cfg.context_length.
+    expected_packed_seq_len = int(model_cfg.context_length) + 1
+    yaml_packed_seq_len = data_cfg.get("batch", {}).get("sequence_length")
+    if yaml_packed_seq_len is not None:
+        if int(yaml_packed_seq_len) != expected_packed_seq_len:
+            raise ValueError(
+                f"sequence-length invariant violation:\n"
+                f"  data_cfg.batch.sequence_length = {yaml_packed_seq_len}\n"
+                f"  model_cfg.context_length       = {model_cfg.context_length}\n"
+                f"  expected (context_length + 1)  = {expected_packed_seq_len}\n"
+                f"These must match. Either edit data_cfg.batch.sequence_length "
+                f"to {expected_packed_seq_len}, or drop the field and let it "
+                f"derive from model_cfg.context_length."
+            )
+    packed_seq_len = expected_packed_seq_len  # length the packer emits
+    model_input_len = int(model_cfg.context_length)  # length the model sees
+    log.info(
+        "sequence_length_resolved",
+        packed_seq_len=packed_seq_len,
+        model_input_len=model_input_len,
+        source="model_cfg.context_length (authoritative)",
+    )
+
     # Decon report is only populated when the real data path is active +
     # decontamination is enabled in the data yaml; synthetic path leaves it
     # None and the end-of-run emit logic is a no-op.
     decon_report: DecontaminationReport | None = None
 
     if args.synthetic_data:
-        # Smoke path: bypass tokenizer + HF entirely. Derive sequence length
-        # from the model's context_length (so RoPE tables match) rather than
-        # the data config (which targets the real pretrain run).
+        # Smoke path: bypass tokenizer + HF entirely. Use the model's
+        # context_length directly — synthetic batches have shape
+        # [micro_batch, context_length] (no shift, no packer).
         from myllm.data.synthetic import make_synthetic_data_iter
 
-        seq_len = model_cfg.context_length
         eos_id = 1
         pad_id = 0
         batch_iter = make_synthetic_data_iter(
             micro_batch=micro_batch,
-            sequence_length=seq_len - 1,
+            sequence_length=model_input_len,
             vocab_size=model_cfg.vocab_size,
             n_steps=args.total_steps + 1,
             seed=args.seed,
@@ -525,7 +645,7 @@ def main() -> int:
         log.info(
             "data_pipeline_synthetic",
             micro_batch=micro_batch,
-            seq_len=seq_len - 1,
+            seq_len=model_input_len,
         )
     else:
         # Real path: tokenizer + HF stream + filters + tokenize + pack.
@@ -534,7 +654,9 @@ def main() -> int:
         verify_tokenizer_has_required(tokenizer)  # raises if anything missing
         eos_id = tokenizer.token_to_id(SpecialTokens.EOS)
         pad_id = tokenizer.token_to_id(SpecialTokens.PAD)
-        seq_len = int(data_cfg["batch"]["sequence_length"])
+        # Inject the resolved length into data_cfg so the packer reads the
+        # authoritative value (overriding any drift from yaml).
+        data_cfg.setdefault("batch", {})["sequence_length"] = packed_seq_len
 
         # R6 decontamination: build (or load) the index, then thread the
         # filter into the chain. The report accumulates per-benchmark
@@ -551,7 +673,7 @@ def main() -> int:
             decon_index=decon_index,
             decon_report=decon_report,
         )
-        batch_iter = batch_pairs(pair_iter, micro_batch, seq_len - 1)
+        batch_iter = batch_pairs(pair_iter, micro_batch, model_input_len)
 
     # Model + optimizer
     # Resolve peak_lr in priority order (2026-05-11 audit caught a bug where
@@ -573,7 +695,10 @@ def main() -> int:
     opt_cfg = OptimizerConfig(
         peak_lr=float(peak_lr_value),
     )
-    model, optimizer = init_model_and_optimizer(model_cfg, opt_cfg, total_steps=args.total_steps)
+    model, optimizer = init_model_and_optimizer(
+        model_cfg, opt_cfg, total_steps=args.total_steps,
+        lr_schedule_cfg=yaml_lr_schedule,
+    )
     state = initial_train_state(model, optimizer)
 
     # JAX mesh + sharding (data-parallel; FSDP lands later)
@@ -693,7 +818,7 @@ def main() -> int:
         "training_start",
         run_name=args.run_name,
         total_steps=args.total_steps,
-        seq_len=seq_len,
+        seq_len=model_input_len,
         micro_batch=micro_batch,
     )
 

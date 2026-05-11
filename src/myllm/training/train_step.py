@@ -72,8 +72,20 @@ def make_train_step(
         non_trainable: Any,
         batch: dict[str, Any],
     ) -> tuple[Any, tuple[dict[str, Any], Any]]:
+        # P0-2 fix (2026-05-12 audit): thread segment_ids into the model
+        # call so the attention layer can build a same-document causal
+        # mask. Without this, packed documents attend across boundaries
+        # despite the model+layers code "supporting" segment_ids — the
+        # data path simply wasn't passing it. The model's call signature
+        # accepts `segment_ids=None`, which preserves back-compat for
+        # synthetic-data batches that don't carry the field.
+        segment_ids = batch.get("segment_ids")
+        loss_mask = batch.get("loss_mask")
+        call_kwargs = {}
+        if segment_ids is not None:
+            call_kwargs["segment_ids"] = segment_ids
         logits, updated_non_trainable = model.stateless_call(
-            trainable, non_trainable, batch["input_ids"]
+            trainable, non_trainable, batch["input_ids"], **call_kwargs
         )
         # Teacher data is optional. When absent (stable phase) we get
         # plain CE+z-loss; when present (decay phase) we get the mixed
@@ -90,6 +102,7 @@ def make_train_step(
             temperature=distill_temperature,
             ignore_index=ignore_index,
             z_loss_coef=z_loss_coef,
+            loss_mask=loss_mask,
         )
         return loss, (metrics, updated_non_trainable)
 
@@ -107,15 +120,32 @@ def make_train_step(
             batch,
         )
 
-        # NaN-skip: if loss or any gradient is non-finite, skip the optimizer
-        # update entirely. This makes training robust to occasional bad batches
-        # (poisoned doc, rare-token underflow, etc.) — gradient clipping does
-        # NOT help here because the gradients are already NaN/Inf before clip
-        # runs, so clipping propagates them through. Industry-standard pattern.
+        # Atomic NaN-skip (2026-05-12 audit P0-1 fix).
         #
-        # When skipped, the step counter still advances (consuming the bad
-        # batch from the data iterator) but trainable_variables + opt_state
-        # are unchanged, so the model survives the spike.
+        # If loss or any gradient is non-finite, we want the optimizer update
+        # to be a no-op: params unchanged, optimizer state (m, v, step
+        # counter) unchanged, non_trainable_variables unchanged. The 2026-05-11
+        # version of this code only zeroed gradients, which is NOT sufficient:
+        # AdamW's decoupled weight decay applies `lr * wd * params` regardless
+        # of gradient magnitude, and the optimizer's internal step counter
+        # (used for bias correction) advances inside `optimizer.update()`.
+        # So a "skipped" batch with the old code would still drift params and
+        # advance bias-correction denominators.
+        #
+        # The fix: always compute the candidate new state (params + opt_state +
+        # non_trainable), then `jnp.where` on each leaf to pick the old state
+        # when the batch was bad. This is atomic — no half-update gets through.
+        #
+        # The data-step counter (`state["step"]`) DOES advance even on a
+        # skipped batch, so we don't get stuck replaying the same bad batch
+        # forever. We track skip count via the `nan_skipped` metric so the
+        # loop can log + alarm on it.
+        #
+        # Note on `non_trainable_variables` in this codebase: it contains
+        # RoPE cos/sin tables (read-only constants). RMSNorm has no running
+        # mean/var (unlike BatchNorm). So the per-leaf where on
+        # non_trainable is a safe no-op today, but the pattern would also
+        # correctly revert running stats if someone later adds BatchNorm.
         loss_finite = jnp.isfinite(loss)
         grads_finite = jax.tree.reduce(
             lambda a, b: a & b,
@@ -124,31 +154,44 @@ def make_train_step(
         )
         step_ok = loss_finite & grads_finite
 
-        # Zero out gradients on bad-batch steps so the optimizer's m/v moments
-        # stay clean. This is equivalent to optimizer.update on g=0.
-        safe_grads = jax.tree.map(
-            lambda g: jnp.where(step_ok, g, jnp.zeros_like(g)),
-            grads,
-        )
-
-        updates, new_opt_state = optimizer.update(
-            safe_grads, state["opt_state"], state["trainable_variables"]
+        # Build candidate new state assuming the batch is good.
+        # We feed `grads` (not zeroed grads) into the optimizer so that the
+        # candidate state reflects what a normal update WOULD do; whether
+        # that gets accepted is decided by the `step_ok` where below.
+        updates, candidate_opt_state = optimizer.update(
+            grads, state["opt_state"], state["trainable_variables"]
         )
         # Apply the watchdog recovery multiplier on top of the optimizer
         # schedule. lr_recovery_multiplier is 1.0 in normal training and gets
         # halved by the loop on each hard-spike recovery.
         mult = state["lr_recovery_multiplier"]
         updates = jax.tree.map(lambda u: u * mult, updates)
-        new_trainable = optax.apply_updates(state["trainable_variables"], updates)
+        candidate_trainable = optax.apply_updates(
+            state["trainable_variables"], updates
+        )
+
+        # Atomic select: every leaf in (trainable, non_trainable, opt_state)
+        # takes the candidate value when step_ok, else reverts to the old
+        # value. `jnp.where` is leafwise; the broadcasting is fine because
+        # step_ok is a scalar boolean.
+        def _pick(new_leaf, old_leaf):
+            return jnp.where(step_ok, new_leaf, old_leaf)
+
+        new_trainable = jax.tree.map(_pick, candidate_trainable, state["trainable_variables"])
+        new_non_trainable_final = jax.tree.map(_pick, new_non_trainable, state["non_trainable_variables"])
+        new_opt_state = jax.tree.map(_pick, candidate_opt_state, state["opt_state"])
+
         new_state = {
             "trainable_variables": new_trainable,
-            "non_trainable_variables": new_non_trainable,
+            "non_trainable_variables": new_non_trainable_final,
             "opt_state": new_opt_state,
-            "step": state["step"] + 1,
+            "step": state["step"] + 1,  # data step advances on every call
             "lr_recovery_multiplier": state["lr_recovery_multiplier"],
         }
-        # Expose `nan_skipped` (0/1) in metrics so the loop can count + log
-        # how many bad batches we silently dropped.
+        # Expose `nan_skipped` (0.0/1.0) in metrics so the loop can count +
+        # log how many bad batches we silently reverted. The reported `loss`
+        # is still the raw NaN (informational); the loop should NOT feed NaN
+        # losses into the watchdog (it would trigger a phantom spike).
         metrics_out = {
             "loss": loss,
             "nan_skipped": jnp.where(step_ok, jnp.float32(0.0), jnp.float32(1.0)),

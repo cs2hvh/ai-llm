@@ -353,6 +353,32 @@ def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
 import bisect
 
 
+def _bf16_bits_to_f32(u16: Any) -> Any:
+    """Reinterpret a uint16 array of bfloat16 bit patterns as float32.
+
+    bfloat16 is a truncated IEEE 754 single-precision float — the high 16
+    bits of the f32 layout. To bitcast back to f32:
+        u32 = (u16 << 16)    # place bf16 bits in the high half
+        f32 = bitcast(u32)
+
+    Why this exists:
+        The cache stores teacher logits as raw bf16 bits packed into uint16
+        (pyarrow has no first-class bf16 column type). If the consumer
+        skips this conversion and divides those uint16 ints by temperature,
+        the softmax math is meaningless — bf16(1.0) is the uint16 value
+        16256, not 1.0. The audit caught exactly that bug. This helper
+        makes the reader's return type unambiguous: real float32 always.
+    """
+    import numpy as np
+
+    u16 = np.asarray(u16, dtype=np.uint16)
+    # Shift the bf16 bits into the high 16 bits of a uint32, then bitcast
+    # to float32. Equivalent to ml_dtypes.bfloat16 view + .astype(float32),
+    # but avoids the optional ml_dtypes dependency.
+    u32 = u16.astype(np.uint32) << np.uint32(16)
+    return u32.view(np.float32)
+
+
 class TeacherCacheReader:
     """Random-access reader over a single teacher's logit cache.
 
@@ -361,9 +387,10 @@ class TeacherCacheReader:
 
     Lookups:
         Given a 1-D array of corpus token positions ``pos[N]``, returns a
-        pair of arrays ``(logits[N, K], indices[N, K])`` where ``K`` is
-        the cache's stored top-K. Logits are uint16 (bfloat16 bit-pattern);
-        consumers reinterpret as bfloat16 in their training step.
+        pair of arrays ``(logits[N, K] float32, indices[N, K] uint32)``.
+        The on-disk format stores logits as bf16 bit patterns packed into
+        uint16; ``get_topk`` reinterprets them as float32 before return.
+        Consumers should never see the uint16 representation.
 
     Memory model:
         - Shards are mmap'd on first access via ``pyarrow.memory_map`` — no
@@ -432,11 +459,16 @@ class TeacherCacheReader:
     # Random-access read
     # ------------------------------------------------------------------- #
     def get_topk(self, positions: Any) -> tuple[Any, Any]:
-        """For each position in ``positions[N]`` return ``(logits[N, K], indices[N, K])``.
+        """For each position in ``positions[N]`` return ``(logits[N, K] float32, indices[N, K] uint32)``.
 
         ``positions`` must be 1-D integer-typed numpy array. Order of return
         matches order of input. Raises ``ValueError`` if any position lies
         outside the cache coverage.
+
+        Logits are float32 in the return value even though the on-disk
+        format stores bf16 bit patterns in uint16 — the conversion happens
+        inside this method via ``_bf16_bits_to_f32``. Consumers can pass
+        the returned array directly into a KL loss without further casting.
         """
         import numpy as np
         import pyarrow as pa
@@ -447,7 +479,7 @@ class TeacherCacheReader:
         n = positions.shape[0]
         if n == 0:
             return (
-                np.empty((0, self.top_k), dtype=np.uint16),
+                np.empty((0, self.top_k), dtype=np.float32),
                 np.empty((0, self.top_k), dtype=np.uint32),
             )
 
@@ -462,7 +494,9 @@ class TeacherCacheReader:
                 )
             shard_idx[i] = si
 
-        out_logits = np.empty((n, self.top_k), dtype=np.uint16)
+        # Accumulate uint16 bf16-bits first (cheap), then bitcast → float32
+        # once at the end. Doing it once avoids per-shard bitcast overhead.
+        out_logits_u16 = np.empty((n, self.top_k), dtype=np.uint16)
         out_indices = np.empty((n, self.top_k), dtype=np.uint32)
 
         unique_shards = np.unique(shard_idx)
@@ -478,14 +512,17 @@ class TeacherCacheReader:
             logits_col = table.column("logits").take(take)
             indices_col = table.column("indices").take(take)
 
-            # FixedSizeBinaryArray → uint16 view.
+            # FixedSizeBinaryArray → uint16 view (still bf16 bit pattern).
             raw = b"".join(logits_col.to_pylist())
-            logits_arr = np.frombuffer(raw, dtype=np.uint16).reshape(-1, self.top_k)
-            out_logits[mask] = logits_arr
+            logits_arr_u16 = np.frombuffer(raw, dtype=np.uint16).reshape(-1, self.top_k)
+            out_logits_u16[mask] = logits_arr_u16
 
             indices_arr = np.array(indices_col.to_pylist(), dtype=np.uint32)
             out_indices[mask] = indices_arr
 
+        # Reinterpret bf16 bit patterns as float32 at the boundary.
+        # See _bf16_bits_to_f32 docstring for why this matters.
+        out_logits = _bf16_bits_to_f32(out_logits_u16)
         return out_logits, out_indices
 
     # ------------------------------------------------------------------- #

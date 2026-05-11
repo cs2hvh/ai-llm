@@ -125,6 +125,19 @@ def build_grid(
 # --------------------------------------------------------------------------- #
 # Cell launch helpers
 # --------------------------------------------------------------------------- #
+def _read_context_length(model_config_path: str) -> int:
+    """Read the proxy model's context_length from its yaml. Authoritative
+    source for seq-len math — see P0-3 fix in run_pretrain.py."""
+    import yaml as _yaml
+    with open(model_config_path) as f:
+        cfg = _yaml.safe_load(f)
+    if "context_length" not in cfg:
+        raise ValueError(
+            f"{model_config_path}: missing required 'context_length' field"
+        )
+    return int(cfg["context_length"])
+
+
 def cell_command(
     cell: SweepCell,
     model_config: str,
@@ -133,9 +146,21 @@ def cell_command(
     checkpoint_root: str,
     log_path: str,
     micro_batch_per_device: int = 8,
-    sequence_length: int = 2048,
+    sequence_length: int | None = None,
 ) -> list[str]:
-    """Return the argv list for running one cell via scripts/run_pretrain.py."""
+    """Return the argv list for running one cell via scripts/run_pretrain.py.
+
+    `sequence_length` defaults to the model config's `context_length` (the
+    authoritative source post 2026-05-12 audit). Passing it explicitly is
+    allowed but must match; mismatch is detected at run_pretrain.py startup.
+    """
+    # P0-3 fix: read the actual model context_length so total_steps math
+    # matches what the runtime will use. Previously this defaulted to 2048
+    # but the runtime used data_cfg.batch.sequence_length (often 4096),
+    # meaning cells trained on ~2× the planned tokens per cell.
+    if sequence_length is None:
+        sequence_length = _read_context_length(model_config)
+
     # tokens per step = micro_batch × seq_len × devices (we assume 1 device for
     # the sweep — 30M model fits comfortably on a single H100/B200).
     tokens_per_step = micro_batch_per_device * sequence_length

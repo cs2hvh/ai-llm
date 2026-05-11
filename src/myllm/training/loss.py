@@ -23,6 +23,7 @@ def cross_entropy_with_z_loss(
     *,
     ignore_index: int | None = None,
     z_loss_coef: float = 1.0e-4,
+    loss_mask: Any | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Token-level cross-entropy + z-loss.
 
@@ -32,6 +33,11 @@ def cross_entropy_with_z_loss(
         ignore_index: if set, positions equal to this value contribute 0 loss
             and 0 weight (typically the pad-token id).
         z_loss_coef: weight on the z-loss term ``mean(logsumexp(logits)^2)``.
+        loss_mask: optional ``[batch, seq]`` int/bool array. Positions with 0
+            contribute 0 loss and 0 weight. Used for intra-document boundary
+            masking (R2): we don't want to penalize the model for failing to
+            predict doc B's first token from doc A's content. AND-combined
+            with the ignore_index check if both are set.
 
     Returns:
         ``(loss, metrics_dict)``. The metrics dict contains ``ce`` and
@@ -45,8 +51,15 @@ def cross_entropy_with_z_loss(
     labels_one_hot = ops.one_hot(labels, num_classes=ops.shape(logits)[-1])
     nll = -ops.sum(labels_one_hot * log_softmax, axis=-1)  # [b, s]
 
+    # Combine ignore_index + loss_mask into a single weight tensor.
+    weight = None
     if ignore_index is not None:
         weight = ops.cast(ops.not_equal(labels, ignore_index), nll.dtype)
+    if loss_mask is not None:
+        mask = ops.cast(loss_mask, nll.dtype)
+        weight = mask if weight is None else (weight * mask)
+
+    if weight is not None:
         nll_sum = ops.sum(nll * weight)
         denom = ops.maximum(ops.sum(weight), ops.cast(1.0, weight.dtype))
         ce = nll_sum / denom
@@ -67,6 +80,7 @@ def kl_div_topk_loss(
     temperature: float = 1.0,
     ignore_index: int | None = None,
     labels: Any | None = None,
+    loss_mask: Any | None = None,
 ) -> Any:
     """KL divergence between student and teacher distributions on the
     teacher's top-K vocab positions.
@@ -120,10 +134,15 @@ def kl_div_topk_loss(
         teacher_p * (teacher_log_p - student_log_p), axis=-1
     )  # [B, S]
 
+    weight = None
     if ignore_index is not None and labels is not None:
         weight = ops.cast(
             ops.not_equal(labels, ignore_index), kl_per_position.dtype
         )
+    if loss_mask is not None:
+        mask = ops.cast(loss_mask, kl_per_position.dtype)
+        weight = mask if weight is None else (weight * mask)
+    if weight is not None:
         denom = ops.maximum(ops.sum(weight), ops.cast(1.0, weight.dtype))
         return ops.sum(kl_per_position * weight) / denom
     return ops.mean(kl_per_position)
@@ -138,6 +157,7 @@ def multi_teacher_kl_loss(
     temperature: float = 1.0,
     ignore_index: int | None = None,
     labels: Any | None = None,
+    loss_mask: Any | None = None,
 ) -> Any:
     """Average KL loss across multiple teachers.
 
@@ -169,6 +189,7 @@ def multi_teacher_kl_loss(
                 teacher_topk_indices_per_teacher[t],
                 temperature=temperature,
                 ignore_index=ignore_index,
+                loss_mask=loss_mask,
                 labels=labels,
             )
         )
@@ -192,6 +213,7 @@ def distillation_mixed_loss(
     temperature: float = 1.0,
     ignore_index: int | None = None,
     z_loss_coef: float = 1.0e-4,
+    loss_mask: Any | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Combined cross-entropy + multi-teacher KL distillation loss.
 
@@ -226,6 +248,7 @@ def distillation_mixed_loss(
         student_logits, labels,
         ignore_index=ignore_index,
         z_loss_coef=z_loss_coef,
+        loss_mask=loss_mask,
     )
 
     if teacher_topk_logits_per_teacher is None or teacher_topk_indices_per_teacher is None:
@@ -244,6 +267,7 @@ def distillation_mixed_loss(
         temperature=temperature,
         ignore_index=ignore_index,
         labels=labels,
+        loss_mask=loss_mask,
     )
 
     total = alpha * ce_total + (1.0 - alpha) * kl_total
