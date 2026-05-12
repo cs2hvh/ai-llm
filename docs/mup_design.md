@@ -1,7 +1,7 @@
-# muP / muTransfer Design — v1 (2026-05-11)
+# muP / muTransfer Design — v1 (2026-05-11, revised 2026-05-12)
 
 **Decision owner:** harshit.hv@samatva.com
-**Status:** IMPLEMENTATION IN PROGRESS. R1 from `docs/ai_research_dossier_2026-05-11.md`.
+**Status:** ✅ SHIPPED (model multipliers + per-param LR via `optax.multi_transform` + Proxy A sweep wired). Proxy B 300M transfer validation pending. R1 from `docs/ai_research_dossier_2026-05-11.md`.
 
 This doc captures the design and math for adding **Maximal Update
 Parameterization (muP)** to MyLLM. The goal is **zero-shot hyperparameter
@@ -42,13 +42,18 @@ W_base   = config.mup.base_width        (e.g., 256 — the width at which we
 m        = W_target / W_base            ("width multiplier")
 ```
 
-For our planned configs:
+For our current configs (`mup.base_width: 256` throughout):
 
-| Config | hidden_dim | width_mult vs base=256 |
-|---|---|---|
-| Wind tunnel (30M proxy) | 384 | 1.5 |
-| Pilot 250M | 768 | 3.0 |
-| Base 1B | 2048 | 8.0 |
+| Config | hidden_dim | width_mult vs base=256 | Param count |
+|---|---|---|---|
+| Wind-tunnel **Proxy A** (`configs/wind_tunnel.yaml`) | 384 | 1.5 | ~67M |
+| Wind-tunnel **Proxy B** (`configs/wind_tunnel_b.yaml`) | 1024 | 4.0 | ~300M |
+| Pilot (`configs/pilot_250m.yaml`) | 1024 | 4.0 | ~250M |
+| Base 1B (`configs/base_1b.yaml`) | 2048 | 8.0 | ~1.24B |
+
+Proxy B was added 2026-05-12 per external reviewer's recommendation: validate
+that the LR/init optimum found on Proxy A actually transfers as predicted
+**before** committing to the 1B base run (which costs $11-25K).
 
 ### Change 1: Attention output multiplier
 
@@ -103,15 +108,16 @@ empirically equivalent at our scale band (per EleutherAI ablations).
 
 ## The wind-tunnel sweep — how we actually use muP
 
-Once the three multipliers + per-param-LR are in place:
+Once the three multipliers + per-param-LR are in place (✅ done):
 
-1. Build a **30M proxy model**: `hidden=384, layers=8, ffn=1536, n_heads=6, n_kv=2, head_dim=64, vocab=131072, context=2048`. Param count ~30M.
-2. Sweep over **5-10 LR values** (e.g., 5e-4 → 8e-3, log-spaced) × **2 init scales** (0.01, 0.02) × **2 schedule shapes** (constant + cosine warmup).
-3. Each sweep config trains for **1 B tokens** on the 30M proxy. Cost: ~$200-300 per cell, ~$2-3K for full sweep.
-4. Pick the LR / init that gives the lowest validation loss on a held-out subset of the pretrain mix.
-5. **Apply those exact values to pilot 250M (`mup.base_width=256`, `m=3`) and base 1B (`m=8`)** — no further tuning.
+1. **Proxy A** (`configs/wind_tunnel.yaml`): hidden=384, width_mult=1.5, ~67M params, context 2048.
+2. Sweep over **5 LR values × 2 init scales = 10 cells** (see `scripts/wind_tunnel_sweep.py` + `tests/test_wind_tunnel.py`).
+3. Each cell trains for **200M tokens** (dropped from initial 1B plan per μP literature — 200M is enough to see a clean U-curve). ~$3-5/cell, ~$30-50 total sweep.
+4. Pick the LR / init that gives the lowest end-loss.
+5. **Proxy B** (`configs/wind_tunnel_b.yaml`): width_mult=4.0, ~300M params, one cell at the chosen (LR*, init*) for 500M tokens. Verifies the transfer law before pilot/base. ~$11-20.
+6. **Apply to pilot 250M (m=4) and base 1B (m=8)** — no further tuning.
 
-The "zero-shot transfer" claim is that the LR which is optimal at 30M is
+The "zero-shot transfer" claim is that the LR which is optimal at 67M is
 also optimal at 1B under muP. With SP this is false — base would need its
 own sweep, costing 5-10× the proxy sweep at base scale (i.e. ~$10-30K).
 
@@ -138,21 +144,24 @@ Before trusting muP at the 1B base run, we verify the transfer empirically:
 If any of these three checks fail, we revert to SP and accept the LR
 misfit risk at base scale.
 
-## File touch list (this PR + follow-ups)
+## File touch list (status as of 2026-05-12)
 
-This PR (scaffolding, default-off):
-- [x] `docs/mup_design.md` ← this file
-- [x] `src/myllm/model/config.py` — add `MupConfig` optional field
-- [x] `src/myllm/model/layers.py` — accept output multipliers in `GroupedQueryAttention` and `SwiGLUFFN`; default to 1.0 (no-op)
-- [x] `src/myllm/model/transformer.py` — accept LM-head output multiplier; default 1.0
-- [x] `tests/test_mup.py` — width-invariance + scale-correctness regression tests
+All shipped:
+- [x] `docs/mup_design.md` — this file
+- [x] `src/myllm/model/config.py` — `MupConfig` with `apply_*_output_mult` ablation knobs
+- [x] `src/myllm/model/layers.py` — output multipliers in `GroupedQueryAttention` + `SwiGLUFFN`
+- [x] `src/myllm/model/transformer.py` — LM-head output multiplier
+- [x] `src/myllm/training/optim.py` — per-parameter LR scaling via `optax.multi_transform` (B1 fix: state restored as `MultiTransformState` namedtuple)
+- [x] `configs/wind_tunnel.yaml` — Proxy A (67M, width_mult=1.5)
+- [x] `configs/wind_tunnel_b.yaml` — Proxy B (300M, width_mult=4.0) — added 2026-05-12 per reviewer
+- [x] `configs/pilot_250m.yaml` + `configs/base_1b.yaml` — `mup.base_width: 256` set
+- [x] `scripts/wind_tunnel_sweep.py` — 10-cell sweep launcher (with `--peak-lr-override`, `--init-std-override`, `--micro-batch-override`)
+- [x] `tests/test_mup.py`, `tests/test_wind_tunnel.py` — width-invariance + sweep regression tests
 
-Follow-up PR (active muP):
-- [ ] `src/myllm/training/optim.py` — per-parameter LR scaling via Optax `multi_transform`
-- [ ] `configs/wind_tunnel.yaml` — 30M proxy config
-- [ ] `scripts/wind_tunnel_sweep.py` — execute the LR/init sweep, write results
-- [ ] `tests/test_mup_optim.py` — verify LR scaling is applied per param group
-- [ ] Update `configs/pilot_250m.yaml` + `configs/base_1b.yaml` with `mup.base_width: 256`
+Pending:
+- [ ] Proxy A sweep execution (sweep terminated 2026-05-12 per user direction; pending re-launch)
+- [ ] Proxy B single-cell transfer validation
+- [ ] Pilot 250M launch using the validated (LR*, init*)
 
 ## What "best possible 1B" gets from muP specifically
 

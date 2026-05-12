@@ -1,7 +1,8 @@
 # Pilot model config — ~249M params. Phase 2.
 #
 # v1 (2026-05-10): revised after architecture review against Llama 3.2 1B,
-# SmolLM2 1.7B, Qwen 2.5 1.5B configs. See docs/architecture_review.md.
+# SmolLM2 1.7B, Qwen 2.5 1.5B configs. See docs/governance/model_card_v1.md
+# (current architecture, auto-rendered from configs).
 # v2 (2026-05-11): switched lr_schedule cosine -> WSD per playbook
 # alignment; pointed tokenizer at the production v2 SentencePiece-Unigram
 # artifact (R2-hosted); updated expected_pod to B200 as the preferred

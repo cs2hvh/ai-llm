@@ -1,5 +1,5 @@
 # Phase 2 — Pilot 250M Launch Checklist
-**Status: PREP** (Phase 1 production tokenizer training in progress; this checklist becomes actionable once it ships.)
+**Status: BLOCKED ON B2** — Phase 1 tokenizer ✅ shipped (`tokenizer/myllm-spm-unigram-131k-v2.json` in R2). Phase 2 needs the offline packed corpus (B2) before pilot can launch. See [`reviewer_qa_2026-05-12.md`](reviewer_qa_2026-05-12.md) §4 for the locked B2 design.
 
 Pilot 250M validates the **full training stack on real GPU** at small scale before committing to the 1T-token base run. Goal is *stack validation*, not a useful released model. If the loss curve is sensible, the watchdog/checkpointing pipeline survives, and the R2 mirror works, Phase 2 has succeeded — independent of final loss.
 
@@ -7,17 +7,19 @@ Pilot 250M validates the **full training stack on real GPU** at small scale befo
 
 ## Pre-flight (must all be ✓ before launch)
 
-- [ ] **Phase 1 production tokenizer shipped**
-  - `artifacts/tokenizer_v1.json` exists locally
-  - Same artifact reachable in R2 at `tokenizer/myllm-spm-unigram-131k-v2.json`
-  - SHA-256 of local and R2 versions match (verify via `boto3 head_object` + `sha256sum`)
-  - All 8 yaml validation round-trip tests pass on the production tokenizer (re-run [scripts/train_tokenizer.py](../scripts/train_tokenizer.py)'s `validate()` against it)
-  - Per-language compression numbers landed (compare against smoke v0; flag if compression got *worse* for any language despite more data)
-- [ ] **Pretrain data mixture ready**
-  - `configs/data/pretrain_mix.yaml` reviewed (already updated 2026-05-10 for math 7%, multilingual 12%, Hindi via Sangraha)
-  - Pilot uses a downsampled mix (5-10B tokens) — pretrain mix shares stay the same
-- [ ] **Sharded packed-shard generation** — sequence packing into `pyarrow` shards, written to R2 at `data/pilot_v1/shards/`
-  - Confirm shard manifest matches tokenizer SHA (training reads tokenizer-stamped shards only)
+- [x] **Phase 1 production tokenizer shipped** (2026-05-11)
+  - `artifacts/tokenizer_v1.json` present locally
+  - R2: `tokenizer/myllm-spm-unigram-131k-v2.json`
+  - SHA-256 verified
+  - 8/8 yaml validation round-trip tests pass
+- [x] **Pretrain data mixture locked** (2026-05-12)
+  - `configs/data/pretrain_mix.yaml` (FineWeb-Edu 44%, the-stack-v2 18%, Wiki 6%, pg19 5%, peS2o 6%, open-web-math 7%, stack-exchange 2%, Sangraha Hindi 4%, mc4 multilingual 8%)
+  - Decontamination index covers 11 v1-gate benchmarks
+- [ ] **B2 offline packed-shard generation** (PENDING — biggest open piece)
+  - uint32 token shards, 512M tokens/shard, `tokens.bin` + `seq_meta.arrow` + `doc_meta.parquet` + `manifest.json`
+  - Sharded CPU worker fleet (Rust tokenizers `encode_batch()`); target 5-20M tok/sec aggregate
+  - Shard manifest must include tokenizer SHA256 (so training reads tokenizer-stamped shards only)
+  - Per-source provenance carried per packed sequence (B3 schema, baked into seq_meta)
 - [ ] **W&B project + run name** set: project `myllm`, run `pilot-250m-v1-<date>`
 - [ ] **R2 checkpoint path** decided: `s3://llm-data/checkpoints/pilot-250m-v1/`
 - [ ] **Credentials rotated** (RunPod, HF, W&B, R2) — pasted-in-chat creds are still active in `.env`. Rotate before booking a multi-day pod.

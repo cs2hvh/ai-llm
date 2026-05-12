@@ -1,6 +1,7 @@
 # Math Strategy for MyLLM
 
-**Status:** v0.1, locked 2026-05-10. Revise after Phase 5.
+**Status:** v0.2, revised 2026-05-12 (proof-pile-2 dropped, MathPile license re-flagged).
+Original v0.1 locked 2026-05-10. Revise again after Phase 5.
 
 Math is the single biggest quality differentiator between modern small LLMs
 (SmolLM2, Qwen 2.5, Phi-3.5) and prior-generation small models. The recipe
@@ -12,15 +13,20 @@ handles math across the full lifecycle.
 
 ### Pretraining (open licenses)
 
-| Dataset | License | Description | Approx tokens |
-|---|---|---|---|
-| `open-web-math/open-web-math` | ODC-BY | Web math, deduplicated | ~14B |
-| `EleutherAI/proof-pile-2` | mixed permissive | arXiv math, formal math, math web | ~55B |
-| `MathPile` | CC-BY-NC-SA | Curated math web + arXiv | ~9B |
-| `bigcode/the-stack-v2` (math-heavy subset) | permissive | Numerical-method code | varies |
-| `Skywork/Skywork-OR1-RL-Data` (subset) | research-friendly | RL-friendly math problems | varies |
+| Dataset | License | Description | Approx tokens | Status in v1 mix |
+|---|---|---|---|---|
+| `open-web-math/open-web-math` | ODC-BY | Web math, deduplicated | ~14B | ✅ 7% of pretrain (absorbs proof-pile-2's slot) |
+| `bigcode/the-stack-v2` (math-heavy subset) | BigCode Open RAIL-M | Numerical-method code | varies | ✅ 18% of pretrain (general code; math share emerges from filtering) |
+| `Skywork/Skywork-OR1-RL-Data` (subset) | research-friendly | RL-friendly math problems | varies | ⏳ deferred to Phase 4 (post-training RL) |
 
-Total available math pretraining: ~80B tokens of high-quality, permissively-licensed material. Plenty for a 1B model.
+#### Excluded from v1 pretrain (with reason)
+
+| Dataset | License | Why excluded |
+|---|---|---|
+| `EleutherAI/proof-pile-2` | mixed permissive | **DROPPED PERMANENTLY** 2026-05-12 after 4 separate loader-script failures (zstd decompression mid-stream). The arXiv math + formal math slice is partly recovered via open-web-math's CommonCrawl pipeline. |
+| `MathPile` | **CC-BY-NC-SA** | **License-incompatible** with our Apache-2.0 release target — the NonCommercial clause forbids derivative commercial use; ShareAlike would force downstream licensing. Re-evaluate only if the project's output license posture changes. |
+
+Total available math pretraining: ~14B from open-web-math (load-bearing source) plus the math-leaning slice that emerges naturally from the-stack-v2. Less than the original ~80B sketch, but sufficient for a 1B target after Phase 2 pilot validates the recipe.
 
 ### SFT (instruction-tuned math)
 

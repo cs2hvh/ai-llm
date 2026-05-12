@@ -3,7 +3,7 @@
 # v1 (2026-05-10): revised to match the Llama 3.2 1B proven recipe exactly.
 # Sovereignty is about owning tokenizer + weights + data, not about a bespoke
 # architecture. Use a known-good shape; iterate in v2 if pilot motivates it.
-# See docs/architecture_review.md.
+# See docs/governance/model_card_v1.md (auto-rendered from this file).
 #
 # v2 (2026-05-11): switched lr_schedule cosine -> WSD to match playbook U5
 # (SmolLM2 / MiniCPM standard) and the pilot config. Caught by research

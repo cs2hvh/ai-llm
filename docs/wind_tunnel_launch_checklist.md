@@ -1,9 +1,11 @@
 # Wind-Tunnel Sweep — Launch Checklist
-**Status: READY** (sweep script + tests landed 2026-05-11; awaiting pod time.)
+**Status: SWEEP TERMINATED 2026-05-12 PM** (per user direction; pod stopped). Proxy B 300M transfer validation now the gate before pilot launch. Re-launch of Proxy A sweep pending.
 
-The wind-tunnel sweep is the **last code-side gate before Phase 2 pilot 250M**. It runs a 10-cell grid (5 LRs × 2 init_stds) against a 30M proxy model to find the optimal (peak_lr, init_std) under muP. Per the muP transfer law, the optimum at 30M transfers zero-shot to pilot 250M (width_mult=3) and base 1B (width_mult=8).
+The wind-tunnel sweep is the **last code-side gate before Phase 2 pilot 250M**. It runs a 10-cell grid (5 LRs × 2 init_stds) against a 67M proxy model (`configs/wind_tunnel.yaml`) to find the optimal (peak_lr, init_std) under muP. Per the muP transfer law, the optimum at the 67M proxy transfers zero-shot to pilot 250M (width_mult=4) and base 1B (width_mult=8).
 
-**Budget**: ~$40-50 total (~$4.40/cell × 10 cells) on 1× H200 SXM secure cloud at $3.99/hr. Wall time ~1 hr/cell sequential = ~11 hr total, or ~1 hr if parallelized across 10 pods.
+**Reviewer addition (2026-05-12):** before trusting the transfer to the 1B base run, validate via Proxy B (300M, width_mult=4 — same width_mult as pilot) at the chosen (LR*, init*). One cell, 500M tokens, ~$11-20. See `configs/wind_tunnel_b.yaml`.
+
+**Budget**: ~$30-50 for Proxy A (10 cells × 200M tokens each, ~$3-5/cell on H200 SXM) + ~$11-20 for Proxy B single cell. Wall time per cell ~1 hr on H200 SXM at $3.99/hr.
 
 **SKU choice (2026-05-11)**: B200 is **Unavailable** on Secure Cloud per the RunPod dashboard. H200 SXM (141 GB HBM3) is **Low** availability at $3.99/hr — same throughput class as B200, ~33% cheaper, and currently grabbable. Use this. Verified live via `runpod.get_gpu("NVIDIA H200")`.
 

@@ -1,13 +1,12 @@
-# Teacher Logit Cache Binary Format — v1 (2026-05-11)
+# Teacher Logit Cache Binary Format — v1 (2026-05-11, revised 2026-05-12)
 
 This doc specifies the on-disk format used by `scripts/cache_teacher_logits.py`
-(to be written in the next R0 PR) and consumed by the future
-`src/myllm/data/teacher_cache.py` reader.
+and consumed by `src/myllm/data/teacher_cache.py` (both ✅ shipped).
 
-**Why this matters:** the cache will hold ~14 TB of teacher logit data
-across 3 teachers, mirrored to R2. Getting the format right *now* — before
-we generate the cache — avoids re-running the (~$15K) caching pipeline
-later. Designed for:
+**Why this matters:** the cache will hold ~7.2 TB (canary, 1 teacher) or
+~14.4 TB (production, 2 teachers) of teacher logit data, mirrored to R2.
+Getting the format right *now* — before we generate the cache — avoids
+re-running the (~$5-15K) caching pipeline later. Designed for:
 
 1. **Fast random access** during training. Each batch's positions get
    their cached top-K via a single seek + read per shard.
@@ -114,69 +113,63 @@ without excessive disk thrashing.
 
 ## Storage planning
 
+Teacher plan locked 2026-05-12 (see `docs/teacher_distillation_strategy.md`):
+DeepSeek-V4-Pro-Base (primary) + Olmo-3-32B (secondary, production-only after canary).
+
 | Teacher | Tokens cached | K | Bytes/position | Total per teacher |
 |---|---|---|---|---|
 | DeepSeek-V4-Pro-Base | 150 B | 8 | 8×(2+4)=48 | **7.2 TB** |
-| Qwen 3.6-27B | 150 B | 8 | 48 | **7.2 TB** |
-| Mistral-Medium-3.5-128B | 150 B | 8 | 48 | **7.2 TB** |
-| **Combined** | — | — | — | **21.6 TB on R2** |
+| Olmo-3-1125-32B | 150 B | 8 | 48 | **7.2 TB** |
 
-R2 storage cost: $15/TB-month → ~$325/month while training is active.
-Negligible vs the ~$60-90K Phase 3 training cost.
+**Phase 3 canary (1 teacher): ~7.2 TB on R2.**
+**Phase 3 production (2 teachers after canary): ~14.4 TB on R2.**
 
-(My earlier estimate of "7 TB total" was wrong — I forgot to multiply by
-both logit *value* and *index*. The correct figure is ~21.6 TB. Still
-nowhere near a budget concern.)
+R2 storage cost: $15/TB-month → ~$110-220/month while training is active.
+Negligible vs the ~$11-25K Phase 3 training cost.
+
+### Teachers excluded from v1 (with reason)
+
+| Teacher | Why excluded |
+|---|---|
+| Mistral-Medium-3.5-128B | "Modified MIT" license with $20M revenue-cap clause on derivatives (would be a perpetual time-bomb on our weights). Dropped 2026-05-12. |
+| Qwen3.6-27B | Multimodal with vision encoder + thinking-mode-default `<think>` traces; NOT a base text-only model. Dropped 2026-05-12. |
+| DeepSeek-V3-Base | "DeepSeek Model License" is custom non-OSI; redundant with V4-Pro anyway. |
+| Llama 3.x / Llama 4 | 700M-MAU clause + naming-prefix requirement on derivatives. |
+| Gemma 2/3/4 | Gemma TOS §3.2 explicitly covers "synthetic data Outputs by Gemma" — forbidden for distillation. |
+
+See `docs/governance/license_register.md` for the full exclusion log.
 
 ## Cache-generation cost (one-time)
 
-For each teacher, we need to do a single forward pass over 150B tokens.
-Throughput depends on model size (MoE active params for DeepSeek; full
-params for the dense ones) and inference server (vLLM batched).
+For each teacher, a single forward pass over 150B tokens. Throughput
+depends on model size (MoE active params for DeepSeek; full params for
+the dense ones) and inference server (vLLM batched).
 
-| Teacher | Params | Throughput on 8× B200 (vLLM batched) | Wall time | Cost @ $40/hr |
+| Teacher | Params | Throughput on 8× B200 (vLLM batched, est.) | Wall time | Cost @ $40/hr |
 |---|---|---|---|---|
-| DeepSeek-V4-Pro-Base | 671B MoE (37B active) | ~250K tok/s | ~7 days | **~$6,700** |
-| Qwen 3.6-27B (dense) | 27B | ~500K tok/s | ~3.5 days | **~$3,300** |
-| Mistral-Medium-3.5-128B (dense) | 128B | ~175K tok/s | ~10 days | **~$9,600** |
-| **Total cache generation** | — | — | **~20 days** | **~$15-25K** |
+| DeepSeek-V4-Pro-Base | 1.6T MoE (49B active) | ~200-250K tok/s | ~7-9 days | **~$6,700-8,500** |
+| Olmo-3-1125-32B (dense) | 32B | ~400-500K tok/s | ~3.5-5 days | **~$3,300-4,800** |
+| **Phase 3 canary (DeepSeek only, 20B tokens)** | — | — | ~1 day | **~$300-500** |
+| **Phase 3 production (both, 150B each)** | — | — | ~10-14 days | **~$10-13K** |
 
-Confidence on these numbers: ±50%. The unknowns are (a) actual vLLM
-batched throughput on B200 for each model — published numbers are
-mostly on H100, (b) cluster-utilization losses, (c) whether DeepSeek's
-MoE inference scales linearly with active params or has more overhead.
-**The honest mid-range is $20K with wide error bars.**
+Confidence: ±40%. Unknowns are (a) actual vLLM batched throughput on B200
+for each model (published numbers mostly on H100), (b) cluster-utilization
+losses, (c) MoE inference overhead for DeepSeek-V4-Pro.
 
-Earlier in the project (`docs/teacher_distillation_strategy.md` v1)
-I quoted $6-10K total — that was wrong, based on the dense-37B
-extrapolation without accounting for the full 150B-token coverage. The
-$20K figure here supersedes it. **The Phase 3 total budget should be
-revised from ~$60-90K to ~$80-115K to reflect this.**
+## Canary-first plan
 
-We can reduce this cost by:
-1. **Dropping one teacher** (Mistral is the smallest marginal contributor;
-   saves $9-10K, leaves us with DeepSeek + Qwen).
-2. **Reducing decay-phase coverage** from 15% to 10% (saves ~$5K, but
-   reduces distillation effect).
-3. **Lower K** (K=4 saves a small amount; not worth it).
+Per the 2026-05-12 reviewer Q&A (`docs/reviewer_qa_2026-05-12.md` §2):
 
-I'd suggest keeping all three teachers for v1 unless the budget delta
-is a problem.
+1. **Phase 3 canary**: 1 teacher (DeepSeek-V4-Pro-Base) × 20B tokens.
+   Run matched A/B (CE-only baseline vs CE+KL) and check 8 gates including
+   style leakage + distribution drift.
+2. **Phase 3 production**: only add Olmo-3-32B after canary passes.
 
-## Decision lever: drop one teacher if budget is tight
+## File touch list (status)
 
-The marginal value of the third teacher (typically Mistral-Medium for
-EU-data diversity) is the smallest. If we want to save ~$18K of caching
-cost, drop Mistral and run with just DeepSeek + Qwen. The dossier doesn't
-provide ablations at this depth so the call is a judgment one. My
-recommendation: keep all three for v1; if quality is great and we want
-to save for v2, then drop Mistral.
-
-## File touch list (next PRs)
-
-- `scripts/cache_teacher_logits.py` — main cache-generation entrypoint
-- `src/myllm/data/teacher_cache.py` — runtime reader
-- `src/myllm/data/teacher_cache_manifest.py` — manifest read/write/validate
+- [x] `scripts/cache_teacher_logits.py` — shipped (vLLM producer stubbed; real producer in Phase C)
+- [x] `src/myllm/data/teacher_cache.py` — Arrow writer + memmap reader + manifest validation; bf16-as-uint16 round-trip (P0-5 fix)
+- [x] Manifest format with `covered_token_range` validation (fails fast if cache misses positions)
 - `tests/test_teacher_cache_format.py` — round-trip serialize/deserialize
 - `tests/test_teacher_cache_reader.py` — random-access reads from a small
   synthetic cache

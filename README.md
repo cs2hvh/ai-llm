@@ -19,7 +19,7 @@ python scripts/smoke_test_env.py
 python -m pytest
 ```
 
-GPU pods on RunPod use a different lockfile — see `requirements-gpu.txt` and `docs/phase0_bootstrap.md`.
+GPU pods on RunPod use a different lockfile — see `requirements-gpu.txt`. Pod bootstrap is automated via `scripts/bootstrap_pod.sh` (invoked by `pod_launch.sh` on first SSH).
 
 ## Layout
 

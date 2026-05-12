@@ -115,10 +115,13 @@ itemized invoices on each phase boundary.
 ## 8. Annexes referenced
 
 - `PLAN.md` — full 14-phase lifecycle plan with hard gates
-- `docs/architecture_review.md` — architecture comparison vs Llama-3.2 1B / SmolLM2 / Qwen-2.5
+- `docs/governance/model_card_v1.md` — architecture (auto-rendered from live configs); matches Llama 3.2 1B exactly
+- `docs/governance/data_card_v1.md` — training-corpus disclosure (EU AI Act format)
+- `docs/governance/license_register.md` — every dataset + teacher license with T&C acceptance log
 - `docs/playbook_alignment.md` — strategic position statement (Path B + sovereign hedges)
 - `docs/math_strategy.md` — math handling across the lifecycle
 - `docs/safety_policy.md` — refusal taxonomy v0.1
+- `docs/teacher_distillation_strategy.md` — locked teacher plan v2 (DeepSeek-V4-Pro-Base + Olmo-3-32B)
 - `configs/base_1b.yaml`, `configs/pilot_250m.yaml`, `configs/tokenizer.yaml` — locked specs
 
 ## 9. Application checklist (verify before submission)
