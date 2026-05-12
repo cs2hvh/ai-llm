@@ -15,18 +15,29 @@
 #        export HF_TOKEN=...
 #
 #   2. (Optional) override defaults:
-#        export MYLLM_CORPUS_NAME=corpus_v1            # R2 path prefix
-#        export MYLLM_SAMPLE_LIMIT_PER_SOURCE=         # cap docs/source for smoke
-#        export MYLLM_SEQUENCE_LENGTH=8192             # match model context+1
-#        export MYLLM_SEQUENCES_PER_SHARD=65536        # ~536M tokens/shard at 8192
-#        export MYLLM_DELETE_LOCAL=true                # stream-to-R2 mode
-#        export MYLLM_HF_REVISION=                     # pin HF dataset revisions
-#        export MYLLM_SOURCES="HuggingFaceFW/fineweb-edu pg19 ..."  # subset to build
+#        export MYLLM_REPO_URL=https://github.com/cs2hvh/ai-llm.git  # code source
+#        export MYLLM_REPO_BRANCH=main                # git branch to pull
+#        export MYLLM_CODE_KEY=                       # set to a tarball key
+#                                                      # if you want R2-tarball
+#                                                      # fallback instead of git
+#        export MYLLM_CORPUS_NAME=corpus_v1           # R2 path prefix
+#        export MYLLM_SAMPLE_LIMIT_PER_SOURCE=        # cap docs/source for smoke
+#        export MYLLM_SEQUENCE_LENGTH=8192            # match model context+1
+#        export MYLLM_SEQUENCES_PER_SHARD=65536       # ~536M tokens/shard at 8192
+#        export MYLLM_DELETE_LOCAL=true               # stream-to-R2 mode
+#        export MYLLM_HF_REVISION=                    # pin HF dataset revisions
+#        export MYLLM_SOURCES="HuggingFaceFW/fineweb-edu pg19 ..."  # subset
 #
-#   3. curl + bash this script:
-#        curl -fsSL https://<r2-public-or-presigned>/pod_launch_cpu.sh | bash
-#      OR if already pulled:
-#        bash pod_launch_cpu.sh
+#   3. Pull this script + run. Two ways:
+#
+#        # Recommended — clone the repo and run from there:
+#        git clone https://github.com/cs2hvh/ai-llm.git /tmp/llm-build
+#        bash /tmp/llm-build/scripts/pod_launch_cpu.sh
+#
+#        # Or one-liner via curl:
+#        curl -fsSL \
+#          https://raw.githubusercontent.com/cs2hvh/ai-llm/main/scripts/pod_launch_cpu.sh \
+#          | bash
 #
 # What it does (in order):
 #   - Installs awscli (if missing), python deps from requirements.txt
@@ -41,7 +52,12 @@
 #   - Prints a JSON summary at the end
 set -euo pipefail
 
-CODE_KEY="${MYLLM_CODE_KEY:-code/llm-build-latest.tar.gz}"
+# Code source — git clone by default (always pulls the latest commit).
+# Tarball fallback for air-gapped pods: set MYLLM_CODE_KEY to override.
+REPO_URL="${MYLLM_REPO_URL:-https://github.com/cs2hvh/ai-llm.git}"
+REPO_BRANCH="${MYLLM_REPO_BRANCH:-main}"
+CODE_KEY="${MYLLM_CODE_KEY:-}"  # blank = use git clone; set to use tarball
+
 TOKENIZER_KEY="${MYLLM_TOKENIZER_KEY:-tokenizer/myllm-spm-unigram-131k-v2.json}"
 WORKDIR="${MYLLM_WORKDIR:-/workspace/llm-build}"
 
@@ -92,12 +108,19 @@ log "aws: $(aws --version 2>&1 | head -1)"
 mkdir -p /workspace
 cd /workspace
 
-if [[ -n "${MYLLM_REPO_URL:-}" ]]; then
-    log "git-cloning from $MYLLM_REPO_URL"
+if [[ -z "$CODE_KEY" ]]; then
+    log "git-cloning $REPO_URL @ $REPO_BRANCH"
+    # apt-get is best-effort: stock RunPod images already have git.
+    command -v git >/dev/null 2>&1 || {
+        apt-get update -qq && apt-get install -y -qq git
+    }
     rm -rf "$WORKDIR"
-    git clone --depth 1 "$MYLLM_REPO_URL" "$WORKDIR"
+    git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$WORKDIR"
+    cd "$WORKDIR"
+    HEAD_SHA=$(git rev-parse HEAD)
+    log "cloned at HEAD=$HEAD_SHA"
 else
-    log "pulling code tarball $CODE_KEY from R2"
+    log "pulling code tarball $CODE_KEY from R2 (override path)"
     aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
         "s3://$S3_BUCKET/$CODE_KEY" /tmp/llm-build-code.tar.gz
     rm -rf "$WORKDIR"
