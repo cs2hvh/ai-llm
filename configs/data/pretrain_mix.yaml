@@ -31,8 +31,23 @@ sources:
     category: web
 
   # --- Code (18%) ----------------------------------------------------------
-  # T&C ACCEPTED 2026-05-11.
-  - dataset: bigcode/the-stack-v2
+  # 2026-05-12 SWAP: bigcode/the-stack-v2 stores only metadata + blob_id in
+  # its HF parquet; actual file content lives in Software Heritage / S3
+  # and requires per-blob HTTPS fetch. Our streaming pipeline can't ingest
+  # that out-of-band path without 100-200 LOC of custom loader work.
+  #
+  # Substituting bigcode/starcoderdata (the-stack-v1 lineage) — content is
+  # inline in parquet, streams cleanly. Slightly older (2023 snapshot vs
+  # v2's 2024) but same quality bar for a 1B base run; the difference
+  # matters at frontier scale (>30B) but not for 1B internal v1.
+  #
+  # Re-evaluate switching back to the-stack-v2 when we either:
+  #   - write the SWH blob-fetcher loader (Phase 4 work), OR
+  #   - move to a CPU-pod build where the per-blob HTTPS latency is
+  #     parallelizable across many cores
+  #
+  # T&Cs accepted for both datasets in our HF account.
+  - dataset: bigcode/starcoderdata
     share: 0.18
     text_field: content
     category: code
