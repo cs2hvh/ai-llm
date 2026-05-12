@@ -100,6 +100,17 @@ keep_last_n: 5
 keep_every_n_steps: 1
 """
 
+# Minimal data yaml stub. The synthetic-data path skips sources/filters but
+# run_pretrain.py still requires --data-config to load; only `batch` and
+# `data_seed` matter, and `batch.micro_batch_per_device` is overridden by
+# the model yaml's batch block above.
+_TINY_DATA_YAML = """\
+name: l3_canary_data_stub
+batch:
+  micro_batch_per_device: 2
+data_seed: 42
+"""
+
 
 def _write_tiny_config(tmpdir: Path) -> Path:
     path = tmpdir / "tiny_model.yaml"
@@ -107,12 +118,20 @@ def _write_tiny_config(tmpdir: Path) -> Path:
     return path
 
 
+def _write_tiny_data_config(tmpdir: Path) -> Path:
+    path = tmpdir / "tiny_data.yaml"
+    path.write_text(_TINY_DATA_YAML)
+    return path
+
+
 def _run_pretrain_subprocess(
     *,
     model_config: Path,
+    data_config: Path,
     checkpoint_root: Path,
     total_steps: int,
     seed: int,
+    run_name: str,
 ) -> tuple[int, str]:
     """Launch a fresh run_pretrain.py subprocess and wait for completion.
 
@@ -122,6 +141,8 @@ def _run_pretrain_subprocess(
         sys.executable,
         str(_REPO / "scripts" / "run_pretrain.py"),
         "--model-config", str(model_config),
+        "--data-config", str(data_config),
+        "--run-name", run_name,
         "--synthetic-data",
         "--total-steps", str(total_steps),
         "--checkpoint-root", str(checkpoint_root),
@@ -179,14 +200,17 @@ def run_l3_check(*, total_steps: int = 4) -> CheckResult:
     tmpdir = Path(tempfile.mkdtemp(prefix="canary_l3_"))
     try:
         tiny_cfg = _write_tiny_config(tmpdir)
+        tiny_data_cfg = _write_tiny_data_config(tmpdir)
         half = max(1, total_steps // 2)
 
         # --- Phase 1: uninterrupted reference run -------------------------
         ref_root = tmpdir / "ref"
         ref_root.mkdir()
         rc, _ = _run_pretrain_subprocess(
-            model_config=tiny_cfg, checkpoint_root=ref_root,
+            model_config=tiny_cfg, data_config=tiny_data_cfg,
+            checkpoint_root=ref_root,
             total_steps=total_steps, seed=42,
+            run_name="l3-canary-ref",
         )
         if rc != 0:
             return CheckResult(
@@ -205,8 +229,10 @@ def run_l3_check(*, total_steps: int = 4) -> CheckResult:
         run_root = tmpdir / "run"
         run_root.mkdir()
         rc, _ = _run_pretrain_subprocess(
-            model_config=tiny_cfg, checkpoint_root=run_root,
+            model_config=tiny_cfg, data_config=tiny_data_cfg,
+            checkpoint_root=run_root,
             total_steps=half, seed=42,
+            run_name="l3-canary-interrupt",
         )
         if rc != 0:
             return CheckResult(
@@ -219,8 +245,10 @@ def run_l3_check(*, total_steps: int = 4) -> CheckResult:
         # Same checkpoint_root → loop.train_loop detects the existing
         # checkpoint and resumes.
         rc, _ = _run_pretrain_subprocess(
-            model_config=tiny_cfg, checkpoint_root=run_root,
+            model_config=tiny_cfg, data_config=tiny_data_cfg,
+            checkpoint_root=run_root,
             total_steps=total_steps, seed=42,
+            run_name="l3-canary-resume",
         )
         if rc != 0:
             return CheckResult(
