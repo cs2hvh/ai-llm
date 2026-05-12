@@ -343,17 +343,31 @@ def build_one_source(
     # Pending-batch buffer for tokenizer.encode_batch — shared with the
     # filter-stage generator so sample_limit accounting is accurate.
     _pending_batch: list[Document] = []
+    _pending_chars: list[int] = [0]   # mutable list for closure-write
+
+    # Conservative char→token estimate for the early-flush guard. English
+    # text @ SPM-Unigram 131k vocab is ~4 chars/token. We use 3 (a slight
+    # under-estimate) so the flush fires SOONER rather than later — that's
+    # safer for non-English (Chinese ~1 char/tok, Hindi ~2 char/tok).
+    # The exact target_tokens check in the writer loop (build_one_source)
+    # still enforces the cap; this estimate only controls download volume.
+    _CHARS_PER_TOKEN_LOWER_BOUND = 3
 
     def _kept_doc_stream() -> Iterator[tuple[str, str, list[int], int, str]]:
         """Yield (doc_id, source_id, token_ids, text_hash, revision_id) tuples.
 
-        Tokenization is BATCHED: we accumulate up to ``tokenize_batch_size``
-        filtered docs, then call ``tokenizer.encode_batch`` which uses the
-        HF tokenizers Rust core's internal Rayon parallelism across CPU cores.
+        Tokenization is BATCHED via ``tokenizer.encode_batch`` (HF Rust core
+        with internal Rayon parallelism) for ~14× speedup over per-doc
+        encode. The accumulator flushes when EITHER:
+          - batch hits ``tokenize_batch_size`` documents (default 1000), OR
+          - estimated tokens in pending batch (chars / 3) would push
+            ``stats.tokens_emitted`` past ``target_tokens``.
 
-        Single-doc ``tokenizer.encode`` only saturates one core; batch mode
-        gets us closer to ~10M tok/sec aggregate on a 100+ core machine vs
-        ~100K tok/sec single-threaded. ~100× speedup for the bottleneck stage.
+        The second condition fixes the pg19 over-fetch bug class: pg19
+        books are ~80K tok each. Without it, we'd download 1000 books
+        (~80M tokens) to fulfill a 2.5M-token target — 32× wasted I/O.
+        With it, pg19 stops downloading after ~30 books and the writer
+        loop breaks at exact target_tokens.
         """
         def _flush(batch: list[Document]) -> Iterator[tuple[str, str, list[int], int, str]]:
             if not batch:
@@ -376,13 +390,30 @@ def build_one_source(
 
         for doc in _filtered_docs():
             _pending_batch.append(doc)
-            if len(_pending_batch) >= tokenize_batch_size:
+            _pending_chars[0] += len(doc.text)
+            # Flush conditions:
+            batch_full = len(_pending_batch) >= tokenize_batch_size
+            target_close = (
+                target_tokens is not None
+                and (
+                    stats.tokens_emitted
+                    + _pending_chars[0] // _CHARS_PER_TOKEN_LOWER_BOUND
+                    >= target_tokens
+                )
+            )
+            if batch_full or target_close:
                 yield from _flush(_pending_batch)
                 _pending_batch.clear()
+                _pending_chars[0] = 0
+                # If we hit the target estimate, stop pulling more docs;
+                # the writer loop will break on the next sequence anyway.
+                if target_close:
+                    return
         # Final partial batch.
         if _pending_batch:
             yield from _flush(_pending_batch)
             _pending_batch.clear()
+            _pending_chars[0] = 0
 
     for tokens, spans in pack_with_provenance(
         _kept_doc_stream(),

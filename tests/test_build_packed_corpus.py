@@ -510,6 +510,51 @@ class TestTargetTokensBudget:
         # All 20 docs processed.
         assert stats.docs_seen == 20
 
+    def test_huge_docs_dont_overfetch_with_target(self, tmp_path):
+        """The pg19 bug class: when docs are huge and target is small,
+        we must NOT download the full tokenize_batch_size of docs first.
+
+        With docs containing ~300 chars each (~100 tokens via the stub),
+        target_tokens=64, and tokenize_batch_size=100, we should see
+        much fewer than 100 docs consumed before the early-flush
+        triggers.
+        """
+        # 200 "huge" docs (each ~600 chars → ~200 tokens estimated by the
+        # char/3 lower bound).
+        huge_docs = [_make_doc(f"d{i}", "word " * 120) for i in range(200)]
+        # Wrap as a counted iterator so we can assert consumption.
+        consumed_count = [0]
+
+        def _counting_iter():
+            for d in huge_docs:
+                consumed_count[0] += 1
+                yield d
+
+        stats, _ = build_one_source(
+            source_id="huge",
+            docs=_counting_iter(),
+            tokenizer=_StubTokenizer(),
+            output_dir=tmp_path / "c",
+            sequence_length=32,
+            sequences_per_shard=4,
+            revision_id="r",
+            tokenizer_sha256="x",
+            eos_token_id=1,
+            dedupe_config=None,
+            target_tokens=64,
+            tokenize_batch_size=100,
+            drop_last=False,
+        )
+        # With early-flush, we should consume FAR fewer than 100 docs.
+        # Each doc has 600 chars → 200 token estimate (chars/3). Target
+        # is 64 tokens → early-flush fires after roughly 1 doc.
+        # Bound: should consume <= 5 docs (vs ~100 without the fix).
+        assert consumed_count[0] <= 5, (
+            f"early-flush failed: consumed {consumed_count[0]} docs for "
+            f"target=64 tokens (expected <= 5)"
+        )
+        assert stats.tokens_emitted >= 64
+
 
 # --------------------------------------------------------------------------- #
 # Batched tokenization — the perf-critical refactor
