@@ -169,6 +169,16 @@ def main() -> int:
                    help="Steps to measure throughput over. Default 200.")
     p.add_argument("--micro-batch", type=int, default=None,
                    help="Override micro_batch_per_device. Default: read from configs.")
+    p.add_argument("--use-chunked-ce", action="store_true",
+                   help="Use the chunked tied-LM-head CE loss path (avoids "
+                        "[B,S,V] logit materialisation). Production-correct "
+                        "for V=131072; pass with --chunked-ce-num-chunks. "
+                        "2026-05-12: added per senior reviewer pushback that "
+                        "benchmarking with full-logit CE measures a memory "
+                        "pathology, not real scaling.")
+    p.add_argument("--chunked-ce-num-chunks", type=int, default=8,
+                   help="Vocab is split into this many chunks. Must divide "
+                        "vocab_size evenly (V=131072 / 8 = 16384). Default 8.")
     p.add_argument("--peak-lr", type=float, default=2e-4,
                    help="Peak LR. Irrelevant for throughput but required by loop.")
     p.add_argument("--peak-flops-bf16", type=float, default=None,
@@ -229,7 +239,11 @@ def main() -> int:
 
     # Train step.
     from myllm.training.train_step import make_train_step
-    train_step = make_train_step(model, optimizer)
+    train_step = make_train_step(
+        model, optimizer,
+        use_chunked_ce=args.use_chunked_ce,
+        chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+    )
 
     log.info(
         "benchmark_start",
@@ -305,6 +319,8 @@ def main() -> int:
             "warmup_steps": args.warmup_steps,
             "measure_steps": len(step_times),
             "n_params": n_params,
+            "use_chunked_ce": args.use_chunked_ce,
+            "chunked_ce_num_chunks": args.chunked_ce_num_chunks if args.use_chunked_ce else None,
         },
         "device": {
             "name": device_name,
