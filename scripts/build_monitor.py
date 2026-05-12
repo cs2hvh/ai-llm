@@ -117,9 +117,21 @@ def _parse_log_file(path: Path, state: SourceState) -> None:
     Also tolerates non-JSON lines (Python traceback frames, etc.).
     Uses event timestamps (from the log) NOT parse time, so monitor
     restarts don't make rates look like 14 GB/s.
+
+    Counter fields (n_shards_closed, n_shards_uploaded, tokens_so_far)
+    are RESET before re-parsing. The full log is re-walked each call,
+    so without this reset every refresh interval would multiply the
+    counts (caught 2026-05-12: mc4_ar showed "11/11 shards, 8.3M tokens"
+    in a live monitor after 11 refreshes, when the actual log had
+    1 shard / 754K tokens).
     """
     if not path.exists():
         return
+    # Reset accumulators; rebuild from scratch on every parse.
+    state.n_shards_closed = 0
+    state.n_shards_uploaded = 0
+    state.tokens_so_far = 0
+    state.errors = []
     try:
         # Concurrent writes from structlog + plain print() in
         # build_packed_corpus.py occasionally interleave on the shared
