@@ -5,10 +5,18 @@ penalises the log-partition function. This stabilises late-training dynamics
 by preventing logit norms from drifting (PaLM 2022, Chowdhery et al.).
 
 R0 (2026-05-11): added top-K logit distillation loss for the decay-phase
-multi-teacher recipe locked in ``docs/teacher_distillation_strategy.md``.
-The teacher logits are pre-cached offline (top-8 per token per teacher);
-during training we mix cross-entropy and per-teacher KL divergence at the
-caller-specified ``alpha`` ratio.
+multi-teacher recipe locked in
+``docs/governance/teacher_distillation_strategy.md``. The teacher logits are
+pre-cached offline (top-K per token per teacher; production K=64 per the
+locked teacher plan). During training we mix cross-entropy and per-teacher
+KL divergence at the caller-specified ``alpha`` ratio.
+
+2026-05-12 (reviewer pushback): replaced ``one_hot(labels) * log_softmax``
+in CE with ``take_along_axis`` (gather). The one-hot materialised a
+``[B, S, V]`` float tensor — 8.6 GB at B=8 S=4097 V=131072 bf16 — for no
+information gain over a gather. Equivalence locked by ``tests/test_loss.py``.
+Full-logit memory is still ``[B, S, V]`` (chunked-LM-head CE is a separate
+follow-up; see ``docs/governance/model_card_v1.md`` perf section).
 
 All ops go through ``keras.ops`` so the same code runs on JAX or TF.
 """
@@ -46,10 +54,15 @@ def cross_entropy_with_z_loss(
     from keras import ops
 
     log_z = ops.logsumexp(logits, axis=-1)  # [b, s]
-    log_softmax = logits - log_z[..., None]
-    # Gather log-prob at target positions.
-    labels_one_hot = ops.one_hot(labels, num_classes=ops.shape(logits)[-1])
-    nll = -ops.sum(labels_one_hot * log_softmax, axis=-1)  # [b, s]
+    log_softmax = logits - log_z[..., None]  # [b, s, v]
+    # Gather log-prob at target positions. Equivalent to
+    #   nll = -sum(one_hot(labels) * log_softmax, axis=-1)
+    # but does not materialise the [B, S, V] one-hot tensor (8.6 GB at
+    # B=8 S=4097 V=131072 bf16). The full [B,S,V] log_softmax tensor is
+    # still allocated; collapsing that requires chunked-LM-head CE (TBD).
+    labels_int = ops.cast(labels, "int32")
+    gathered = ops.take_along_axis(log_softmax, labels_int[..., None], axis=-1)
+    nll = -ops.squeeze(gathered, axis=-1)  # [b, s]
 
     # Combine ignore_index + loss_mask into a single weight tensor.
     weight = None
@@ -94,8 +107,10 @@ def kl_div_topk_loss(
     al. 2015; used in essentially every distilled small-LLM cited in
     ``docs/ai_research_dossier_2026-05-11.md``). The "mass outside top-K"
     in the teacher's full distribution is implicitly dropped — fine when K
-    is large enough to capture the bulk (K=8 typically gets >99% of the
-    mass on real LLM distributions).
+    is large enough to capture the bulk. Production K=64 per the locked
+    teacher plan; the per-teacher top-K mass audit (TBD) verifies that K=64
+    actually captures >=99% mass on code/math distributions before full
+    teacher-cache generation.
 
     Args:
         student_logits:        ``[B, S, V]`` student's full-vocab logits.
