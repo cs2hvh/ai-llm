@@ -394,13 +394,16 @@ def build_one_source(
         stats.sequences_emitted += 1
         stats.tokens_emitted += sequence_length
 
-    writer.close()
+    closed_shards = writer.close()
     # A per-source corpus is 100% one source by construction. The
     # production-mix target share lives in pretrain_mix.yaml + the
     # composed corpus's manifest, NOT here. (Earlier code stamped the
     # production share onto every per-source manifest, which made the
     # L5 source-share drift check fire spuriously on per-source
     # corpora — caught by 2026-05-12 smoke test.)
+    # Pass the in-memory shard manifests so this works even when the
+    # writer streamed-and-deleted local shards (the disk walk would
+    # find nothing).
     manifest = write_corpus_manifest(
         output_dir,
         corpus_name=source_id,
@@ -409,7 +412,21 @@ def build_one_source(
         sequences_per_shard=sequences_per_shard,
         source_revisions={source_id: revision_id},
         target_source_share={source_id: 1.0},
+        shard_manifests=closed_shards,
     )
+    # If we streamed to R2, the top-level manifest.json also needs to
+    # land in R2 (the per-shard hook only mirrors shard-* directories;
+    # the top-level manifest is written AFTER the last shard close).
+    if r2_prefix is not None:
+        try:
+            from myllm.utils.storage import upload_file
+            upload_file(
+                output_dir / "manifest.json",
+                f"{r2_prefix.rstrip('/')}/manifest.json",
+            )
+            log.info("corpus_manifest_uploaded", prefix=r2_prefix)
+        except Exception as e:  # noqa: BLE001
+            log.error("corpus_manifest_upload_failed", error=str(e))
     # ``target_share`` (passed in) is informational — kept on the
     # BuildStats record so the compose pass / launcher can read it.
     stats.production_target_share = float(target_share)

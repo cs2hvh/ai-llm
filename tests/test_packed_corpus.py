@@ -789,6 +789,61 @@ class TestR2StreamingMirror:
         assert (root / "shard-000000" / "tokens.bin").exists()
         assert (root / "shard-000000" / "manifest.json").exists()
 
+    def test_corpus_manifest_writable_when_all_shards_deleted(
+        self, tmp_path, monkeypatch,
+    ):
+        """Regression: 2026-05-12 smoke test caught that
+        write_corpus_manifest's disk-walk path failed after
+        delete_local_after_upload removed every shard directory.
+        Fix: writer.close() returns in-memory ShardManifest list,
+        passed to write_corpus_manifest as shard_manifests=."""
+        monkeypatch.setattr(
+            "myllm.utils.storage.upload_directory",
+            lambda local, prefix, bucket=None: 1,
+        )
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=1,
+            tokenizer_sha256="x",
+            r2_prefix="corpus/v1/a", delete_local_after_upload=True,
+        )
+        for sid in range(3):
+            w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE),
+                              [DocSpan(-1, -1, "a", sid, "r", 0, 8, sid)])
+        closed = w.close()
+        # All local shards gone.
+        assert not list(root.glob("shard-*"))
+        # But the in-memory list has 3 manifests.
+        assert len(closed) == 3
+        # And write_corpus_manifest can aggregate them.
+        manifest = write_corpus_manifest(
+            root,
+            corpus_name="c", tokenizer_sha256="x",
+            sequence_length=8, sequences_per_shard=1,
+            source_revisions={"a": "r"},
+            target_source_share={"a": 1.0},
+            shard_manifests=closed,
+        )
+        assert manifest.n_shards == 3
+        assert manifest.total_sequences == 3
+        # The corpus-level manifest landed locally.
+        assert (root / "manifest.json").exists()
+
+    def test_corpus_manifest_raises_when_no_shards_and_no_in_memory_list(
+        self, tmp_path,
+    ):
+        """If both the disk walk finds nothing AND no list is passed,
+        we fail loudly (caller forgot to capture writer.close())."""
+        (tmp_path / "c").mkdir()
+        with pytest.raises(ValueError, match="no shard"):
+            write_corpus_manifest(
+                tmp_path / "c",
+                corpus_name="c", tokenizer_sha256="x",
+                sequence_length=8, sequences_per_shard=1,
+                source_revisions={"a": "r"},
+                target_source_share={"a": 1.0},
+            )
+
 
 # --------------------------------------------------------------------------- #
 # Actual share computation

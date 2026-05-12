@@ -717,28 +717,53 @@ def write_corpus_manifest(
     sequences_per_shard: int,
     source_revisions: dict[str, str],
     target_source_share: dict[str, float],
+    shard_manifests: list[ShardManifest] | None = None,
 ) -> CorpusManifest:
-    """Walk per-shard manifests under ``root``, aggregate, write the top-level
-    manifest.json. Called by the build orchestrator after all workers finish.
+    """Aggregate per-shard manifests, write the top-level manifest.json.
+
+    Two modes:
+      - ``shard_manifests=None`` (default): walks ``root/shard-*/manifest.json``
+        on the local filesystem. The original mode — works when all shards
+        are still on disk.
+      - ``shard_manifests=[...]``: uses the in-memory list directly. Required
+        when ``PackedCorpusWriter`` ran with ``delete_local_after_upload=True``
+        (the shard-* dirs are gone from local; the writer's ``close()`` return
+        value carries the manifests).
+
+    Always writes ``<root>/manifest.json`` to local disk. The caller is
+    responsible for mirroring it to R2 (or letting the writer-side
+    streaming-mirror handle it on the next shard close — but the top-level
+    manifest is written AFTER the last shard, so it needs an explicit upload).
     """
     root = Path(root).resolve()
-    shard_dirs = sorted(p for p in root.glob("shard-*") if p.is_dir())
-    if not shard_dirs:
-        raise ValueError(f"no shard-* directories found under {root}")
+    root.mkdir(parents=True, exist_ok=True)
+
+    if shard_manifests is None:
+        shard_dirs = sorted(p for p in root.glob("shard-*") if p.is_dir())
+        if not shard_dirs:
+            raise ValueError(
+                f"no shard-* directories found under {root} (and no "
+                f"shard_manifests passed in; if you used "
+                f"delete_local_after_upload=True, pass writer.close()'s "
+                f"return value as shard_manifests=)"
+            )
+        loaded: list[ShardManifest] = []
+        for d in shard_dirs:
+            mp = d / "manifest.json"
+            if not mp.exists():
+                log.warning("packed_corpus_skipping_incomplete_shard", path=str(d))
+                continue
+            loaded.append(ShardManifest.from_dict(_read_json(mp)))
+        shard_manifests = loaded
+
+    if not shard_manifests:
+        raise ValueError("no shard manifests found / passed; cannot aggregate")
 
     n_shards = 0
     total_sequences = 0
     total_tokens = 0
     actual_mix: dict[str, int] = {}
-    for d in shard_dirs:
-        mp = d / "manifest.json"
-        if not mp.exists():
-            # Incomplete shard — skip with warning. The orchestrator must
-            # decide whether to fail loudly; this helper aggregates what's
-            # complete.
-            log.warning("packed_corpus_skipping_incomplete_shard", path=str(d))
-            continue
-        sm = ShardManifest.from_dict(_read_json(mp))
+    for sm in shard_manifests:
         if sm.sequence_length != sequence_length:
             raise ValueError(
                 f"shard {sm.shard_id} sequence_length {sm.sequence_length} "
