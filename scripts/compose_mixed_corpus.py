@@ -32,9 +32,25 @@ import yaml
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+# Also expose the scripts/ dir so we can import _unique_source_id from
+# the parallel runner (single source of truth for source-id naming —
+# see _resolve_sources docstring).
+sys.path.insert(0, str(_REPO / "scripts"))
 
 from myllm.data.compose import compose_mixed_corpus  # noqa: E402
 from myllm.utils import configure_logging, get_logger  # noqa: E402
+
+# Single source of truth for source_id naming. Defined in
+# run_parallel_builds._unique_source_id; importing keeps compose's lookup
+# in sync with the dir names the parallel runner writes. The previous
+# compose-local heuristic (`dataset.split("/")[-1].lower().replace(".", "_")`)
+# DIFFERED on:
+#   - hyphenated dataset names ("fineweb-edu" vs "fineweb_edu")
+#   - multi-config sources (mc4 × 5 → mc4_ar, mc4_de, etc.)
+#   - per-language splits (sangraha → sangraha_verified_split_hin)
+# 2026-05-12 P0 fix: 10 of 12 sources silently skipped during compose
+# of the infra-validation corpus because of this mismatch.
+from run_parallel_builds import _unique_source_id  # noqa: E402
 
 log = get_logger(__name__)
 
@@ -42,7 +58,12 @@ log = get_logger(__name__)
 def _resolve_sources(
     pretrain_mix: dict, sources_root: Path
 ) -> tuple[dict[str, Path], dict[str, float]]:
-    """Map source entries → existing corpus paths + target shares."""
+    """Map source entries → existing corpus paths + target shares.
+
+    Uses the same ``_unique_source_id`` logic as the parallel build
+    runner so dir lookups match the dirs the runner writes. See module
+    docstring for the bug class this prevents.
+    """
     sources_map: dict[str, Path] = {}
     target_shares: dict[str, float] = {}
     skipped: list[str] = []
@@ -50,24 +71,19 @@ def _resolve_sources(
     for entry in pretrain_mix.get("sources", []):
         dataset = entry["dataset"]
         share = float(entry["share"])
-        short = dataset.split("/")[-1].lower().replace(".", "_")
-        # Per-source build dir convention from build_packed_corpus.py
-        candidate = sources_root / short
+        unique_id = _unique_source_id(entry)
+        candidate = sources_root / unique_id
         if not (candidate / "manifest.json").exists():
-            # Try the dataset name as-is (with / replaced by __).
-            candidate2 = sources_root / dataset.replace("/", "__")
-            if (candidate2 / "manifest.json").exists():
-                candidate = candidate2
-            else:
-                log.warning(
-                    "compose_source_missing",
-                    dataset=dataset,
-                    expected_path=str(candidate),
-                )
-                skipped.append(dataset)
-                continue
-        sources_map[short] = candidate
-        target_shares[short] = share
+            log.warning(
+                "compose_source_missing",
+                dataset=dataset,
+                unique_id=unique_id,
+                expected_path=str(candidate),
+            )
+            skipped.append(f"{dataset} ({unique_id})")
+            continue
+        sources_map[unique_id] = candidate
+        target_shares[unique_id] = share
 
     # Renormalize target shares over the present sources so they sum to 1.
     total = sum(target_shares.values())
