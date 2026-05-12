@@ -35,15 +35,10 @@ src/myllm/
   post_train/     SFT / DPO / reasoning / safety / tools / RAG (Phase 4)
   quantize/       GGUF export (Phase 6)
   runpod_orch/    RunPod SDK orchestration
-  research/       multi-agent research library (verify_candidates,
-                  multi_source_lookup, parallel_audit) — see
-                  docs/multi_agent_research.md
 configs/          YAML configs per phase (wind_tunnel, pilot_250m, base_1b,
                   decay_phase_distillation, data/pretrain_mix)
 scripts/          one-shot CLIs (run_pretrain, wind_tunnel_sweep,
-                  build_decontamination_index, render_governance_cards,
-                  research_cli, ...)
-briefs/           YAML briefs for the research CLI (example_teacher_verify)
+                  build_decontamination_index, render_governance_cards, ...)
 tests/            unit + integration tests (370 passing)
 docs/             phase runbooks + governance + external reviews
 docs/governance/  EU AI Act / ISO 42001 / NIST AI RMF / DPDP artifacts
@@ -73,7 +68,6 @@ artifacts/        local artifacts (gitignored — push to R2 instead)
 
 ### Recent work (latest first)
 
-- **2026-05-12** — Multi-agent research library: `verify_candidates` + `multi_source_lookup` + `parallel_audit` workflows + CLI + 29 tests. Adapted from Anthropic's [multi-agent research system blog post](https://www.anthropic.com/engineering/multi-agent-research-system). See [`docs/multi_agent_research.md`](docs/multi_agent_research.md).
 - **2026-05-12** — Reviewer Q&A locked B2 design (uint32 tokens, 512M-token shards, simple seek index, sharded CPU workers w/ Rust tokenizers). See [`docs/reviewer_qa_2026-05-12.md`](docs/reviewer_qa_2026-05-12.md).
 - **2026-05-12** — Red tests for the 4 "full-scale-only bug" coverage gaps + quarantine graceful-degradation fix. See [`docs/full_scale_bug_coverage_2026-05-12.md`](docs/full_scale_bug_coverage_2026-05-12.md). 370 tests passing.
 - **2026-05-12** — P2 governance: decontamination extended to 11 benchmarks; auto-render of model_card/data_card from live configs (`scripts/render_governance_cards.py`).
