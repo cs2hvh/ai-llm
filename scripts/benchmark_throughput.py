@@ -77,6 +77,10 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
+# Also expose the repo root so `from scripts.run_pretrain import ...` resolves
+# (we reuse init_model_and_optimizer / initial_train_state / batch_pairs from
+# the production launcher to avoid drift between bench and pretrain wiring).
+sys.path.insert(0, str(_REPO))
 
 # Keras backend before any keras import.
 os.environ.setdefault("KERAS_BACKEND", "jax")
