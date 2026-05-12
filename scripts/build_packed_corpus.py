@@ -211,6 +211,16 @@ def main() -> int:
                    help="Pad token id (default 0).")
     p.add_argument("--drop-last", action="store_true", default=False,
                    help="Drop the trailing partial sequence (default: keep + pad).")
+    p.add_argument("--r2-prefix", default=None,
+                   help="If set, mirror each completed shard to "
+                        "s3://$S3_BUCKET/<r2-prefix>/<source-id>/shard-NNNNNN/* "
+                        "as soon as the shard closes. The bucket comes from "
+                        "$S3_BUCKET; the S3-compatible endpoint comes from "
+                        "$S3_ENDPOINT_URL.")
+    p.add_argument("--delete-local-after-upload", action="store_true",
+                   help="With --r2-prefix, delete the local shard files after "
+                        "a successful upload. Lets a multi-TB build run on a "
+                        "machine with limited local disk (streams to R2).")
     args = p.parse_args()
 
     configure_logging()
@@ -272,6 +282,12 @@ def main() -> int:
     target_share = float(source_entry.get("share", 0.0))
 
     t0 = time.time()
+    # R2 prefix is per-source: <r2-prefix>/<source-id>/shard-NNNNNN/...
+    per_source_r2_prefix = (
+        f"{args.r2_prefix.rstrip('/')}/{source_id}"
+        if args.r2_prefix else None
+    )
+
     stats, manifest = build_one_source(
         source_id=source_id,
         docs=docs,
@@ -289,6 +305,8 @@ def main() -> int:
         target_share=target_share,
         drop_last=args.drop_last,
         sample_limit=args.sample_limit,
+        r2_prefix=per_source_r2_prefix,
+        delete_local_after_upload=args.delete_local_after_upload,
     )
     wall_sec = time.time() - t0
 

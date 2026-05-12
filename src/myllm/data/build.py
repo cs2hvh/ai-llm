@@ -258,6 +258,8 @@ def build_one_source(
     drop_last: bool = True,
     sample_limit: int | None = None,
     tokenize_batch_size: int = 1000,
+    r2_prefix: str | None = None,
+    delete_local_after_upload: bool = False,
 ) -> tuple[BuildStats, Any]:
     """Build one per-source packed corpus on disk.
 
@@ -293,6 +295,8 @@ def build_one_source(
         sequence_length=sequence_length,
         sequences_per_shard=sequences_per_shard,
         tokenizer_sha256=tokenizer_sha256,
+        r2_prefix=r2_prefix,
+        delete_local_after_upload=delete_local_after_upload,
     )
 
     log.info(

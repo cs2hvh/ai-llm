@@ -225,6 +225,8 @@ class PackedCorpusWriter:
         first_shard_id: int = 0,
         first_sequence_id: int = 0,
         first_doc_span_id: int = 0,
+        r2_prefix: str | None = None,
+        delete_local_after_upload: bool = False,
     ):
         if sequence_length < 1:
             raise ValueError(f"sequence_length must be >= 1, got {sequence_length}")
@@ -237,6 +239,13 @@ class PackedCorpusWriter:
         self.sequence_length = int(sequence_length)
         self.sequences_per_shard = int(sequences_per_shard)
         self.tokenizer_sha256 = str(tokenizer_sha256)
+        # R2 streaming mirror — when ``r2_prefix`` is set, each shard's
+        # files are uploaded to ``s3://<bucket>/<r2_prefix>/shard-NNNNNN/*``
+        # immediately after the shard closes. Optionally deletes the local
+        # copy after a successful upload (lets multi-TB builds run on
+        # small local disk by streaming to object storage).
+        self.r2_prefix = r2_prefix.rstrip("/") if r2_prefix else None
+        self.delete_local_after_upload = bool(delete_local_after_upload)
 
         # Counter state — advances as sequences are appended.
         self._shard_id = int(first_shard_id)
@@ -330,7 +339,45 @@ class PackedCorpusWriter:
             actual_sequences=actual_sequences,
             total_tokens=self._shard_total_tokens,
         )
+        # Optional R2 streaming mirror — runs synchronously so a kill mid-
+        # upload doesn't leave a half-uploaded shard that the reader could
+        # treat as complete. (Upload errors don't roll back the local shard
+        # — the operator can re-sync later.)
+        if self.r2_prefix is not None:
+            self._mirror_shard_to_r2(d)
         return manifest
+
+    def _mirror_shard_to_r2(self, shard_dir: Path) -> None:
+        """Upload all files in ``shard_dir`` to R2, optionally delete local."""
+        try:
+            from myllm.utils.storage import upload_directory
+        except ImportError:
+            log.warning(
+                "packed_corpus_r2_mirror_skipped_storage_unavailable",
+                shard=shard_dir.name,
+            )
+            return
+        remote = f"{self.r2_prefix}/{shard_dir.name}"
+        try:
+            n = upload_directory(shard_dir, remote)
+            log.info(
+                "packed_corpus_shard_uploaded",
+                shard=shard_dir.name,
+                remote_prefix=remote,
+                files=n,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "packed_corpus_shard_upload_failed",
+                shard=shard_dir.name,
+                remote_prefix=remote,
+                error=str(e),
+            )
+            return  # don't delete local on failure
+        if self.delete_local_after_upload:
+            import shutil
+            shutil.rmtree(shard_dir, ignore_errors=True)
+            log.info("packed_corpus_shard_local_deleted", shard=shard_dir.name)
 
     # ------------------------------------------------------------------- #
     # Append

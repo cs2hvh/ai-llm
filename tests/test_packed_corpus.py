@@ -685,6 +685,114 @@ class TestResumeCursor:
 # --------------------------------------------------------------------------- #
 # Actual share computation
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# R2 streaming mirror — writer uploads shards as they close
+# --------------------------------------------------------------------------- #
+class TestR2StreamingMirror:
+    def test_no_mirror_by_default(self, tmp_path, monkeypatch):
+        """Without r2_prefix, no upload should be attempted."""
+        upload_calls = []
+
+        def _fake_upload_directory(local_dir, prefix, bucket=None):
+            upload_calls.append((str(local_dir), prefix))
+            return 0
+
+        monkeypatch.setattr(
+            "myllm.utils.storage.upload_directory", _fake_upload_directory,
+        )
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=2,
+            tokenizer_sha256="x",
+        )
+        w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE), [
+            DocSpan(-1, -1, "a", 1, "r", 0, 8, 1),
+        ])
+        w.close()
+        assert upload_calls == []
+
+    def test_mirror_calls_upload_directory_per_shard(self, tmp_path, monkeypatch):
+        upload_calls = []
+
+        def _fake_upload_directory(local_dir, prefix, bucket=None):
+            upload_calls.append((str(local_dir), prefix))
+            return 4  # pretend we uploaded 4 files
+
+        monkeypatch.setattr(
+            "myllm.utils.storage.upload_directory", _fake_upload_directory,
+        )
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=2,
+            tokenizer_sha256="x",
+            r2_prefix="corpus/v1/fineweb_edu",
+        )
+        for sid in range(4):
+            w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE), [
+                DocSpan(-1, -1, "a", sid, "r", 0, 8, sid),
+            ])
+        w.close()
+        # 4 sequences / 2 per shard = 2 shards → 2 uploads.
+        assert len(upload_calls) == 2
+        # Prefix structure: <r2_prefix>/<shard-name>
+        assert upload_calls[0][1] == "corpus/v1/fineweb_edu/shard-000000"
+        assert upload_calls[1][1] == "corpus/v1/fineweb_edu/shard-000001"
+
+    def test_mirror_strips_trailing_slash_on_prefix(self, tmp_path, monkeypatch):
+        upload_calls = []
+        monkeypatch.setattr(
+            "myllm.utils.storage.upload_directory",
+            lambda local, prefix, bucket=None: upload_calls.append(prefix) or 1,
+        )
+        w = PackedCorpusWriter(
+            tmp_path / "c", sequence_length=8, sequences_per_shard=1,
+            tokenizer_sha256="x", r2_prefix="corpus/v1/a/",
+        )
+        w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE),
+                          [DocSpan(-1, -1, "a", 1, "r", 0, 8, 1)])
+        w.close()
+        assert upload_calls[0] == "corpus/v1/a/shard-000000"
+
+    def test_delete_local_after_upload_removes_shard_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "myllm.utils.storage.upload_directory",
+            lambda local, prefix, bucket=None: 1,
+        )
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=1,
+            tokenizer_sha256="x",
+            r2_prefix="corpus/v1/a", delete_local_after_upload=True,
+        )
+        w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE),
+                          [DocSpan(-1, -1, "a", 1, "r", 0, 8, 1)])
+        w.close()
+        assert not (root / "shard-000000").exists()
+
+    def test_upload_failure_does_not_delete_local(self, tmp_path, monkeypatch):
+        """If upload raises, the local copy MUST be preserved so the
+        operator can re-sync later. Silent loss is unacceptable."""
+        def _boom(local, prefix, bucket=None):
+            raise RuntimeError("simulated R2 down")
+        monkeypatch.setattr("myllm.utils.storage.upload_directory", _boom)
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=1,
+            tokenizer_sha256="x",
+            r2_prefix="corpus/v1/a", delete_local_after_upload=True,
+        )
+        # The writer logs the error but doesn't raise (build continues).
+        w.append_sequence(np.zeros(8, dtype=TOKEN_DTYPE),
+                          [DocSpan(-1, -1, "a", 1, "r", 0, 8, 1)])
+        w.close()
+        # Critical: local files preserved.
+        assert (root / "shard-000000" / "tokens.bin").exists()
+        assert (root / "shard-000000" / "manifest.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Actual share computation
+# --------------------------------------------------------------------------- #
 class TestActualShareComputation:
     def test_actual_share_sums_to_one(self, tmp_path):
         root = _build_corpus(
