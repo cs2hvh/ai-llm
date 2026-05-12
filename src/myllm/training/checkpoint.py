@@ -108,15 +108,41 @@ class CheckpointManager:
                 error=str(e),
             )
 
-    def restore(self, step: int) -> dict[str, Any]:
+    def restore(self, step: int, template: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Restore the state saved at ``step``.
+
+        Args:
+            step: the checkpoint step to load.
+            template: optional pytree template with the EXPECTED structure
+                of the restored state. When provided, Orbax matches the
+                template's structure on restore — preserving namedtuple
+                types like ``optax.MultiTransformState`` (B1 fix, audit
+                2026-05-12). Without it, Orbax returns a plain dict and
+                ``state["opt_state"].inner_states`` would fail at the
+                next ``optimizer.update()`` call.
+
+        B1 fix (2026-05-12 audit):
+            muP uses ``optax.multi_transform`` whose state is a
+            ``MultiTransformState`` namedtuple. Orbax 0.x serializes the
+            namedtuple's leaves correctly but loses the type tag on save.
+            On restore without a template, the result is a flat dict;
+            ``state.inner_states`` (a namedtuple field) becomes a dict
+            key access — silently breaking downstream optimizer updates.
+            Passing the live ``optimizer.init(...)`` state as a template
+            tells Orbax to rebuild the namedtuple structure.
+        """
         target = self.step_dir(step)
         if not (target / "manifest.json").exists():
             raise CheckpointError(f"no complete checkpoint at step {step}")
         try:
-            state = self._orbax.restore(target / "state")
+            if template is not None:
+                state = self._orbax.restore(target / "state", item=template)
+            else:
+                state = self._orbax.restore(target / "state")
         except Exception as e:
             raise CheckpointError(f"orbax restore failed at step {step}: {e}") from e
-        log.info("checkpoint_restored", step=step, path=str(target))
+        log.info("checkpoint_restored", step=step, path=str(target),
+                 used_template=template is not None)
         return state
 
     def latest_complete_step(self) -> int | None:

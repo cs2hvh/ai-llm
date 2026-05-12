@@ -90,14 +90,30 @@ class DecayPhaseActivation:
 
     Fields:
         activation_step:  step ``>= activation_step`` activates distillation
+        total_steps:      total run length; used by ``current_alpha`` to
+                          interpolate across the decay window. Defaults to
+                          a sentinel that disables annealing (returns alpha_end).
         reader:           the multi-teacher cache reader; ``None`` disables
         position_fn:      ``(state, batch) -> np.ndarray[int]`` mapping each
                           batch position to its absolute corpus offset
+        alpha_start:      CE weight at decay-phase start (default 0.7 per
+                          external reviewer's recommendation; was 0.3 in v1)
+        alpha_end:        CE weight at end of training (default 0.3)
+
+    α-annealing (B8, 2026-05-12):
+        At training step `s`, the loop calls ``current_alpha(s)`` and injects
+        the result into the batch as ``batch["alpha"]``, which the train_step
+        reads. Stable phase returns 1.0 (pure CE). Decay phase interpolates
+        linearly from ``alpha_start`` at ``activation_step`` to ``alpha_end``
+        at ``total_steps``.
     """
 
     activation_step: int
     reader: MultiTeacherCacheReader | None
     position_fn: PositionFn | None = None
+    total_steps: int | None = None       # if None, alpha returns alpha_end during decay
+    alpha_start: float = 0.7
+    alpha_end: float = 0.3
 
     @classmethod
     def from_yaml(
@@ -109,9 +125,11 @@ class DecayPhaseActivation:
     ) -> "DecayPhaseActivation":
         """Build an activation policy from a `decay_phase_distillation.yaml`.
 
-        The yaml's ``activation_fraction`` is multiplied by ``total_steps``
-        to derive the absolute step. ``reader`` / ``position_fn`` are passed
-        through unchanged.
+        Reads:
+          - ``activation_fraction`` (float ∈ [0,1]) → ``activation_step``
+          - ``alpha_schedule.start`` / ``.end`` if present (linear annealing
+            across the decay window). Falls back to the legacy scalar
+            ``alpha`` field for both endpoints if no schedule is set.
         """
         import yaml
         with open(yaml_path) as f:
@@ -121,11 +139,52 @@ class DecayPhaseActivation:
             raise ValueError(
                 f"activation_fraction must be in [0,1]; got {fraction}"
             )
+        # Alpha schedule. If the yaml has an `alpha_schedule` block with
+        # start/end, use that (B8 path, 2026-05-12). Otherwise fall back
+        # to the legacy scalar `alpha` field (v1 behavior, constant alpha).
+        sched = cfg.get("alpha_schedule") or {}
+        legacy_alpha = float(cfg.get("alpha", 0.3))
+        alpha_start = float(sched.get("start", legacy_alpha))
+        alpha_end = float(sched.get("end", legacy_alpha))
+        if sched.get("type") and sched["type"] != "linear":
+            raise ValueError(
+                f"only 'linear' alpha_schedule type supported; "
+                f"got {sched['type']!r}"
+            )
         return cls(
             activation_step=int(fraction * total_steps),
             reader=reader,
             position_fn=position_fn,
+            total_steps=total_steps,
+            alpha_start=alpha_start,
+            alpha_end=alpha_end,
         )
+
+    def current_alpha(self, step: int) -> float:
+        """Return the CE-weight alpha for the given training step.
+
+        Stable phase (step < activation_step):
+            Returns 1.0 — pure cross-entropy, no distillation.
+
+        Decay phase (step >= activation_step):
+            Linear interpolation from ``alpha_start`` (at activation_step)
+            to ``alpha_end`` (at total_steps). Clamped at alpha_end past the
+            end of training.
+
+        If ``total_steps`` is None (sentinel for "no schedule"), returns
+        ``alpha_end`` for the whole decay phase (back-compat with v1
+        constant-alpha behavior).
+        """
+        s = int(step)
+        if s < self.activation_step:
+            return 1.0
+        if self.total_steps is None or self.total_steps <= self.activation_step:
+            return float(self.alpha_end)
+        # Linear interpolation over the decay window.
+        decay_len = self.total_steps - self.activation_step
+        progress = (s - self.activation_step) / max(1, decay_len)
+        progress = max(0.0, min(1.0, progress))
+        return float(self.alpha_start + (self.alpha_end - self.alpha_start) * progress)
 
     # ------------------------------------------------------------------- #
     # The loop's hook

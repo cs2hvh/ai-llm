@@ -66,6 +66,7 @@ from myllm.data.types import Document  # noqa: E402
 from myllm.model import ModelConfig  # noqa: E402
 from myllm.training.checkpoint import CheckpointConfig  # noqa: E402
 from myllm.training.loop import LoopConfig, run as train_loop  # noqa: E402
+from myllm.training.quarantine import QuarantineWriter  # noqa: E402
 from myllm.training.mesh import (  # noqa: E402
     ShardingConfig,
     build_mesh_and_shardings,
@@ -822,6 +823,12 @@ def main() -> int:
         micro_batch=micro_batch,
     )
 
+    # B6 (2026-05-12 audit): wire a QuarantineWriter so any nan_skipped
+    # incident records the offending batch's provenance for post-mortem.
+    quarantine_path = Path(args.checkpoint_root) / "quarantine.jsonl"
+    quarantine = QuarantineWriter(path=quarantine_path)
+    log.info("quarantine_writer_attached", path=str(quarantine_path))
+
     final_state = train_loop(
         train_step_fn=train_step_fn,
         initial_state=state,
@@ -831,6 +838,7 @@ def main() -> int:
         watchdog=watchdog,
         on_metrics=on_metrics,
         decay_phase=decay_phase_activation,
+        quarantine=quarantine,
     )
 
     # R6: emit the per-gate contamination CSV. Only populated when

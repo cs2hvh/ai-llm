@@ -223,6 +223,93 @@ class TestFromYaml:
         with pytest.raises(ValueError, match="activation_fraction"):
             DecayPhaseActivation.from_yaml(str(yaml_path), total_steps=1_000_000, reader=None)
 
+    def test_alpha_schedule_block_overrides_scalar(self, tmp_path):
+        """yaml with alpha_schedule.start/.end uses those, not the scalar
+        alpha. P0 B8 (2026-05-12): annealed alpha replaces constant alpha."""
+        yaml_path = tmp_path / "decay.yaml"
+        yaml_path.write_text(
+            "activation_fraction: 0.85\n"
+            "alpha: 0.3\n"
+            "alpha_schedule:\n"
+            "  type: linear\n"
+            "  start: 0.7\n"
+            "  end: 0.3\n"
+        )
+        a = DecayPhaseActivation.from_yaml(str(yaml_path), total_steps=10_000, reader=None)
+        assert a.alpha_start == 0.7
+        assert a.alpha_end == 0.3
+        assert a.total_steps == 10_000
+
+    def test_legacy_scalar_alpha_back_compat(self, tmp_path):
+        """yaml without alpha_schedule uses the scalar alpha for both endpoints
+        (degenerates to constant alpha — v1 behavior)."""
+        yaml_path = tmp_path / "decay.yaml"
+        yaml_path.write_text("activation_fraction: 0.85\nalpha: 0.3\n")
+        a = DecayPhaseActivation.from_yaml(str(yaml_path), total_steps=10_000, reader=None)
+        assert a.alpha_start == 0.3
+        assert a.alpha_end == 0.3
+
+    def test_invalid_schedule_type_rejected(self, tmp_path):
+        yaml_path = tmp_path / "decay.yaml"
+        yaml_path.write_text(
+            "activation_fraction: 0.85\n"
+            "alpha_schedule:\n  type: cosine\n  start: 0.7\n  end: 0.3\n"
+        )
+        with pytest.raises(ValueError, match="linear"):
+            DecayPhaseActivation.from_yaml(str(yaml_path), total_steps=10_000, reader=None)
+
+
+# --------------------------------------------------------------------------- #
+# Alpha annealing (B8, 2026-05-12)
+# --------------------------------------------------------------------------- #
+class TestCurrentAlpha:
+    """Regression for B8: alpha is annealed across the decay window, not
+    constant at 0.3. External reviewer's recommendation: CE-heavy at decay
+    start (0.7), teacher-heavy at end (0.3)."""
+
+    def _make(self, **overrides):
+        defaults = dict(
+            activation_step=8500,
+            reader=None,
+            total_steps=10_000,
+            alpha_start=0.7,
+            alpha_end=0.3,
+        )
+        defaults.update(overrides)
+        return DecayPhaseActivation(**defaults)
+
+    def test_stable_phase_returns_one(self):
+        """Before activation, alpha = 1.0 (pure CE)."""
+        a = self._make()
+        assert a.current_alpha(0) == 1.0
+        assert a.current_alpha(8499) == 1.0  # one step before activation
+
+    def test_at_activation_step_alpha_equals_start(self):
+        a = self._make()
+        assert a.current_alpha(8500) == pytest.approx(0.7)
+
+    def test_at_end_alpha_equals_end(self):
+        a = self._make()
+        assert a.current_alpha(10_000) == pytest.approx(0.3)
+
+    def test_midpoint_interpolation(self):
+        """Midpoint of decay window (step 9250) should give midpoint alpha."""
+        a = self._make()
+        # midpoint = (8500 + 10000) / 2 = 9250
+        # alpha = 0.7 + (0.3 - 0.7) * 0.5 = 0.5
+        assert a.current_alpha(9250) == pytest.approx(0.5)
+
+    def test_past_end_clamped_to_end(self):
+        """If step somehow exceeds total_steps, alpha stays at alpha_end."""
+        a = self._make()
+        assert a.current_alpha(20_000) == pytest.approx(0.3)
+
+    def test_total_steps_none_returns_alpha_end_during_decay(self):
+        """Back-compat: without total_steps, decay phase returns constant alpha_end."""
+        a = self._make(total_steps=None)
+        assert a.current_alpha(0) == 1.0  # still stable phase
+        assert a.current_alpha(9000) == pytest.approx(0.3)  # decay → alpha_end
+
 
 # --------------------------------------------------------------------------- #
 # Integration: loop with decay_phase

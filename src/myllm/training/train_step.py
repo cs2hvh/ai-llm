@@ -92,12 +92,18 @@ def make_train_step(
         # CE+KL loss with the configured alpha.
         teacher_logits = batch.get("teacher_topk_logits")
         teacher_indices = batch.get("teacher_topk_indices")
+        # B8 fix (2026-05-12): alpha is now dynamic per step. The loop
+        # computes alpha = decay_phase.current_alpha(step) and injects
+        # it into the batch as a JAX scalar. If the batch doesn't carry
+        # one (stable phase, synthetic data), fall back to the factory's
+        # static default (which is 1.0 = pure CE).
+        alpha = batch.get("alpha", distill_alpha)
         loss, metrics = distillation_mixed_loss(
             logits,
             batch["labels"],
             teacher_logits,
             teacher_indices,
-            alpha=distill_alpha,
+            alpha=alpha,
             teacher_weights=teacher_weights,
             temperature=distill_temperature,
             ignore_index=ignore_index,

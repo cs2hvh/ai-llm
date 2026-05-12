@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from myllm.training.checkpoint import CheckpointConfig, CheckpointManager
+from myllm.training.quarantine import QuarantineWriter
 from myllm.training.watchdog import LossSpikeWatchdog
 from myllm.utils import get_logger
 from myllm.utils.exceptions import LossSpikeError, TrainingError
@@ -83,6 +84,7 @@ def run(
     watchdog: LossSpikeWatchdog | None = None,
     on_metrics: Any | None = None,
     decay_phase: Any | None = None,
+    quarantine: QuarantineWriter | None = None,
 ) -> dict[str, Any]:
     """Run the training loop with auto-rollback. Returns the final state.
 
@@ -106,7 +108,15 @@ def run(
     resume_step = ckpt.latest_complete_step()
     if resume_step is not None:
         log.info("resuming_from_checkpoint", step=resume_step)
-        restored = ckpt.restore(resume_step)
+        # B1 fix (2026-05-12 audit): pass the live state as a pytree template
+        # so Orbax reconstructs the muP MultiTransformState namedtuple
+        # correctly. Without this, opt_state comes back as a plain dict and
+        # the next optimizer.update() fails on `state.inner_states`.
+        # Only the keys we persist (in _PERSIST_KEYS) need to be in the
+        # template — those are the ones that get pulled out of the restored
+        # state.
+        template = {k: state[k] for k in _PERSIST_KEYS if k in state}
+        restored = ckpt.restore(resume_step, template=template)
         state = {**state, **restored, "step": resume_step}
         # Old checkpoints may not have data_position — default to 0 with a
         # WARN so the operator knows the data stream will restart from the
@@ -155,6 +165,22 @@ def run(
                 _decay_phase_activated_logged = True
             batch = decay_phase.maybe_inject(state, batch)
 
+            # B8 (2026-05-12): inject the current alpha as a JAX scalar so
+            # train_step uses it instead of its static factory default.
+            # Stable phase returns 1.0 (pure CE); decay phase returns the
+            # annealed value 0.7→0.3 across the decay window. JAX treats
+            # the scalar as a tracer, so JIT compiles once and uses the
+            # changing value per step without recompilation.
+            if hasattr(decay_phase, "current_alpha"):
+                try:
+                    import jax.numpy as jnp
+                    batch = {
+                        **batch,
+                        "alpha": jnp.float32(decay_phase.current_alpha(int(state["step"]))),
+                    }
+                except ImportError:
+                    pass  # decay_phase tests without jax — let static alpha stand
+
         state, metrics = train_step_fn(state, batch)
         loss = float(metrics["loss"])
         nan_skipped = float(metrics.get("nan_skipped", 0.0))
@@ -184,9 +210,21 @@ def run(
                 step=int(state["step"]),
                 loss=loss,
                 msg="train_step atomically reverted params + opt_state; "
-                    "batch dropped. If this fires repeatedly, dump batch "
-                    "provenance and investigate the data source.",
+                    "batch dropped. If this fires repeatedly, inspect the "
+                    "quarantine file for batch provenance.",
             )
+            # B6 (2026-05-12 audit): dump the offending batch's provenance
+            # so a post-mortem can find the poisonous doc. The writer is
+            # optional — synthetic-data tests and unit tests don't pass
+            # one in; only production pretrain runs do.
+            if quarantine is not None:
+                quarantine.write(
+                    step=int(state["step"]),
+                    data_position=int(state.get("data_position", 0)),
+                    batch=batch,
+                    loss=loss,
+                    reason="nan_skipped",
+                )
             continue
 
         # Watchdog ───────────────────────────────────────────────────────────

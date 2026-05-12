@@ -130,11 +130,21 @@ filters:
     redact_phone: true
     redact_ipv4: false
 
-# R6 benchmark decontamination — disabled until index is built offline.
+# R6 benchmark decontamination (B4 2026-05-12 audit: enabled by default).
+#
+# Default: enabled with a live-built index (slow at run-start, ~5 min, but
+# zero-setup). For production runs prefer a pre-built index at index_path
+# — generated offline by scripts/build_decontamination_index.py. The
+# pre-built path is ~50ms to load vs ~5 min for live build.
+#
+# To disable for a quick smoke run: set `enabled: false` here, or set
+# decontamination.skip=true in the launch command (NEW Phase B work).
 decontamination:
-  enabled: false
+  enabled: true
   ngram_size: 13
   hash_seed: 0xDECAF
+  # Set this to a pre-built index for fast pilot/base startup:
+  # index_path: artifacts/decontamination_index.json
   benchmarks:
     - id: mmlu-prox
       sample_size: 200
