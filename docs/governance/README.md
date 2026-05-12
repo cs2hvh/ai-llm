@@ -14,9 +14,26 @@ external release per:
 
 | File | Purpose | Status |
 |---|---|---|
-| `model_card_v1_template.md` | Per-release model card scaffold (capabilities, limitations, eval, citation) | TEMPLATE — fill at v1 release |
+| `model_card_v1_template.md` | Per-release model card scaffold (capabilities, limitations, eval, citation). Contains `<!-- AUTO:start -->` blocks rendered by `scripts/render_governance_cards.py`. | TEMPLATE — fill at v1 release |
+| `model_card_v1.md` | Rendered model card with live config values stamped in | AUTO-RENDERED — regen via `scripts/render_governance_cards.py` |
 | `data_card_v1_template.md` | Training corpus disclosure (EU AI Act transparency requirement) | TEMPLATE — auto-populate from `MixtureSampler.emitted_per_source` at release |
+| `data_card_v1.md` | Rendered data card with live source table stamped in | AUTO-RENDERED — regen via `scripts/render_governance_cards.py` |
 | `license_register.md` | Authoritative log of every dataset and teacher license + clauses + T&C acceptance dates | LIVE — update on every change |
+
+### Regenerating the auto-blocks
+
+```bash
+python scripts/render_governance_cards.py            # regenerate the rendered files
+python scripts/render_governance_cards.py --check    # CI: fail if rendered cards are stale
+```
+
+The templates carry static prose (intended use, limitations, etc.) plus
+`<!-- AUTO:start name="..." -->...<!-- AUTO:end -->` markers around regions
+that must stay in sync with `configs/base_1b.yaml` (architecture) and
+`configs/data/pretrain_mix.yaml` (sources table).
+
+The `--check` mode is meant to run in CI: it detects "edited configs
+but forgot to re-render" before merge.
 
 ## Filing cadence
 
@@ -38,6 +55,7 @@ The templates here are SCAFFOLDING — they capture the structure but most numbe
 6. ⏳ India DPDP workflow doc (PII handling + deletion / retention policy)
 7. ⏳ NIST AI RMF self-assessment mapping (which controls apply, where)
 8. ⏳ OWASP Agentic Top 10 mitigation matrix (for the eventual tool-use SFT phase)
+9. ✅ `scripts/render_governance_cards.py` — auto-renders model/data card AUTO-blocks from live configs (2026-05-12, P2 work)
 
 ## External reviews driving this scaffolding
 

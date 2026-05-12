@@ -15,19 +15,23 @@ detailed summary of the content used for training**."
 ### Sources
 
 <!-- AUTO:start name="sources" -->
-| # | HF dataset | Configured share (token-weighted) | License | Revision pinned? | Notes |
+| # | HF dataset | Configured share | License | Revision pinned? | Notes |
 |---|---|---|---|---|---|
-| 1 | HuggingFaceFW/fineweb-edu | 44% | ODC-By 1.0 | ⏳ B2 work | High-quality educational subset; Llama-3-generated quality classifier |
-| 2 | bigcode/the-stack-v2 | 18% | BigCode Open RAIL-M (T&Cs accepted 2026-05-11) | ⏳ | Code |
-| 3 | wikimedia/wikipedia (20231101.en) | 6% | CC-BY-SA 4.0 | ⏳ | English Wikipedia snapshot |
-| 4 | pg19 | 5% | Public domain (Project Gutenberg pre-1919) | ⏳ | Books |
-| 5 | allenai/peS2o | 6% | ODC-By 1.0 | ⏳ | Academic |
-| 6 | open-web-math/open-web-math | 7% | ODC-By 1.0 | ⏳ | Math text from CommonCrawl |
-| 7 | HuggingFaceH4/stack-exchange-preferences | 2% | CC-BY-SA 4.0 | ⏳ | Q&A (question field only) |
-| 8 | ai4bharat/sangraha (split=hin) | 4% | CC-BY-4.0 | ⏳ | Hindi (sovereign hedge); part of Sangraha's 251B-token, 22-language corpus |
-| 9-13 | mc4 → allenai/c4 multilingual (es, zh, ar, fr, de) | 8% (1.5%+1.5%+1.5%+1.5%+2%) | ODC-By 1.0 | ⏳ | Secondary languages |
+| 1 | HuggingFaceFW/fineweb-edu | 44.0% | ODC-By 1.0 | ⏳ B2 work | High-quality educational subset; absorbs Nemotron-CC share pending NVIDIA approval |
+| 2 | bigcode/the-stack-v2 | 18.0% | BigCode Open RAIL-M (T&Cs accepted 2026-05-11) | ⏳ B2 work | Code |
+| 3 | wikimedia/wikipedia (20231101.en) | 6.0% | CC-BY-SA 4.0 | ⏳ B2 work | English Wikipedia snapshot |
+| 4 | pg19 | 5.0% | Public domain (Project Gutenberg pre-1919) | ⏳ B2 work | Books |
+| 5 | allenai/peS2o | 6.0% | ODC-By 1.0 | ⏳ B2 work | Academic |
+| 6 | open-web-math/open-web-math | 7.0% | ODC-By 1.0 | ⏳ B2 work | Math; absorbs proof-pile-2 share (dropped due to loader fragility) |
+| 7 | HuggingFaceH4/stack-exchange-preferences | 2.0% | CC-BY-SA 4.0 | ⏳ B2 work | Q&A (question field only) |
+| 8 | ai4bharat/sangraha (verified, split=hin) | 4.0% | CC-BY-4.0 | ⏳ B2 work | Hindi sovereign hedge |
+| 9 | mc4 (es) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
+| 10 | mc4 (zh) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
+| 11 | mc4 (ar) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
+| 12 | mc4 (fr) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
+| 13 | mc4 (de) | 2.0% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
 
-**Total**: 100% (validated at run-start; mixture sampler now token-weighted per P0-6 fix)
+**Total**: 100.0% (validated at run-start; mixture sampler is token-weighted per P0-6 fix)
 <!-- AUTO:end -->
 
 ### Permanently excluded from training

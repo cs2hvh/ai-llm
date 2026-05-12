@@ -146,11 +146,32 @@ decontamination:
   # Set this to a pre-built index for fast pilot/base startup:
   # index_path: artifacts/decontamination_index.json
   benchmarks:
+    # Multilingual MCQ adapters (used via the heavyweight Benchmark adapter path)
     - id: mmlu-prox
       sample_size: 200
     - id: belebele
       sample_size: 200
     - id: milu
+      sample_size: 200
+    # Extended v1-gate prompt-only loaders (added 2026-05-12 per model card).
+    # These cover the rest of the planned eval gate. Use a pre-built index
+    # in production (index_path above) — live-build of all 11 benchmarks
+    # is ~10-15 min at run-start.
+    - id: mmlu-pro
+      sample_size: 200
+    - id: humaneval-plus
+      sample_size: 200
+    - id: mbpp-plus
+      sample_size: 200
+    - id: gsm8k
+      sample_size: 200
+    - id: math
+      sample_size: 200
+    - id: mgsm
+      sample_size: 50   # per-language; 50×7 langs = 350 effective
+    - id: bbh
+      sample_size: 30   # per-subtask; 30×27 subtasks = 810 effective
+    - id: ifeval
       sample_size: 200
   report_csv_path: artifacts/decontamination_report.csv
 

@@ -127,8 +127,10 @@ def _instantiate_benchmark_for_decontam(bench_id: str):
         from myllm.eval.benchmarks import MILUBenchmark
         return MILUBenchmark()
     raise ValueError(
-        f"unknown benchmark id for decontamination: {bench_id!r}. "
-        f"Known: mmlu-prox, belebele, milu."
+        f"unknown benchmark id for decontamination adapter path: {bench_id!r}. "
+        f"Known adapters: mmlu-prox, belebele, milu. "
+        f"For prompt-only loaders (gsm8k, math, etc.) see "
+        f"src/myllm/data/prompt_loaders.py."
     )
 
 
@@ -169,6 +171,15 @@ def build_decontamination_index(decon_cfg: dict | None) -> DecontaminationIndex 
         hash_seed=int(decon_cfg.get("hash_seed", 0xDECAF)),
     )
     idx = DecontaminationIndex(cfg)
+    # Two registry paths:
+    #   - Heavyweight Benchmark adapters (mmlu-prox, belebele, milu) used by
+    #     the eval harness — reuse their load_examples to keep prompt
+    #     formatting consistent with eval-time scoring.
+    #   - Prompt-only loaders (mmlu-pro, humaneval-plus, mbpp-plus, gsm8k,
+    #     math, mgsm, bbh, ifeval) added 2026-05-12 to cover the extended
+    #     v1 gate set without building full Benchmark adapters yet.
+    from myllm.data.prompt_loaders import PROMPT_LOADERS, load_prompts
+    _ADAPTER_IDS = {"mmlu-prox", "belebele", "milu"}
     for entry in benchmarks_cfg:
         bench_id = entry["id"]
         sample_size = entry.get("sample_size")
@@ -177,8 +188,17 @@ def build_decontamination_index(decon_cfg: dict | None) -> DecontaminationIndex 
             id=bench_id,
             sample_size=sample_size,
         )
-        bench = _instantiate_benchmark_for_decontam(bench_id)
-        prompts = extract_prompts_from_benchmark(bench, sample_size=sample_size)
+        if bench_id in _ADAPTER_IDS:
+            bench = _instantiate_benchmark_for_decontam(bench_id)
+            prompts = extract_prompts_from_benchmark(bench, sample_size=sample_size)
+        elif bench_id in PROMPT_LOADERS:
+            prompts = load_prompts(bench_id, sample_size=sample_size)
+        else:
+            raise ValueError(
+                f"unknown benchmark id for decontamination: {bench_id!r}. "
+                f"Known adapters: {sorted(_ADAPTER_IDS)}; "
+                f"prompt loaders: {sorted(PROMPT_LOADERS)}"
+            )
         idx.add_benchmark(bench_id, prompts)
     log.info(
         "decontamination_index_built",

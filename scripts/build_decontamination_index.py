@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
@@ -31,9 +32,16 @@ from myllm.data.decontamination import (  # noqa: E402
     DecontaminationIndex,
     extract_prompts_from_benchmark,
 )
+from myllm.data.prompt_loaders import PROMPT_LOADERS, load_prompts  # noqa: E402
 from myllm.utils import configure_logging, get_logger  # noqa: E402
 
 log = get_logger(__name__)
+
+
+# Benchmarks served by the heavyweight Benchmark adapter in src/myllm/eval/.
+# Everything else is served by the lightweight prompt-only loaders in
+# src/myllm/data/prompt_loaders.py.
+_BENCHMARK_ADAPTER_IDS = {"mmlu-prox", "belebele", "milu"}
 
 
 def _instantiate_benchmark(bench_id: str):
@@ -49,8 +57,26 @@ def _instantiate_benchmark(bench_id: str):
         from myllm.eval.benchmarks import MILUBenchmark
         return MILUBenchmark()
     raise ValueError(
-        f"unknown benchmark id: {bench_id!r}. Known: mmlu-prox, belebele, milu."
+        f"unknown benchmark id: {bench_id!r}. "
+        f"Known adapters: {sorted(_BENCHMARK_ADAPTER_IDS)}"
     )
+
+
+_DEFAULT_BENCHMARKS = (
+    # Existing 3 gate benchmarks (multilingual MCQs via Benchmark adapters)
+    "mmlu-prox",
+    "belebele",
+    "milu",
+    # Extended gate set added 2026-05-12 per v1 model card
+    "mmlu-pro",
+    "humaneval-plus",
+    "mbpp-plus",
+    "gsm8k",
+    "math",
+    "mgsm",
+    "bbh",
+    "ifeval",
+)
 
 
 def main() -> int:
@@ -63,8 +89,11 @@ def main() -> int:
     p.add_argument(
         "--benchmarks",
         nargs="+",
-        default=["mmlu-prox", "belebele", "milu"],
-        help="Benchmark ids to include (default: all three gate benchmarks).",
+        default=list(_DEFAULT_BENCHMARKS),
+        help=(
+            "Benchmark ids to include. Default covers the v1 gate set: "
+            f"{', '.join(_DEFAULT_BENCHMARKS)}."
+        ),
     )
     p.add_argument(
         "--ngram-size",
@@ -97,10 +126,28 @@ def main() -> int:
 
     for bench_id in args.benchmarks:
         log.info("indexing_benchmark", id=bench_id, sample_size=args.sample_size)
-        bench = _instantiate_benchmark(bench_id)
-        prompts = extract_prompts_from_benchmark(
-            bench, split=args.split, sample_size=args.sample_size, seed=args.seed
-        )
+        if bench_id in _BENCHMARK_ADAPTER_IDS:
+            # Full Benchmark adapter — used for multilingual MCQ benches
+            # where the contamination-relevant text is the formatted
+            # prompt (question + choices) that the adapter produces.
+            bench = _instantiate_benchmark(bench_id)
+            prompts = extract_prompts_from_benchmark(
+                bench, split=args.split, sample_size=args.sample_size, seed=args.seed
+            )
+        elif bench_id in PROMPT_LOADERS:
+            # Lightweight prompt-only loader (most v1 gate benchmarks).
+            # Each loader knows its own default split — only override if
+            # the user passed a non-default --split.
+            loader_kwargs: dict[str, Any] = {"sample_size": args.sample_size}
+            if args.split != "test":
+                loader_kwargs["split"] = args.split
+            prompts = load_prompts(bench_id, **loader_kwargs)
+        else:
+            raise ValueError(
+                f"unknown benchmark id: {bench_id!r}. "
+                f"Known adapters: {sorted(_BENCHMARK_ADAPTER_IDS)}; "
+                f"known prompt loaders: {sorted(PROMPT_LOADERS)}"
+            )
         idx.add_benchmark(bench_id, prompts)
         sig = idx.signatures[bench_id]
         log.info(

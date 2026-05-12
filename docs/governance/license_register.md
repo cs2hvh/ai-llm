@@ -73,6 +73,34 @@ This is feasible because:
 
 ---
 
+## Benchmark datasets (decontamination + eval)
+
+The pretrain corpus is n-gram-decontaminated against these benchmarks. The
+*benchmark* license matters here because we ingest prompt text into the
+decontamination index (which lives alongside training artifacts) — not for
+training, but for filtering. All eight extended-gate benchmarks below are
+permissive (MIT or Apache-2.0).
+
+| Benchmark id | HF dataset | License | Used for |
+|---|---|---|---|
+| mmlu-prox | li-lab/MMLU-ProX | MIT | Decon + eval |
+| belebele | facebook/belebele | CC-BY-SA 4.0 | Decon + eval |
+| milu | ai4bharat/MILU | CC-BY 4.0 | Decon + eval |
+| mmlu-pro | TIGER-Lab/MMLU-Pro | MIT | Decon + planned eval |
+| humaneval-plus | evalplus/humanevalplus | MIT | Decon + planned eval |
+| mbpp-plus | evalplus/mbppplus | MIT | Decon + planned eval |
+| gsm8k | openai/gsm8k | MIT | Decon + planned eval |
+| math | HuggingFaceH4/MATH-500 | MIT | Decon + planned eval |
+| mgsm | juletxara/mgsm | MIT | Decon + planned eval |
+| bbh | maveriq/bigbenchhard | Apache-2.0 | Decon + planned eval |
+| ifeval | google/IFEval | Apache-2.0 | Decon + planned eval |
+
+LiveCodeBench and RULER are intentionally NOT in the decontamination
+index: LiveCodeBench is release-versioned (re-index per release in Phase C
+when eval lands), RULER is synthetic and generated at eval time.
+
+---
+
 ## Acceptance log
 
 | Date | Action | By |

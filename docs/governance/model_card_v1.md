@@ -12,11 +12,11 @@
   - v1: 1T-token internal pretrain checkpoint (this card)
   - v1.5 (planned): continued to 3T tokens if v1 eval clears continuation criteria
 <!-- AUTO:start name="architecture" -->
-- **Architecture**: 16 layers × 2048 hidden × 4× FFN × GQA 16:4 × tied embeddings × RMSNorm + SwiGLU + RoPE (base 500000, Llama-3.2 value) + QK-norm
-- **Training tokens**: 1T (target for v1, called "internal v1 / stack validation"; continuation path to 3T planned if eval curves are healthy)
+- **Architecture**: 16 layers × 2048 hidden × 4× FFN × GQA 32:8 × tied embeddings × RMSNorm + SwiGLU + RoPE (base 500,000) + QK-norm
+- **Training tokens**: 1T (target for v1)
 - **Tokenizer**: SentencePiece Unigram, 131k vocab, NFKC + Metaspace, byte_fallback
-- **Context length**: 8k natively (matches Llama 3.2 1B) — long-context anneal to 32k via YaRN in v1.x (Phase 4 follow-up)
-- **Mixed precision**: bf16
+- **Context length**: 8k natively — long-context anneal to 32k via YaRN
+- **Mixed precision**: bfloat16
 <!-- AUTO:end -->
 
 > **Note**: the architecture block above is auto-rendered from `configs/base_1b.yaml` (and the sources table from `configs/data/pretrain_mix.yaml`) via `scripts/render_governance_cards.py`. Regenerate at every release to avoid template drift. The values below are accurate as of 2026-05-12 commit.
