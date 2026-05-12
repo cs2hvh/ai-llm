@@ -31,7 +31,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from myllm.training.loss import distillation_mixed_loss
+from myllm.training.loss import (
+    chunked_cross_entropy_with_z_loss,
+    distillation_mixed_loss,
+)
 
 
 def make_train_step(
@@ -43,6 +46,8 @@ def make_train_step(
     distill_alpha: float = 1.0,
     distill_temperature: float = 1.0,
     teacher_weights: tuple[float, ...] | None = None,
+    use_chunked_ce: bool = False,
+    chunked_ce_num_chunks: int = 8,
 ) -> Callable[[dict[str, Any], dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]]:
     """Return a JIT-compiled ``(state, batch) -> (state, metrics)`` function.
 
@@ -60,6 +65,17 @@ def make_train_step(
     when teacher data is actually streamed into the batch. The intended
     usage is: stable-phase loop omits teacher data, decay-phase loop
     includes it; the same ``train_step`` function works for both.
+
+    Chunked CE (2026-05-12, senior reviewer pushback):
+        use_chunked_ce:      when True, the stable-phase loss uses
+            ``chunked_cross_entropy_with_z_loss`` which streams the vocab
+            in ``chunked_ce_num_chunks`` slices. Avoids materialising the
+            full ``[B, S, V]`` logit tensor (8.6 GB at production B=8
+            S=4097 V=131072 bf16). Decay-phase distillation still uses
+            full logits in this initial pass — chunked distillation is
+            tracked as a separate follow-up.
+        chunked_ce_num_chunks: ``vocab_size`` must be divisible.
+            Production V=131072 with num_chunks=8 -> chunk_size=16384.
     """
     try:
         import jax
@@ -84,14 +100,44 @@ def make_train_step(
         call_kwargs = {}
         if segment_ids is not None:
             call_kwargs["segment_ids"] = segment_ids
+
+        teacher_logits = batch.get("teacher_topk_logits")
+        teacher_indices = batch.get("teacher_topk_indices")
+
+        # Chunked-CE path: stable phase only (no teacher data this batch).
+        # The model returns (hidden, lm_head_weight, output_mult) instead
+        # of the full [B,S,V] logits, and the loss streams the vocab.
+        # When teacher data IS present (decay phase), fall through to the
+        # full-logit path below — chunked distillation is a separate
+        # follow-up.
+        if use_chunked_ce and teacher_logits is None:
+            (hidden, lm_head_w, output_mult), updated_non_trainable = (
+                model.stateless_call(
+                    trainable, non_trainable, batch["input_ids"],
+                    return_loss_inputs=True, **call_kwargs,
+                )
+            )
+            loss, ce_metrics = chunked_cross_entropy_with_z_loss(
+                hidden, lm_head_w, batch["labels"],
+                num_chunks=chunked_ce_num_chunks,
+                output_mult=output_mult,
+                ignore_index=ignore_index,
+                z_loss_coef=z_loss_coef,
+                loss_mask=loss_mask,
+            )
+            # Pad metrics so downstream logging (which expects kl/alpha)
+            # matches the distillation-path shape.
+            from keras import ops as _ops
+            metrics = dict(ce_metrics)
+            metrics["kl"] = _ops.cast(0.0, loss.dtype)
+            metrics["alpha"] = _ops.cast(1.0, loss.dtype)
+            return loss, (metrics, updated_non_trainable)
+
+        # Full-logit path: matches the pre-2026-05-12 behavior. Used when
+        # chunked CE is disabled OR when a teacher is present this batch.
         logits, updated_non_trainable = model.stateless_call(
             trainable, non_trainable, batch["input_ids"], **call_kwargs
         )
-        # Teacher data is optional. When absent (stable phase) we get
-        # plain CE+z-loss; when present (decay phase) we get the mixed
-        # CE+KL loss with the configured alpha.
-        teacher_logits = batch.get("teacher_topk_logits")
-        teacher_indices = batch.get("teacher_topk_indices")
         # B8 fix (2026-05-12): alpha is now dynamic per step. The loop
         # computes alpha = decay_phase.current_alpha(step) and injects
         # it into the batch as a JAX scalar. If the batch doesn't carry

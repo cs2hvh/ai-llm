@@ -56,7 +56,7 @@ class TransformerLM(keras.Model):
         self._rope_sin = keras.Variable(sin, trainable=False, name="rope_sin")
         self.built = True
 
-    def call(self, ids, segment_ids=None):
+    def call(self, ids, segment_ids=None, return_loss_inputs=False):
         """Forward pass.
 
         Args:
@@ -66,6 +66,13 @@ class TransformerLM(keras.Model):
                          masked so each document attends only to itself
                          (R2 in the 2026-05-11 dossier). When None, attention
                          falls back to plain causal (single-doc-per-sequence).
+            return_loss_inputs: when True, returns the tuple
+                         ``(hidden_states, lm_head_weight, output_mult)``
+                         instead of full logits. Used by the chunked-CE
+                         training path to avoid materialising ``[B, S, V]``.
+                         The output_mult is the muP LM-head multiplier
+                         (1.0 when muP is disabled). 2026-05-12: added
+                         per senior reviewer pushback on full-logit OOM.
         """
         # ids: [batch, seq]
         s = ops.shape(ids)[1]
@@ -79,17 +86,35 @@ class TransformerLM(keras.Model):
         for block in self.blocks:
             x = block(x, cos, sin, mask=mask, segment_ids=segment_ids)
         x = self.final_norm(x)
-        if self.config.tie_embeddings:
-            # Tie lm_head weight to the embedding matrix.
-            logits = ops.matmul(x, ops.transpose(self.embed.embeddings))
-        else:
-            logits = self.lm_head(x)
+
         # muP LM-head output multiplier (no-op when muP disabled).
         if (
             self.config.mup is not None
             and self.config.mup.apply_lm_head_output_mult
         ):
-            logits = logits * (1.0 / self.config.mup_width_multiplier())
+            output_mult = 1.0 / self.config.mup_width_multiplier()
+        else:
+            output_mult = 1.0
+
+        if return_loss_inputs:
+            # Chunked-CE path: hand the loss function the raw materials
+            # (hidden states + LM-head weight + muP mult) instead of full
+            # logits. The loss streams the vocab in chunks; we never
+            # materialise [B, S, V] in either forward or backward.
+            if self.config.tie_embeddings:
+                lm_head_w = self.embed.embeddings  # [V, H]
+            else:
+                # untied: self.lm_head.kernel is [H, V]; transpose to [V, H].
+                lm_head_w = ops.transpose(self.lm_head.kernel)
+            return x, lm_head_w, ops.cast(output_mult, x.dtype)
+
+        # Default path: apply the LM head, return full [B, S, V] logits.
+        if self.config.tie_embeddings:
+            logits = ops.matmul(x, ops.transpose(self.embed.embeddings))
+        else:
+            logits = self.lm_head(x)
+        if output_mult != 1.0:
+            logits = logits * output_mult
         return logits
 
     @classmethod
