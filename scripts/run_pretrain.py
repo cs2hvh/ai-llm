@@ -606,6 +606,17 @@ def main() -> int:
         help="Use random tokens instead of HF data — for end-to-end loop smoke.",
     )
     p.add_argument(
+        "--packed-corpus-root",
+        default=None,
+        help=(
+            "If set, read training data from a pre-built packed corpus at this "
+            "path (built by scripts/build_packed_corpus.py + "
+            "scripts/compose_mixed_corpus.py) instead of streaming from HF. "
+            "Recommended for production runs — gives token-exact resume and "
+            "avoids HF stream + filter + tokenize overhead at training time."
+        ),
+    )
+    p.add_argument(
         "--no-shard",
         action="store_true",
         help="Skip JAX mesh sharding (single-device debug runs only).",
@@ -742,6 +753,48 @@ def main() -> int:
             micro_batch=micro_batch,
             seq_len=model_input_len,
         )
+    elif args.packed_corpus_root is not None:
+        # Packed-corpus path: random-access reader on a pre-built corpus.
+        # Token-exact resume via peek of the checkpoint manifest's
+        # ``data_position`` field. No HF stream / filter / tokenize at
+        # training time — all of that ran offline during B2 corpus build.
+        from myllm.data.packed_corpus import (
+            PackedCorpusReader,
+            iter_packed_pairs,
+            peek_data_position_from_checkpoint,
+            sequence_id_from_data_position,
+        )
+        # Tokenizer is still loaded — we need EOS/PAD ids for batch padding
+        # and the tokenizer SHA256 cross-check.
+        tok_path = ensure_tokenizer_local(args.tokenizer_path, args.tokenizer_key)
+        tokenizer = load_tokenizer(tok_path)
+        verify_tokenizer_has_required(tokenizer)
+        eos_id = tokenizer.token_to_id(SpecialTokens.EOS)
+        pad_id = tokenizer.token_to_id(SpecialTokens.PAD)
+
+        reader = PackedCorpusReader(args.packed_corpus_root)
+        if reader.sequence_length != packed_seq_len:
+            raise ValueError(
+                f"packed corpus sequence_length {reader.sequence_length} != "
+                f"expected {packed_seq_len} (model.context_length + 1). "
+                f"Re-build the corpus with the matching sequence length."
+            )
+        # Resume cursor: peek manifest, convert to sequence_id.
+        resumed_data_position = peek_data_position_from_checkpoint(args.checkpoint_root)
+        start_sid = sequence_id_from_data_position(
+            resumed_data_position, packed_seq_len,
+        )
+        log.info(
+            "data_pipeline_packed_corpus",
+            root=str(args.packed_corpus_root),
+            total_sequences=reader.total_sequences,
+            total_tokens=reader.total_tokens,
+            tokenizer_sha256=reader.manifest.tokenizer_sha256,
+            resumed_data_position=resumed_data_position,
+            start_sequence_id=start_sid,
+        )
+        pair_iter = iter_packed_pairs(reader, start_sequence_id=start_sid)
+        batch_iter = batch_pairs(pair_iter, micro_batch, model_input_len)
     else:
         # Real path: tokenizer + HF stream + filters + tokenize + pack.
         tok_path = ensure_tokenizer_local(args.tokenizer_path, args.tokenizer_key)

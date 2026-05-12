@@ -297,12 +297,26 @@ def run(
 
         # Checkpoint ─────────────────────────────────────────────────────────
         if step_int % loop_config.checkpoint_every == 0:
-            ckpt.save(step_int, _state_to_save(state))
+            # data_position is mirrored to the manifest's `extra` so the
+            # packed-corpus data path can compute its resume cursor cheaply
+            # (peek a small JSON manifest instead of doing a full Orbax restore).
+            ckpt.save(
+                step_int,
+                _state_to_save(state),
+                extra={"data_position": int(state.get("data_position", 0))},
+            )
 
     # Final checkpoint, but skip if the cadence already saved it this step.
     final_step = int(state["step"])
     if final_step % loop_config.checkpoint_every != 0:
-        ckpt.save(final_step, _state_to_save(state), extra={"reason": "final"})
+        ckpt.save(
+            final_step,
+            _state_to_save(state),
+            extra={
+                "reason": "final",
+                "data_position": int(state.get("data_position", 0)),
+            },
+        )
     return state
 
 

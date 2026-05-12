@@ -572,6 +572,42 @@ class PackedCorpusReader:
         # Find the matching window by sequence_id (clean + robust).
         return [s for s in spans if s.sequence_id == sequence_id]
 
+    def get_segment_ids(self, sequence_id: int) -> np.ndarray:
+        """Reconstruct segment_ids for ``sequence_id`` from its DocSpan rows.
+
+        Each DocSpan in the sequence becomes one segment (0, 1, 2, ...).
+        Token positions not covered by any DocSpan get segment_id = -1,
+        the sentinel used by ``make_input_label_pairs`` to zero-out loss
+        at document boundaries and padding positions.
+
+        This matches the semantics of the original SequencePacker's
+        ``segment_ids`` output, where:
+          - EOS token between docs belongs to the doc it terminates
+            (same segment_id as preceding content)
+          - Padding positions get segment_id = -1
+
+        Returns a 1-D int32 array of length ``sequence_length``.
+        """
+        spans = self.get_provenance(sequence_id)
+        segment_ids = np.full(self.sequence_length, -1, dtype=np.int32)
+        # Spans are NOT guaranteed sorted by start in the parquet; sort here
+        # so segment_ids increase left-to-right.
+        sorted_spans = sorted(spans, key=lambda s: s.token_start_in_sequence)
+        for seg_idx, span in enumerate(sorted_spans):
+            start = max(0, span.token_start_in_sequence)
+            end = min(self.sequence_length, span.token_end_in_sequence)
+            if end > start:
+                segment_ids[start:end] = seg_idx
+        return segment_ids
+
+    def get_sequence_and_segments(
+        self, sequence_id: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convenience: ``(tokens uint32, segment_ids int32)`` for one sequence."""
+        tokens = self.get_sequence(sequence_id)
+        seg_ids = self.get_segment_ids(sequence_id)
+        return tokens, seg_ids
+
     def shard_manifest(self, shard_id: int) -> ShardManifest:
         path = self.root / f"shard-{shard_id:06d}" / "manifest.json"
         if not path.exists():
@@ -699,6 +735,104 @@ def write_corpus_manifest(
         total_tokens=total_tokens,
     )
     return manifest
+
+
+# --------------------------------------------------------------------------- #
+# Training-loop adapter — bridges PackedCorpusReader to the existing
+# ``make_input_label_pairs`` 4-tuple shape that the training loop consumes.
+# --------------------------------------------------------------------------- #
+def iter_packed_pairs(
+    reader: PackedCorpusReader,
+    *,
+    start_sequence_id: int = 0,
+) -> Iterator[tuple[list[int], list[int], list[int], list[int]]]:
+    """Yield ``(input_ids, labels, segment_ids, loss_mask)`` tuples from a
+    packed corpus — same shape as ``myllm.data.tokenize.make_input_label_pairs``.
+
+    For each packed sequence:
+      - input_ids = tokens[:-1]
+      - labels    = tokens[1:]
+      - segment_ids = segment_ids[:-1] (one per INPUT position)
+      - loss_mask = 1 where the input and the label share a segment
+        (so the next-token prediction is in-document) AND neither is -1
+        (padding); 0 at doc boundaries and padding.
+
+    ``start_sequence_id`` is the resume cursor. Combined with the training
+    state's persisted ``data_position``, exact resume is:
+        start_sequence_id = state["data_position"] // sequence_length
+    The packed corpus is canonical (sequence_id → tokens never changes),
+    so this gives bitwise-exact resume.
+    """
+    sid = start_sequence_id
+    while sid < reader.total_sequences:
+        tokens = reader.get_sequence(sid)
+        seg_ids = reader.get_segment_ids(sid)
+        if tokens.shape[0] < 2:
+            sid += 1
+            continue
+        # int conversion — the training loop's batch_pairs expects Python
+        # int / list, not numpy scalars (some downstream code is dtype-strict).
+        token_list = [int(t) for t in tokens]
+        seg_list = [int(s) for s in seg_ids]
+        input_ids = token_list[:-1]
+        labels = token_list[1:]
+        input_segments = seg_list[:-1]
+        label_segments = seg_list[1:]
+        loss_mask = [
+            1 if (a == b and a != -1) else 0
+            for a, b in zip(input_segments, label_segments, strict=False)
+        ]
+        yield input_ids, labels, input_segments, loss_mask
+        sid += 1
+
+
+def sequence_id_from_data_position(data_position: int, sequence_length: int) -> int:
+    """Convert a training-state ``data_position`` (in tokens) to the
+    matching packed-corpus sequence_id resume cursor.
+
+    Bitwise-exact resume: as long as the packed corpus has not been
+    re-built since the checkpoint was written, ``start_sequence_id``
+    fed to ``iter_packed_pairs`` recovers the exact token sequence
+    the trainer was about to consume.
+    """
+    if sequence_length < 1:
+        raise ValueError(f"sequence_length must be >= 1, got {sequence_length}")
+    return int(data_position) // int(sequence_length)
+
+
+def peek_data_position_from_checkpoint(checkpoint_root: str | Path) -> int:
+    """Return the persisted ``data_position`` from the latest complete
+    checkpoint under ``checkpoint_root``, or 0 if no checkpoint exists.
+
+    Cheap: reads only the per-step ``manifest.json`` (small JSON file),
+    never opens Orbax. Used by the packed-corpus data path to compute
+    its resume ``start_sequence_id`` before constructing the iterator.
+
+    The loop now writes ``data_position`` into the checkpoint manifest's
+    ``extra`` block on every save (loop.py); older checkpoints predating
+    that change will return 0 with no warning here — the caller can log
+    if it wants.
+    """
+    root = Path(checkpoint_root)
+    if not root.exists():
+        return 0
+    candidates: list[tuple[int, Path]] = []
+    for d in sorted(root.glob("step-*")):
+        manifest = d / "manifest.json"
+        if not manifest.exists():
+            continue
+        try:
+            m = _read_json(manifest)
+            candidates.append((int(m["step"]), manifest))
+        except (ValueError, KeyError, OSError):
+            continue
+    if not candidates:
+        return 0
+    # Latest by step.
+    candidates.sort(key=lambda x: x[0])
+    latest_manifest = _read_json(candidates[-1][1])
+    extra = latest_manifest.get("extra", {}) or {}
+    return int(extra.get("data_position", 0))
 
 
 # --------------------------------------------------------------------------- #

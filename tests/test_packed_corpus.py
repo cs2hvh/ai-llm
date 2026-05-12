@@ -38,8 +38,11 @@ from myllm.data.packed_corpus import (
     TOKEN_BYTES,
     TOKEN_DTYPE,
     byte_offset_for,
+    iter_packed_pairs,
     local_offset_for,
     packed_sequence_bytes,
+    peek_data_position_from_checkpoint,
+    sequence_id_from_data_position,
     shard_id_for,
     write_corpus_manifest,
 )
@@ -487,6 +490,196 @@ class TestReaderEdgeCases:
         assert 0 not in r._open_token_maps
         assert 1 in r._open_token_maps
         assert 2 in r._open_token_maps
+
+
+# --------------------------------------------------------------------------- #
+# Actual share computation
+# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Segment-ids reconstruction
+# --------------------------------------------------------------------------- #
+class TestSegmentIdsReconstruction:
+    """Pins the reader's get_segment_ids contract:
+    each DocSpan → one segment_id; uncovered positions → -1."""
+
+    def _build_seq_with_spans(self, tmp_path, sequence_length: int,
+                              span_ranges: list[tuple[int, int]]) -> Path:
+        """Build a 1-sequence corpus where the given (start, end) ranges
+        each become one DocSpan."""
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root,
+            sequence_length=sequence_length,
+            sequences_per_shard=1,
+            tokenizer_sha256="x",
+        )
+        spans = []
+        for i, (start, end) in enumerate(span_ranges):
+            spans.append(DocSpan(
+                doc_span_id=-1, sequence_id=-1,
+                source_id=f"src_{i}", doc_id_hash=i, dataset_revision_id="r",
+                token_start_in_sequence=start, token_end_in_sequence=end,
+                text_hash=i,
+            ))
+        w.append_sequence(np.zeros(sequence_length, dtype=TOKEN_DTYPE), spans)
+        w.close()
+        write_corpus_manifest(
+            root, corpus_name="c", tokenizer_sha256="x",
+            sequence_length=sequence_length, sequences_per_shard=1,
+            source_revisions={"src_0": "r", "src_1": "r"},
+            target_source_share={"src_0": 0.5, "src_1": 0.5},
+        )
+        return root
+
+    def test_segment_ids_assigned_in_left_to_right_order(self, tmp_path):
+        """Two spans covering [0,4) and [4,8) → segment_ids = [0,0,0,0,1,1,1,1]."""
+        root = self._build_seq_with_spans(tmp_path, 8, [(0, 4), (4, 8)])
+        r = PackedCorpusReader(root)
+        seg = r.get_segment_ids(0)
+        np.testing.assert_array_equal(seg, [0, 0, 0, 0, 1, 1, 1, 1])
+
+    def test_uncovered_positions_get_sentinel_minus_one(self, tmp_path):
+        """Position 0..3 covered, 4..7 NOT in any span → -1 sentinel."""
+        root = self._build_seq_with_spans(tmp_path, 8, [(0, 4)])
+        r = PackedCorpusReader(root)
+        seg = r.get_segment_ids(0)
+        np.testing.assert_array_equal(seg, [0, 0, 0, 0, -1, -1, -1, -1])
+
+    def test_segment_ids_robust_to_unsorted_spans(self, tmp_path):
+        """Spans in parquet may not be sorted by start; reconstruction
+        must still assign segment_ids in left-to-right order."""
+        # Build [(4,8), (0,4)] in writer order — second-emitted span comes
+        # earlier in the sequence.
+        root = self._build_seq_with_spans(tmp_path, 8, [(4, 8), (0, 4)])
+        r = PackedCorpusReader(root)
+        seg = r.get_segment_ids(0)
+        # After sorting by start, [0,4) is segment 0 and [4,8) is segment 1.
+        np.testing.assert_array_equal(seg, [0, 0, 0, 0, 1, 1, 1, 1])
+
+    def test_get_sequence_and_segments_returns_both(self, tmp_path):
+        root = self._build_seq_with_spans(tmp_path, 8, [(0, 8)])
+        r = PackedCorpusReader(root)
+        tokens, seg = r.get_sequence_and_segments(0)
+        assert tokens.shape == (8,)
+        assert seg.shape == (8,)
+        np.testing.assert_array_equal(seg, [0] * 8)
+
+
+# --------------------------------------------------------------------------- #
+# iter_packed_pairs — bridge to make_input_label_pairs shape
+# --------------------------------------------------------------------------- #
+class TestIterPackedPairs:
+    def test_yields_4_tuples_with_correct_shapes(self, tmp_path):
+        root = _build_corpus(
+            tmp_path, n_sequences=3, sequence_length=8, sequences_per_shard=2,
+        )
+        r = PackedCorpusReader(root)
+        results = list(iter_packed_pairs(r, start_sequence_id=0))
+        assert len(results) == 3
+        for input_ids, labels, segment_ids, loss_mask in results:
+            assert len(input_ids) == 7   # seq_len - 1
+            assert len(labels) == 7
+            assert len(segment_ids) == 7
+            assert len(loss_mask) == 7
+
+    def test_input_ids_is_tokens_minus_last(self, tmp_path):
+        root = _build_corpus(
+            tmp_path, n_sequences=1, sequence_length=8, sequences_per_shard=1,
+        )
+        r = PackedCorpusReader(root)
+        original = r.get_sequence(0)
+        (input_ids, labels, _, _), = iter_packed_pairs(r)
+        assert input_ids == [int(t) for t in original[:-1]]
+        assert labels == [int(t) for t in original[1:]]
+
+    def test_loss_mask_zero_at_segment_boundaries(self, tmp_path):
+        """Where segment_ids[i] != segment_ids[i+1], loss_mask is 0."""
+        # Build a 1-sequence corpus with two spans → boundary at position 4.
+        root = tmp_path / "c"
+        w = PackedCorpusWriter(
+            root, sequence_length=8, sequences_per_shard=1,
+            tokenizer_sha256="x",
+        )
+        spans = [
+            DocSpan(-1, -1, "a", 1, "r", 0, 4, 1),
+            DocSpan(-1, -1, "b", 2, "r", 4, 8, 2),
+        ]
+        w.append_sequence(np.arange(8, dtype=TOKEN_DTYPE), spans)
+        w.close()
+        write_corpus_manifest(
+            root, corpus_name="c", tokenizer_sha256="x",
+            sequence_length=8, sequences_per_shard=1,
+            source_revisions={"a": "r", "b": "r"},
+            target_source_share={"a": 0.5, "b": 0.5},
+        )
+        r = PackedCorpusReader(root)
+        (_, _, segment_ids, loss_mask), = iter_packed_pairs(r)
+        # Sequence segs: [0,0,0,0,1,1,1,1]
+        # Inputs:  segs[:-1] = [0,0,0,0,1,1,1]
+        # Labels:  segs[1:]  = [0,0,0,1,1,1,1]
+        # Loss mask = 1 where they match: [1,1,1,0,1,1,1]
+        assert loss_mask == [1, 1, 1, 0, 1, 1, 1]
+        assert segment_ids == [0, 0, 0, 0, 1, 1, 1]
+
+    def test_start_sequence_id_skips_earlier_sequences(self, tmp_path):
+        root = _build_corpus(
+            tmp_path, n_sequences=5, sequence_length=8, sequences_per_shard=3,
+        )
+        r = PackedCorpusReader(root)
+        results = list(iter_packed_pairs(r, start_sequence_id=3))
+        assert len(results) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Resume cursor: data_position → sequence_id
+# --------------------------------------------------------------------------- #
+class TestResumeCursor:
+    def test_sequence_id_from_data_position_basic(self):
+        # data_position=0 → sid 0; 8K tokens → sid 1 (at seq_len=8K); 16K → 2
+        assert sequence_id_from_data_position(0, 8192) == 0
+        assert sequence_id_from_data_position(8192, 8192) == 1
+        assert sequence_id_from_data_position(16384, 8192) == 2
+
+    def test_sequence_id_from_data_position_rounds_down(self):
+        # Partial sequence consumption rounds down — exact resume to the
+        # last fully-completed sequence (the next batch retries the partial).
+        assert sequence_id_from_data_position(8000, 8192) == 0
+        assert sequence_id_from_data_position(8193, 8192) == 1
+
+    def test_sequence_id_invalid_seq_len_raises(self):
+        with pytest.raises(ValueError):
+            sequence_id_from_data_position(100, 0)
+
+    def test_peek_returns_zero_when_no_checkpoint_dir(self, tmp_path):
+        assert peek_data_position_from_checkpoint(tmp_path / "does_not_exist") == 0
+
+    def test_peek_returns_zero_when_no_step_dirs(self, tmp_path):
+        d = tmp_path / "ckpt"
+        d.mkdir()
+        assert peek_data_position_from_checkpoint(d) == 0
+
+    def test_peek_returns_extra_data_position_from_latest_step(self, tmp_path):
+        # Create two step dirs with manifests carrying data_position.
+        d = tmp_path / "ckpt"
+        for step, dp in [(100, 50_000), (200, 150_000)]:
+            sd = d / f"step-{step:09d}"
+            sd.mkdir(parents=True)
+            (sd / "manifest.json").write_text(
+                f'{{"step": {step}, "extra": {{"data_position": {dp}}}}}'
+            )
+        # Latest = step 200 → data_position 150_000.
+        assert peek_data_position_from_checkpoint(d) == 150_000
+
+    def test_peek_returns_zero_when_extra_missing_data_position(self, tmp_path):
+        """Older checkpoints predating the loop change won't have
+        data_position in extra; peek should return 0 (caller can log)."""
+        d = tmp_path / "ckpt"
+        sd = d / "step-000000050"
+        sd.mkdir(parents=True)
+        (sd / "manifest.json").write_text(
+            '{"step": 50, "extra": {"reason": "spike_marker"}}'
+        )
+        assert peek_data_position_from_checkpoint(d) == 0
 
 
 # --------------------------------------------------------------------------- #
