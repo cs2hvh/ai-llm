@@ -41,6 +41,13 @@ from pathlib import Path
 
 # Set this BEFORE any keras / jax import so the JAX backend resolves correctly.
 os.environ.setdefault("KERAS_BACKEND", "jax")
+# Force the harness onto CPU so its Orbax restore uses the same sharding
+# topology as the subprocess (which itself pins JAX_PLATFORMS=cpu below).
+# Without this, on a GPU pod the harness picks GPU as the default platform
+# and Orbax fails with "sharding ... Got None" when restoring a checkpoint
+# whose sharding metadata points at CPU devices. The L3 canary is tiny + by
+# design CPU-runnable in seconds; no reason to involve the GPU.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
