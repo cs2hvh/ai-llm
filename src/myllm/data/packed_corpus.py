@@ -831,7 +831,19 @@ def iter_packed_pairs(
 
     ``start_sequence_id`` is the resume cursor. Combined with the training
     state's persisted ``data_position``, exact resume is:
-        start_sequence_id = state["data_position"] // sequence_length
+        start_sequence_id = state["data_position"] // model_input_len
+
+    where ``model_input_len = model_cfg.context_length`` (the number of
+    tokens per sequence the **model** sees after the next-token shift,
+    NOT the packed sequence length which is ``model_input_len + 1``).
+
+    The training loop advances ``data_position`` by
+    ``B * input_ids.shape[1]`` per batch, and ``input_ids.shape[1] ==
+    model_input_len``. Caller (run_pretrain.py) is responsible for
+    passing the right length to ``sequence_id_from_data_position`` —
+    do NOT use ``packed_seq_len`` or off-by-one corruption follows on
+    every resume. See 2026-05-12 P0 fix from the packed-corpus L3 canary.
+
     The packed corpus is canonical (sequence_id → tokens never changes),
     so this gives bitwise-exact resume.
     """

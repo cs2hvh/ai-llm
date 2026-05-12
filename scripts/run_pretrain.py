@@ -791,9 +791,20 @@ def main() -> int:
                 f"Re-build the corpus with the matching sequence length."
             )
         # Resume cursor: peek manifest, convert to sequence_id.
+        #
+        # 2026-05-12 P0 fix from packed-corpus L3 canary: the conversion
+        # MUST divide by ``model_input_len`` (= context_length), not
+        # ``packed_seq_len`` (= context_length + 1). The loop increments
+        # ``data_position`` by ``B * input_ids.shape[1]`` per consumed
+        # batch (see loop.py:_advance_data_position), and ``input_ids``
+        # has shape ``[B, model_input_len]`` — NOT packed_seq_len.
+        # The previous code divided by packed_seq_len and produced an
+        # off-by-one (e.g., data_position=128 / 33 = 3 instead of the
+        # correct 128 / 32 = 4) so every resume re-consumed the last
+        # already-trained-on sequence, silently corrupting training.
         resumed_data_position = peek_data_position_from_checkpoint(args.checkpoint_root)
         start_sid = sequence_id_from_data_position(
-            resumed_data_position, packed_seq_len,
+            resumed_data_position, model_input_len,
         )
         log.info(
             "data_pipeline_packed_corpus",
