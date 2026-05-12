@@ -1,6 +1,18 @@
 # MyLLM — Project Handoff & Review Brief
 *Snapshot date: 2026-05-11 (revised: 2026-05-12 after second external review + dossier verification)*
 
+> **Note (2026-05-12 PM)**: this doc is a frozen handoff snapshot. For the
+> live status see [`/root/llm-build/README.md`](../README.md). Major work
+> completed AFTER this snapshot:
+> - Phase A: 6 P0 integration bugs fixed
+> - Phase B batch 1 + re-audit: B1/B4/B6/B7/B8/B9 + state-preservation fixes
+> - P2 governance: decon extended to 11 benchmarks; auto-render of model/data cards
+> - Full-scale bug coverage: 4 gap tests + quarantine graceful-degrade fix
+> - Test count: 256 → **370 passing**
+>
+> Reviewer Q&A locking B2 design: [`reviewer_qa_2026-05-12.md`](reviewer_qa_2026-05-12.md)
+> Full-scale bug coverage map: [`full_scale_bug_coverage_2026-05-12.md`](full_scale_bug_coverage_2026-05-12.md)
+
 ## 2026-05-12 changelog (since first version)
 
 After a second external review (enterprise 2026 research review, archived as `docs/MyLLM_Enterprise_2026_Research_Review.pdf`) plus an independent dossier WebFetch verification pass:
