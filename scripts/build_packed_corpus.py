@@ -200,6 +200,11 @@ def main() -> int:
                         "to pin the dataset version for reproducibility.")
     p.add_argument("--sample-limit", type=int, default=None,
                    help="Cap on docs to PROCESS (pre-filter). For smoke tests.")
+    p.add_argument("--target-tokens", type=int, default=None,
+                   help="Token-level emission cap. Stops appending once "
+                        "this many tokens have been written to disk. Bounds "
+                        "wall time when doc sizes vary across sources "
+                        "(pg19 books vs FineWeb-Edu pages).")
     p.add_argument("--no-dedupe", action="store_true",
                    help="Disable MinHash+LSH dedupe (per-source). Default: enabled.")
     p.add_argument("--no-filters", action="store_true",
@@ -325,6 +330,7 @@ def main() -> int:
         target_share=target_share,
         drop_last=args.drop_last,
         sample_limit=args.sample_limit,
+        target_tokens=args.target_tokens,
         r2_prefix=per_source_r2_prefix,
         delete_local_after_upload=args.delete_local_after_upload,
     )

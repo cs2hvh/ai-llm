@@ -257,6 +257,7 @@ def build_one_source(
     target_share: float = 1.0,
     drop_last: bool = True,
     sample_limit: int | None = None,
+    target_tokens: int | None = None,
     tokenize_batch_size: int = 1000,
     r2_prefix: str | None = None,
     delete_local_after_upload: bool = False,
@@ -393,6 +394,16 @@ def build_one_source(
         writer.append_sequence(tokens, spans)
         stats.sequences_emitted += 1
         stats.tokens_emitted += sequence_length
+        # Per-source token budget — stops emission once the cap is reached.
+        # Doesn't affect already-buffered tokens; pack_with_provenance's
+        # trailing-buffer behavior continues per `drop_last`.
+        if target_tokens is not None and stats.tokens_emitted >= target_tokens:
+            log.info(
+                "build_one_source_target_tokens_reached",
+                target_tokens=target_tokens,
+                tokens_emitted=stats.tokens_emitted,
+            )
+            break
 
     closed_shards = writer.close()
     # A per-source corpus is 100% one source by construction. The

@@ -31,22 +31,21 @@ sources:
     category: web
 
   # --- Code (18%) ----------------------------------------------------------
-  # 2026-05-12 SWAP: bigcode/the-stack-v2 stores only metadata + blob_id in
-  # its HF parquet; actual file content lives in Software Heritage / S3
-  # and requires per-blob HTTPS fetch. Our streaming pipeline can't ingest
-  # that out-of-band path without 100-200 LOC of custom loader work.
+  # 2026-05-12: code source status:
+  #   - bigcode/the-stack-v2: content out-of-band in Software Heritage / S3.
+  #     Our streaming pipeline can't fetch per-blob without custom loader.
+  #     Don't use until SWH blob-fetcher lands (Phase 4 work).
+  #   - bigcode/starcoderdata: GATED. Requires HF account agreement +
+  #     HF_TOKEN with access. Our pipeline streams it cleanly IF the
+  #     token is authorized. If you see "DatasetNotFoundError" at build
+  #     time, accept terms at https://huggingface.co/datasets/bigcode/starcoderdata
+  #     OR skip via --skip-sources bigcode/starcoderdata in the launcher.
   #
-  # Substituting bigcode/starcoderdata (the-stack-v1 lineage) — content is
-  # inline in parquet, streams cleanly. Slightly older (2023 snapshot vs
-  # v2's 2024) but same quality bar for a 1B base run; the difference
-  # matters at frontier scale (>30B) but not for 1B internal v1.
+  # Public fallback for code (no auth required, smaller scale):
+  #   - codeparrot/github-code-clean (~1TB before filter, GitHub-licensed,
+  #     content inline). Substitute by editing the dataset field below.
   #
-  # Re-evaluate switching back to the-stack-v2 when we either:
-  #   - write the SWH blob-fetcher loader (Phase 4 work), OR
-  #   - move to a CPU-pod build where the per-blob HTTPS latency is
-  #     parallelizable across many cores
-  #
-  # T&Cs accepted for both datasets in our HF account.
+  # T&Cs status: starcoderdata gating needs verification per-HF-account.
   - dataset: bigcode/starcoderdata
     share: 0.18
     text_field: content

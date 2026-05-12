@@ -462,6 +462,56 @@ class TestFineWebMinHashConfig:
 
 
 # --------------------------------------------------------------------------- #
+# target_tokens budget — Bug 2 fix from 2026-05-12 pilot smoke
+# --------------------------------------------------------------------------- #
+class TestTargetTokensBudget:
+    def test_emission_stops_at_token_budget(self, tmp_path):
+        """build_one_source must stop emitting once tokens_emitted >= target."""
+        # Each doc tokenizes to a small but non-trivial number of tokens via
+        # the stub. With many docs and a low target, the loop should break.
+        docs = [_make_doc(f"d{i}", f"document {i} with several words " * 10)
+                for i in range(500)]
+        stats, _ = build_one_source(
+            source_id="synth",
+            docs=docs,
+            tokenizer=_StubTokenizer(),
+            output_dir=tmp_path / "c",
+            sequence_length=32,
+            sequences_per_shard=4,
+            revision_id="r",
+            tokenizer_sha256="x",
+            eos_token_id=1,
+            dedupe_config=None,
+            target_tokens=64,  # very small budget — should break after ~2 sequences
+            drop_last=False,
+        )
+        # Cap is best-effort (we break AFTER appending a sequence, so the
+        # actual count is just >= target). Should be 64 or slightly more.
+        assert stats.tokens_emitted >= 64
+        assert stats.tokens_emitted <= 64 + 32  # bounded by one extra sequence
+
+    def test_no_target_emits_all(self, tmp_path):
+        """When target_tokens is None, emission stops only when docs run out."""
+        docs = [_make_doc(f"d{i}", f"document {i} text " * 3) for i in range(20)]
+        stats, _ = build_one_source(
+            source_id="synth",
+            docs=docs,
+            tokenizer=_StubTokenizer(),
+            output_dir=tmp_path / "c",
+            sequence_length=32,
+            sequences_per_shard=4,
+            revision_id="r",
+            tokenizer_sha256="x",
+            eos_token_id=1,
+            dedupe_config=None,
+            target_tokens=None,
+            drop_last=False,
+        )
+        # All 20 docs processed.
+        assert stats.docs_seen == 20
+
+
+# --------------------------------------------------------------------------- #
 # Batched tokenization — the perf-critical refactor
 # --------------------------------------------------------------------------- #
 class _BatchAwareStubTokenizer:

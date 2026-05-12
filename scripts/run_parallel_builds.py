@@ -47,9 +47,47 @@ def _resolve_source_list(pretrain_mix_path: Path) -> list[dict]:
     return cfg.get("sources", [])
 
 
-def _per_source_log_path(log_root: Path, dataset: str) -> Path:
-    safe = dataset.replace("/", "__").replace(":", "_")
-    return log_root / f"{safe}.log"
+def _unique_source_id(entry: dict) -> str:
+    """Stable unique id per (dataset, config_name, split) tuple.
+
+    Catches the multi-config-source collision class (mc4 × 5 configs all
+    naming themselves "mc4" → 5 processes fighting over the same output
+    dir + log file). Each row in pretrain_mix.yaml's sources list maps
+    to one unique build, regardless of duplicate dataset names.
+    """
+    dataset = entry["dataset"]
+    short = dataset.split("/")[-1].lower().replace(".", "_").replace("-", "_")
+    suffix_parts: list[str] = []
+    cfg = entry.get("config_name")
+    if cfg:
+        suffix_parts.append(str(cfg).replace(".", "_").replace("/", "_"))
+    split = entry.get("split")
+    if split and split != "train":
+        suffix_parts.append(f"split_{split}")
+    if suffix_parts:
+        return f"{short}_{'_'.join(suffix_parts)}"
+    return short
+
+
+def _write_per_source_yaml(
+    entry: dict, base_cfg: dict, tmp_dir: Path, unique_id: str,
+) -> Path:
+    """Write a single-source pretrain_mix.yaml for one subprocess to consume.
+
+    Avoids ambiguity when multiple yaml rows have the same `dataset` field
+    (mc4 with different config_name). build_packed_corpus.py looks up by
+    dataset name; with only one entry in the temp yaml, the lookup is
+    unambiguous.
+    """
+    cfg = {k: v for k, v in base_cfg.items() if k != "sources"}
+    cfg["sources"] = [entry]
+    out = tmp_dir / f"pretrain_mix_{unique_id}.yaml"
+    out.write_text(yaml.safe_dump(cfg))
+    return out
+
+
+def _per_source_log_path(log_root: Path, unique_id: str) -> Path:
+    return log_root / f"{unique_id}.log"
 
 
 def main() -> int:
@@ -69,6 +107,11 @@ def main() -> int:
     p.add_argument("--delete-local-after-upload", action="store_true")
     p.add_argument("--sample-limit", type=int, default=None,
                    help="Per-source doc cap. Forwarded to each subprocess.")
+    p.add_argument("--target-tokens-per-source", type=int, default=None,
+                   help="Per-source TOKEN budget proportional to share. "
+                        "Each source's --target-tokens is set to "
+                        "<this> * <source.share>. Bounds wall time when "
+                        "doc sizes vary (pg19 books vs FineWeb-Edu pages).")
     p.add_argument("--max-parallel", type=int, default=12,
                    help="Max concurrent source processes. Default 12 — "
                         "we have 13 sources + 128 CPU cores.")
@@ -90,10 +133,14 @@ def main() -> int:
     args = p.parse_args()
 
     pretrain_mix = Path(args.pretrain_mix_config)
+    base_cfg = yaml.safe_load(pretrain_mix.read_text())
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     log_root = Path(args.log_dir or (_REPO / "artifacts" / "build_logs"))
     log_root.mkdir(parents=True, exist_ok=True)
+    # Temp dir for per-source yamls (deleted on completion).
+    import tempfile
+    tmp_root = Path(tempfile.mkdtemp(prefix="parallel_build_"))
     revision = args.revision_id or f"build-{time.strftime('%Y%m%d')}"
     skip = {s.strip() for s in args.skip_sources.split(",") if s.strip()}
 
@@ -103,17 +150,46 @@ def main() -> int:
         print("ERROR: no sources to build after skip filter", file=sys.stderr)
         return 2
 
-    print(f"=== parallel build: {len(sources)} sources, max_parallel={args.max_parallel}")
-    for s in sources:
-        print(f"  - {s['dataset']} (share={s.get('share', 0):.3f})")
+    # Compute unique source_id per row. Detect (and refuse) duplicates as
+    # a defensive measure — should never happen with _unique_source_id's
+    # disambiguation, but useful insurance.
+    rows: list[dict] = []
+    seen_ids: dict[str, dict] = {}
+    for entry in sources:
+        uid = _unique_source_id(entry)
+        if uid in seen_ids:
+            print(
+                f"ERROR: duplicate unique_source_id {uid!r} for entries:\n"
+                f"  {seen_ids[uid]}\n  {entry}\n"
+                "Add a config_name or split to disambiguate.",
+                file=sys.stderr,
+            )
+            return 2
+        seen_ids[uid] = entry
+        rows.append({"entry": entry, "unique_id": uid})
 
-    # Build the per-source argv template.
-    def _make_argv(source_entry: dict) -> list[str]:
+    print(f"=== parallel build: {len(rows)} rows, max_parallel={args.max_parallel}")
+    for r in rows:
+        e = r["entry"]
+        suffix = ""
+        if e.get("config_name"):
+            suffix = f" ({e['config_name']})"
+        print(f"  - {r['unique_id']:<40} ← {e['dataset']}{suffix} "
+              f"(share={e.get('share', 0):.3f})")
+
+    # Build the per-source argv template — uses a single-source temp yaml
+    # so the build_packed_corpus.py CLI's source-lookup is unambiguous
+    # (avoids the mc4 multi-config collision class).
+    def _make_argv(row: dict) -> list[str]:
+        entry = row["entry"]
+        uid = row["unique_id"]
+        per_source_yaml = _write_per_source_yaml(entry, base_cfg, tmp_root, uid)
         argv = [
             sys.executable,
             str(_REPO / "scripts" / "build_packed_corpus.py"),
-            "--source", source_entry["dataset"],
-            "--pretrain-mix-config", str(pretrain_mix),
+            "--source", entry["dataset"],
+            "--source-id", uid,
+            "--pretrain-mix-config", str(per_source_yaml),
             "--model-config", str(args.model_config),
             "--tokenizer-path", str(args.tokenizer_path),
             "--output-root", str(output_root),
@@ -124,6 +200,11 @@ def main() -> int:
             argv.extend(["--sequence-length", str(args.sequence_length)])
         if args.sample_limit is not None:
             argv.extend(["--sample-limit", str(args.sample_limit)])
+        if args.target_tokens_per_source is not None:
+            # Allocate per-source tokens proportional to share.
+            per_source = int(args.target_tokens_per_source * float(entry.get("share", 0)))
+            if per_source > 0:
+                argv.extend(["--target-tokens", str(per_source)])
         if args.r2_prefix:
             argv.extend(["--r2-prefix", args.r2_prefix])
         if args.delete_local_after_upload:
@@ -136,8 +217,8 @@ def main() -> int:
             argv.append("--no-filters")
         return argv
 
-    # Schedule. Each source becomes a Popen; we cap concurrency at max_parallel.
-    pending = list(sources)
+    # Schedule. Each row becomes a Popen; we cap concurrency at max_parallel.
+    pending = list(rows)
     running: list[tuple[dict, subprocess.Popen, Path]] = []
     results: list[dict] = []
     t_start = time.time()
@@ -145,40 +226,43 @@ def main() -> int:
     while pending or running:
         # Launch up to max_parallel.
         while pending and len(running) < args.max_parallel:
-            s = pending.pop(0)
-            log_path = _per_source_log_path(log_root, s["dataset"])
-            print(f"[+] launching: {s['dataset']}  →  log: {log_path}")
+            row = pending.pop(0)
+            uid = row["unique_id"]
+            log_path = _per_source_log_path(log_root, uid)
+            print(f"[+] launching: {uid}  →  log: {log_path}")
             proc = subprocess.Popen(
-                _make_argv(s),
+                _make_argv(row),
                 stdout=open(log_path, "wb"),
                 stderr=subprocess.STDOUT,
                 env=os.environ,
             )
-            running.append((s, proc, log_path))
+            running.append((row, proc, log_path))
 
         # Poll running.
         time.sleep(2)
         still_running: list[tuple[dict, subprocess.Popen, Path]] = []
-        for s, proc, log_path in running:
+        for row, proc, log_path in running:
             rc = proc.poll()
             if rc is None:
-                still_running.append((s, proc, log_path))
+                still_running.append((row, proc, log_path))
                 continue
+            entry = row["entry"]
+            uid = row["unique_id"]
             wall = time.time() - t_start
-            print(f"[{'✓' if rc == 0 else '✗'}] done: {s['dataset']}  rc={rc}  "
+            print(f"[{'✓' if rc == 0 else '✗'}] done: {uid}  rc={rc}  "
                   f"wall={wall:.0f}s")
             # Parse the per-source JSON summary printed at the end of stdout.
             try:
                 log_text = log_path.read_text()
-                # The CLI prints the JSON summary on the last lines of stdout.
-                # Find the JSON object at the tail.
                 last_open = log_text.rfind("{")
                 summary = json.loads(log_text[last_open:].strip())
             except Exception:  # noqa: BLE001
                 summary = {"error": "could not parse summary", "log": str(log_path)}
             results.append({
-                "dataset": s["dataset"],
-                "share": float(s.get("share", 0)),
+                "unique_id": uid,
+                "dataset": entry["dataset"],
+                "config_name": entry.get("config_name"),
+                "share": float(entry.get("share", 0)),
                 "returncode": rc,
                 "log": str(log_path),
                 "summary": summary,
