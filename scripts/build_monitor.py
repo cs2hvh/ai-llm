@@ -65,9 +65,10 @@ class SourceState:
 
     @property
     def status(self) -> str:
-        if self.errors and self.final_summary is None:
+        is_done = self.finished_at is not None or self.final_summary is not None
+        if self.errors and not is_done:
             return "ERR"
-        if self.final_summary is not None:
+        if is_done:
             return "DONE"
         if self.started_at is None:
             return "QUEUE"
@@ -77,8 +78,13 @@ class SourceState:
     def runtime_seconds(self) -> float:
         if self.started_at is None:
             return 0.0
-        end = self.finished_at or time.time()
-        return end - self.started_at
+        # If we have a finished_at from the log, use that. Otherwise the
+        # source is still running — use the last event timestamp from its
+        # log if we have one, falling back to wall-clock now.
+        end = self.finished_at or self.last_seen_ts or time.time()
+        rt = end - self.started_at
+        # Guard against clock skew or log time-travel.
+        return max(0.0, rt)
 
     @property
     def tok_per_sec(self) -> float:
@@ -88,53 +94,126 @@ class SourceState:
         return self.tokens_so_far / rt
 
 
+def _parse_iso_timestamp(s: str) -> float | None:
+    """Parse a structlog ISO-8601 timestamp like "2026-05-12T13:18:35.123Z"
+    to a Unix epoch float. Returns None on parse failure."""
+    if not isinstance(s, str):
+        return None
+    try:
+        # Python's fromisoformat handles "Z" suffix from 3.11+; for older
+        # interpreters we strip it.
+        import datetime
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(s).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
 def _parse_log_file(path: Path, state: SourceState) -> None:
     """Read the (possibly partial) log file + update state in place.
 
     The log is a structlog JSON stream — each line is one event dict.
     Also tolerates non-JSON lines (Python traceback frames, etc.).
+    Uses event timestamps (from the log) NOT parse time, so monitor
+    restarts don't make rates look like 14 GB/s.
     """
     if not path.exists():
         return
     try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        # Concurrent writes from structlog + plain print() in
+        # build_packed_corpus.py occasionally interleave on the shared
+        # stdout, producing a line that's two JSON objects glued together.
+        # Detect "done" status via the canonical event marker in the whole
+        # file (regardless of which line it's on).
+        text = path.read_text()
+        # Done detection: prefer `packed_corpus_manifest_written` because it
+        # fires AFTER build_one_source_done and lives on its own log line
+        # (build_one_source_done's line gets stdout-tangled with the
+        # immediately-following corpus_manifest_uploaded event).
+        done_markers = (
+            '"event": "packed_corpus_manifest_written"',
+            '"event": "build_one_source_done"',
+            '"event": "corpus_manifest_uploaded"',
+        )
+        if state.finished_at is None:
+            for marker in done_markers:
+                idx = text.find(marker)
+                if idx == -1:
                     continue
-                if not (line.startswith("{") and line.endswith("}")):
-                    if "Traceback" in line or "Error" in line or "Exception" in line:
-                        state.errors.append(line[:240])
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                state.last_seen_ts = time.time()
-                lvl = e.get("level", "info")
-                evt = e.get("event", "")
-                if lvl == "error":
-                    state.errors.append(evt + ": " + json.dumps(
-                        {k: v for k, v in e.items()
-                         if k not in ("level", "timestamp", "event")}
-                    )[:240])
-                if evt == "hf_stream_open" and state.started_at is None:
-                    state.started_at = time.time()
-                elif evt == "build_one_source_start":
-                    state.started_at = state.started_at or time.time()
-                elif evt == "packed_corpus_shard_close":
-                    state.n_shards_closed += 1
-                    state.tokens_so_far += int(e.get("total_tokens", 0))
-                elif evt == "packed_corpus_shard_uploaded":
-                    state.n_shards_uploaded += 1
-                elif evt == "build_one_source_done":
+                ts_idx = text.find('"timestamp":', idx)  # forward search — timestamps come after event in our log format
+                if ts_idx == -1:
+                    ts_idx = text.rfind('"timestamp":', 0, idx)
+                if ts_idx != -1:
+                    ts_end = text.find('"', ts_idx + 13)
+                    ts_end2 = text.find('"', ts_end + 1)
+                    ts_str = text[ts_end + 1:ts_end2]
+                    state.finished_at = _parse_iso_timestamp(ts_str) or time.time()
+                else:
                     state.finished_at = time.time()
-                    state.docs_seen = int(e.get("docs_seen", state.docs_seen))
-                    state.docs_kept = int(e.get("docs_kept", state.docs_kept))
-                    state.docs_filtered = int(e.get("docs_filtered", state.docs_filtered))
-                    state.docs_deduped = int(e.get("docs_deduped", state.docs_deduped))
-                    state.docs_contaminated = int(e.get("docs_contaminated",
-                                                        state.docs_contaminated))
+                break
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if not line.startswith("{"):
+                if "Traceback" in line or "Error" in line or "Exception" in line:
+                    state.errors.append(line[:240])
+                continue
+            e = None
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                # Interleaved-line case: structlog and the final print() in
+                # build_packed_corpus.py occasionally glue two JSON objects
+                # onto the same line. Recover by walking braces to find the
+                # FIRST balanced object.
+                depth = 0
+                end = -1
+                for i, c in enumerate(line):
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                if end != -1:
+                    try:
+                        e = json.loads(line[:end])
+                    except json.JSONDecodeError:
+                        e = None
+            if e is None:
+                continue
+
+            evt_ts = _parse_iso_timestamp(e.get("timestamp"))
+            if evt_ts is not None:
+                state.last_seen_ts = evt_ts
+            lvl = e.get("level", "info")
+            evt = e.get("event", "")
+            if lvl == "error":
+                state.errors.append(evt + ": " + json.dumps(
+                    {k: v for k, v in e.items()
+                     if k not in ("level", "timestamp", "event")}
+                )[:240])
+            if evt == "hf_stream_open" and state.started_at is None:
+                state.started_at = evt_ts
+            elif evt == "build_one_source_start":
+                state.started_at = state.started_at or evt_ts
+            elif evt == "packed_corpus_shard_close":
+                state.n_shards_closed += 1
+                state.tokens_so_far += int(e.get("total_tokens", 0))
+            elif evt == "packed_corpus_shard_uploaded":
+                state.n_shards_uploaded += 1
+            elif evt == "build_one_source_done":
+                state.finished_at = evt_ts
+                state.docs_seen = int(e.get("docs_seen", state.docs_seen))
+                state.docs_kept = int(e.get("docs_kept", state.docs_kept))
+                state.docs_filtered = int(e.get("docs_filtered", state.docs_filtered))
+                state.docs_deduped = int(e.get("docs_deduped", state.docs_deduped))
+                state.docs_contaminated = int(e.get("docs_contaminated",
+                                                    state.docs_contaminated))
         # Try to capture the final JSON summary that build_packed_corpus.py
         # prints to stdout at the end (it's pretty-printed JSON, not structlog).
         if state.finished_at is not None and state.final_summary is None:
@@ -235,11 +314,21 @@ def _print_status(
         total_tokens += s.tokens_so_far
         total_shards += s.n_shards_closed
 
-    # Aggregate footer.
+    # Aggregate footer — anchor the rate on the EARLIEST started_at across
+    # sources, not the monitor's startup time. If no source has started
+    # yet, fall back to monitor-elapsed (which is 0s on --once).
+    start_times = [s.started_at for s in states.values() if s.started_at]
+    end_times = [s.last_seen_ts for s in states.values() if s.last_seen_ts]
+    if start_times and end_times:
+        build_elapsed = max(end_times) - min(start_times)
+    else:
+        build_elapsed = elapsed_total
     print("-" * 100)
-    aggregate_rate = total_tokens / elapsed_total if elapsed_total > 0 else 0.0
+    aggregate_rate = (
+        total_tokens / build_elapsed if build_elapsed > 0 else 0.0
+    )
     print(f"{'TOTAL':<48} {f'{n_run}/{n_done}/{n_err}':<6} "
-          f"{_format_secs(elapsed_total):>8} "
+          f"{_format_secs(build_elapsed):>8} "
           f"{total_shards:>8} "
           f"{_format_int(total_tokens):>10} "
           f"{_format_rate(aggregate_rate):>10}")
