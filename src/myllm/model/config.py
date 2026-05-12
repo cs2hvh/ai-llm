@@ -70,6 +70,21 @@ class ModelConfig(BaseModel):
     init_std: float = 0.02
     scaled_init_for_residuals: bool = False
 
+    # Activation checkpointing (jax.checkpoint per DecoderBlock).
+    #
+    # When True, the backward pass recomputes each block's forward activations
+    # instead of storing them. Cuts backward-stored activation memory ~4-8×
+    # at the cost of ~33% more compute (each block forward runs twice:
+    # once at forward, once at backward).
+    #
+    # 2026-05-12 (1B benchmark bisection on 5xH200): without this, the 1B
+    # model OOMed at compile time on seq=8192 (XLA requested 1.37 TB). With
+    # this on, the 1B model at seq=8192 fits at mb=1 on a single H200 and
+    # has measurable throughput. Default True for production safety; turn
+    # off only for small models where the 33% recompute tax outweighs the
+    # memory savings.
+    gradient_checkpointing: bool = True
+
     # Optional muP / muTransfer parameterization. When set, the model
     # applies the muP scaling factors documented in `docs/mup_design.md`
     # to enable zero-shot HP transfer from a small proxy to this model.

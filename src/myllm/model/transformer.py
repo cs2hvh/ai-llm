@@ -7,6 +7,15 @@ from keras import ops
 from myllm.model.config import ModelConfig
 from myllm.model.layers import DecoderBlock, RMSNorm, precompute_rope_cache
 
+# Optional jax import for activation checkpointing. The model still runs
+# correctly without it (e.g., TF backend or older JAX); gradient checkpointing
+# just becomes a no-op in that case.
+try:
+    import jax  # noqa: F401
+    _HAS_JAX = True
+except ImportError:
+    _HAS_JAX = False
+
 
 def causal_mask(seq_len: int, dtype: str = "float32"):
     """Return additive causal mask of shape ``[1, 1, seq_len, seq_len]``.
@@ -56,6 +65,25 @@ class TransformerLM(keras.Model):
         self._rope_sin = keras.Variable(sin, trainable=False, name="rope_sin")
         self.built = True
 
+        # 2026-05-12 (gradient checkpointing): force all sublayer Variables
+        # to materialise via a NON-CHECKPOINTED dummy forward. Without this
+        # warm-up, the very first real call() would lazy-init RMSNorm.scale /
+        # other Variables INSIDE the jax.checkpoint-traced function, causing
+        # an UnexpectedTracerError ("intermediate value escaped the trace
+        # scope"). Setting _building=True signals call() to skip the
+        # checkpoint wrap for this one pass.
+        if _HAS_JAX and getattr(self.config, "gradient_checkpointing", False):
+            self._building = True
+            try:
+                seq = (
+                    input_shape[1] if len(input_shape) > 1 else 8
+                )
+                seq = min(int(seq), int(self.config.context_length))
+                dummy = ops.zeros((1, seq), dtype="int32")
+                _ = self(dummy)
+            finally:
+                self._building = False
+
     def call(self, ids, segment_ids=None, return_loss_inputs=False):
         """Forward pass.
 
@@ -83,8 +111,34 @@ class TransformerLM(keras.Model):
         # combined (causal & same-segment) mask; otherwise pass a precomputed
         # causal mask as before.
         mask = None if segment_ids is not None else causal_mask(s, dtype=x.dtype)
+
+        # Gradient checkpointing per block (when enabled + JAX backend).
+        # 2026-05-12: required to fit 1B model at seq=8192 on a single H200.
+        # Each block's forward runs twice (once at forward, once recomputed
+        # during backward) but backward-stored activations drop ~4-8x,
+        # which lets us fit larger contexts/batches.
+        #
+        # Skip during the variable-build warm-up pass (build() sets
+        # self._building=True) so lazy-init Variables don't escape the
+        # jax.checkpoint trace.
+        use_ckpt = (
+            bool(getattr(self.config, "gradient_checkpointing", False))
+            and _HAS_JAX
+            and not getattr(self, "_building", False)
+        )
         for block in self.blocks:
-            x = block(x, cos, sin, mask=mask, segment_ids=segment_ids)
+            if use_ckpt:
+                import jax  # local import; we just confirmed _HAS_JAX above
+                # Closure captures cos/sin/mask/segment_ids as constants;
+                # only x flows through the checkpointed boundary, so only
+                # the per-block input is saved (not all intermediates).
+                def _run(x_in, _block=block):
+                    return _block(
+                        x_in, cos, sin, mask=mask, segment_ids=segment_ids,
+                    )
+                x = jax.checkpoint(_run)(x)
+            else:
+                x = block(x, cos, sin, mask=mask, segment_ids=segment_ids)
         x = self.final_norm(x)
 
         # muP LM-head output multiplier (no-op when muP disabled).
