@@ -1,0 +1,45 @@
+# Example verify_candidates brief.
+#
+# Run with:
+#   python scripts/research_cli.py verify --brief briefs/example_teacher_verify.yaml
+#
+# Cost: roughly $1.50-3.00 with 5 candidates × ~3K input + ~1K output
+# tokens each on Opus 4.7, plus ~$0.50 for the orchestrator synthesis.
+# The disk cache makes subsequent re-runs free for unchanged input.
+
+context: |
+  We're picking a second distillation teacher for MyLLM v1 (already
+  locked: DeepSeek-V4-Pro-Base as primary). The candidate must satisfy
+  the criteria below. Output a comparison + recommendation.
+
+  Background: distilling logits from a teacher creates a downstream
+  derivative work of the teacher's weights. The teacher's license must
+  permit derivative use without naming clauses, revenue caps, or
+  modality-coupling constraints. We've already excluded Mistral-Medium
+  (revenue cap), Qwen3.6 (multimodal+thinking), Llama-3.x (700M-MAU
+  clause), and Gemma (explicit synthetic-data clause).
+
+criteria:
+  - "License must be Apache-2.0, MIT, or equivalently permissive (no revenue caps, no naming requirements, no use restrictions on derivative weights)"
+  - "Must be a BASE text-only model — NOT instruction-tuned, NOT multimodal, NOT a thinking/reasoning model with <think> traces"
+  - "Must publish a HuggingFace model card with training-token count, parameter count, and architecture details"
+  - "Parameter count: ≥ 20B dense OR ≥ 50B MoE (active params ≥ 10B)"
+  - "Pretraining tokens: ≥ 2T (frontier-class signal)"
+  - "Released within the last 18 months (frontier-fresh)"
+
+candidates:
+  - id: olmo-3-32b
+    hf_id: allenai/Olmo-3-1125-32B
+    notes: "AllenAI fully-open base; 32B dense; 5.5T tokens; 64k context. Already locked as our secondary teacher per 2026-05-12 plan. Treat as control."
+  - id: olmo-2-32b
+    hf_id: allenai/OLMo-2-1124-32B
+    notes: "Older AllenAI release; if Olmo-3 has gaps, fallback option."
+  - id: qwen3-14b-base
+    hf_id: Qwen/Qwen3-14B-Base
+    notes: "Apache-2.0 base text-only (no thinking mode in 14B base SKU). Smaller than the 20B floor; flag if too small."
+  - id: mixtral-8x22b-v01
+    hf_id: mistralai/Mixtral-8x22B-v0.1
+    notes: "Apache-2.0 dense-equivalent MoE. 2024-vintage so may fail 'frontier-fresh' criterion."
+  - id: deepseek-v3-base
+    hf_id: deepseek-ai/DeepSeek-V3-Base
+    notes: "Same family as our primary V4. License is 'DeepSeek Model License' (custom non-OSI); expect FAIL on criterion 1."
