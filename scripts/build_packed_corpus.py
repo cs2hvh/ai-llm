@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -224,6 +225,25 @@ def main() -> int:
     args = p.parse_args()
 
     configure_logging()
+    # Fail-fast on missing R2 credentials when --r2-prefix is set.
+    # Without this guard, every shard's upload silently fails (logged at
+    # error level) but the build keeps running, and the operator only
+    # discovers the problem hours later. Hit by a 2026-05-12 smoke run
+    # where .env wasn't sourced.
+    if args.r2_prefix is not None:
+        missing = [
+            v for v in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                        "S3_BUCKET", "S3_ENDPOINT_URL")
+            if not os.environ.get(v)
+        ]
+        if missing:
+            sys.stderr.write(
+                f"ERROR: --r2-prefix is set but these env vars are missing: "
+                f"{missing}\n"
+                f"Source your .env first:\n"
+                f"  set -a && source .env && set +a\n"
+            )
+            return 2
     pretrain_mix = yaml.safe_load(Path(args.pretrain_mix_config).read_text())
     model_cfg = yaml.safe_load(Path(args.model_config).read_text())
     seq_len = int(args.sequence_length or model_cfg["context_length"])
