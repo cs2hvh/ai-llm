@@ -46,6 +46,28 @@ class TestSyntheticDataIter:
         assert (a["input_ids"] == b["input_ids"]).all()
         assert (a["labels"] == b["labels"]).all()
 
+    def test_resume_safe_start_step_matches_iteration(self):
+        # L3 canary invariant: batch[N] is the same whether you iterate
+        # from step 0 to N, or jump straight to start_step=N. This is what
+        # makes the synthetic data path bitwise-exact resume-safe.
+        full = list(make_synthetic_data_iter(2, 8, 50, n_steps=4, seed=42))
+        for n in range(4):
+            resumed = next(iter(
+                make_synthetic_data_iter(2, 8, 50, n_steps=1, seed=42, start_step=n)
+            ))
+            assert (resumed["input_ids"] == full[n]["input_ids"]).all(), \
+                f"batch at step {n} differs between full iteration and start_step={n}"
+            assert (resumed["labels"] == full[n]["labels"]).all(), \
+                f"labels at step {n} differ between full iteration and start_step={n}"
+
+    def test_different_steps_yield_different_batches(self):
+        # Sanity: batch[N] and batch[N+1] should differ (otherwise the
+        # per-step seeding has collapsed and the iter is degenerate).
+        batches = list(make_synthetic_data_iter(2, 8, 50, n_steps=4, seed=42))
+        for i in range(len(batches) - 1):
+            assert not (batches[i]["input_ids"] == batches[i + 1]["input_ids"]).all(), \
+                f"batch[{i}] and batch[{i+1}] are identical — per-step seed collapsed"
+
     def test_invalid_args(self):
         with pytest.raises(ValueError):
             next(iter(make_synthetic_data_iter(0, 8, 50)))
@@ -53,3 +75,5 @@ class TestSyntheticDataIter:
             next(iter(make_synthetic_data_iter(2, 1, 50)))
         with pytest.raises(ValueError):
             next(iter(make_synthetic_data_iter(2, 8, 1)))
+        with pytest.raises(ValueError):
+            next(iter(make_synthetic_data_iter(2, 8, 50, start_step=-1)))

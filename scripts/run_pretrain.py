@@ -68,7 +68,7 @@ from myllm.data.tokenize import (  # noqa: E402
 )
 from myllm.data.types import Document  # noqa: E402
 from myllm.model import ModelConfig  # noqa: E402
-from myllm.training.checkpoint import CheckpointConfig  # noqa: E402
+from myllm.training.checkpoint import CheckpointConfig, find_resume_step  # noqa: E402
 from myllm.training.loop import LoopConfig, run as train_loop  # noqa: E402
 from myllm.training.quarantine import QuarantineWriter  # noqa: E402
 from myllm.training.mesh import (  # noqa: E402
@@ -741,17 +741,28 @@ def main() -> int:
 
         eos_id = 1
         pad_id = 0
+        # Resume cursor (L3 canary fix, 2026-05-12): peek the latest
+        # checkpoint step BEFORE building the iter, so the iter yields
+        # batch[resume_step] first — matching what the uninterrupted run
+        # saw at that step. Without this, a resumed run sees batch[0..]
+        # again starting at step=resume_step, and the model's weights
+        # diverge from the uninterrupted reference even though
+        # data_position matches by coincidence (it's a token counter,
+        # not a content fingerprint).
+        synth_start_step = find_resume_step(args.checkpoint_root) or 0
         batch_iter = make_synthetic_data_iter(
             micro_batch=micro_batch,
             sequence_length=model_input_len,
             vocab_size=model_cfg.vocab_size,
             n_steps=args.total_steps + 1,
             seed=args.seed,
+            start_step=synth_start_step,
         )
         log.info(
             "data_pipeline_synthetic",
             micro_batch=micro_batch,
             seq_len=model_input_len,
+            start_step=synth_start_step,
         )
     elif args.packed_corpus_root is not None:
         # Packed-corpus path: random-access reader on a pre-built corpus.
