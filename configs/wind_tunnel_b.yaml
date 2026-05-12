@@ -23,8 +23,10 @@
 #   - GQA 4:1 (same as base 1B — standardized per reviewer's note)
 #   - head_dim = 64 (same as base)
 #   - vocab_size = 131072 (full production tokenizer)
-#   - context_length = 4096 (same as base — Proxy A used 2048 to keep cell
-#     wall time low; Proxy B is one cell, can afford 4k)
+#   - context_length = 4096 (same as pilot 250M / half of base 1B's 8192;
+#     Proxy A used 2048 to keep cell wall time low; Proxy B is one cell,
+#     can afford 4k. The full 8k base context isn't necessary here — muP
+#     transfer signal doesn't depend on training at the production seq len.)
 #   - rope_base = 130000 (same as pilot)
 #
 # Param count: hidden=1024 × layers=14 × ~12*hidden² = ~180M body + ~134M

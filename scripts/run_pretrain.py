@@ -338,6 +338,41 @@ def batch_pairs(
 # --------------------------------------------------------------------------- #
 # Model + optimizer init
 # --------------------------------------------------------------------------- #
+def resolve_micro_batch(
+    *,
+    cli_override: int | None,
+    model_yaml: dict,
+    data_yaml: dict,
+    default: int = 8,
+) -> int:
+    """Resolve ``micro_batch_per_device`` with documented priority.
+
+    Priority (highest to lowest):
+        1. CLI override (``--micro-batch-override`` flag)
+        2. model yaml's ``batch.micro_batch_per_device`` (e.g. wind_tunnel_b
+           sets 4 because the 300M model doesn't fit at 8)
+        3. data yaml's ``batch.micro_batch_per_device`` (shared default)
+        4. hardcoded fallback
+
+    Pure function; testable without JAX/Keras. Added 2026-05-12 after the
+    Phase B re-audit caught Proxy B's micro_batch=4 being ignored because
+    run_pretrain.py only read from data_yaml.
+    """
+    if cli_override is not None:
+        log.info("micro_batch_source", source="cli_override", value=int(cli_override))
+        return int(cli_override)
+    model_batch = (model_yaml or {}).get("batch", {}).get("micro_batch_per_device")
+    if model_batch is not None:
+        log.info("micro_batch_source", source="model_yaml", value=int(model_batch))
+        return int(model_batch)
+    data_batch = (data_yaml or {}).get("batch", {}).get("micro_batch_per_device")
+    if data_batch is not None:
+        log.info("micro_batch_source", source="data_yaml", value=int(data_batch))
+        return int(data_batch)
+    log.warning("micro_batch_source", source="hardcoded_fallback", value=default)
+    return int(default)
+
+
 def resolve_wsd_schedule_params(
     peak_lr: float,
     total_steps: int,
@@ -459,6 +494,18 @@ def init_model_and_optimizer(
 
 
 def initial_train_state(model, optimizer):
+    """Construct the initial state dict consumed by ``loop.run``.
+
+    Schema (also documented in `myllm.training.loop._PERSIST_KEYS`):
+      trainable_variables, non_trainable_variables, opt_state, step,
+      lr_recovery_multiplier, data_position.
+
+    2026-05-12 re-audit fix: data_position MUST be in the initial state
+    so train_step's "preserve unknown keys" path has it from step 0.
+    Without it, the loop's first state.get("data_position", 0) was always
+    starting at 0 but never persisted into the train_step's new_state
+    output — broke the checkpoint round-trip in subtle ways.
+    """
     import jax.numpy as jnp
 
     trainable = [v.value for v in model.trainable_variables]
@@ -470,6 +517,7 @@ def initial_train_state(model, optimizer):
         "opt_state": opt_state,
         "step": 0,
         "lr_recovery_multiplier": jnp.float32(1.0),
+        "data_position": 0,
     }
 
 
@@ -572,6 +620,13 @@ def main() -> int:
         default=None,
         help="Override ModelConfig.init_std (used by wind-tunnel sweep).",
     )
+    p.add_argument(
+        "--micro-batch-override",
+        type=int,
+        default=None,
+        help="Override micro_batch_per_device. Highest priority in the "
+             "resolver: CLI > model yaml > data yaml > default 8.",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -580,13 +635,29 @@ def main() -> int:
     # Configs
     model_cfg = ModelConfig.from_yaml(args.model_config)
     data_cfg = load_yaml(args.data_config)
+    # The model yaml may carry its own `batch:` block (Proxy B does, with
+    # micro_batch_per_device=4 because the 300M model doesn't fit at 8).
+    # We load the raw yaml separately because ModelConfig doesn't expose
+    # the batch block as a field.
+    model_yaml_raw = load_yaml(args.model_config)
 
     # Apply wind-tunnel sweep overrides if provided.
     if args.init_std_override is not None:
         model_cfg = model_cfg.model_copy(update={"init_std": args.init_std_override})
         log.info("init_std_overridden", value=args.init_std_override)
 
-    micro_batch = int(data_cfg["batch"]["micro_batch_per_device"])
+    # 2026-05-12 re-audit P0 fix: resolve micro_batch_per_device with priority
+    #   1. --micro-batch-override CLI flag
+    #   2. model yaml's batch.micro_batch_per_device (e.g. Proxy B sets 4)
+    #   3. data yaml's batch.micro_batch_per_device (the shared default)
+    #   4. hardcoded fallback (8)
+    # Previously only #3 was read, so model yaml's request was silently
+    # ignored — Proxy B's micro_batch=4 was being run as 8.
+    micro_batch = resolve_micro_batch(
+        cli_override=args.micro_batch_override,
+        model_yaml=model_yaml_raw,
+        data_yaml=data_cfg,
+    )
 
     # P0-3 fix (2026-05-12 audit): make model_cfg.context_length authoritative
     # for ALL sequence-length math. Previously data_cfg.batch.sequence_length

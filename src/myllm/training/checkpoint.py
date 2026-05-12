@@ -198,6 +198,7 @@ class CheckpointManager:
         step_ids: list[int],
         output_step: int,
         extra: dict[str, Any] | None = None,
+        template: dict[str, Any] | None = None,
     ) -> Path:
         """Element-wise average the model weights of multiple checkpoints.
 
@@ -205,18 +206,42 @@ class CheckpointManager:
         are averaged. Other state keys (``step``, ``opt_state``,
         ``lr_recovery_multiplier``) take the value from the most recent
         source checkpoint — averaging an optimizer state is undefined.
+
+        Args:
+            step_ids: source step IDs to merge.
+            output_step: step ID to save the merged result at.
+            extra: extra manifest fields to record.
+            template: optional pytree template (B1 fix). If the source
+                checkpoints contain MuP MultiTransformState opt_state
+                namedtuples and you intend to RESUME TRAINING from the
+                merged checkpoint, pass the live optimizer state as
+                template. For WSM checkpoints used only for evaluation
+                or final-weight export, template can stay None.
+
+        2026-05-12 re-audit note: the merged checkpoint inherits opt_state
+        from the most recent source. If that source's opt_state was a
+        MultiTransformState namedtuple and template is None, the restored
+        opt_state may be a plain dict and resume from this WSM checkpoint
+        would fail at the next optimizer.update(). For WSM-eval flows this
+        is fine; for WSM-resume flows pass the template.
         """
         if len(step_ids) < 2:
             raise ValueError(f"WSM needs >= 2 checkpoints to merge; got {len(step_ids)}")
-        log.info("wsm_merge_start", source_steps=step_ids, output_step=output_step)
+        log.info(
+            "wsm_merge_start",
+            source_steps=step_ids,
+            output_step=output_step,
+            used_template=template is not None,
+        )
 
-        states = [self.restore(s) for s in step_ids]
+        states = [self.restore(s, template=template) for s in step_ids]
         merged = self._average_state_trees(states)
 
         manifest_extra = {
             "wsm_merged": True,
             "source_steps": list(step_ids),
             "source_count": len(step_ids),
+            "weights_only": template is None,  # operator hint for downstream
             **(extra or {}),
         }
         target = self.save(output_step, merged, extra=manifest_extra)

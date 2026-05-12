@@ -185,19 +185,37 @@ def run(
         loss = float(metrics["loss"])
         nan_skipped = float(metrics.get("nan_skipped", 0.0))
 
-        # P0-4 fix: bump data_position by the number of tokens this batch
-        # consumed (batch_size × seq_len). If the decay_phase position_fn
-        # is the stateful SequentialCorpusPositions, it already tracks its
-        # own _pos, so we read from there to stay in sync; otherwise we
-        # derive from input_ids shape.
-        if decay_phase is not None and getattr(decay_phase, "position_fn", None) is not None:
-            pf = decay_phase.position_fn
-            if hasattr(pf, "_pos"):
-                state["data_position"] = int(pf._pos)
-        else:
-            ids = batch.get("input_ids")
-            if ids is not None and hasattr(ids, "shape") and len(ids.shape) == 2:
-                state["data_position"] = int(state["data_position"]) + int(ids.shape[0]) * int(ids.shape[1])
+        # 2026-05-12 re-audit P0 fix: ALWAYS advance data_position by B*S
+        # after every consumed batch, regardless of whether decay-phase
+        # distillation is configured.
+        #
+        # The earlier logic was wrong: it read from
+        # decay_phase.position_fn._pos when a decay_phase existed, but
+        # _pos only advances when SequentialCorpusPositions.__call__ runs,
+        # which happens inside maybe_inject() — and maybe_inject is a no-op
+        # during the stable phase (first 85% of training). So _pos stayed
+        # at 0 for the first 85% of training, then jumped to a wrong value
+        # at decay activation — breaking teacher-cache alignment.
+        #
+        # New invariant: state["data_position"] is the authoritative cursor.
+        # It advances by `tokens_per_batch` after every batch, in every
+        # phase. The decay-phase position_fn now derives its lookup from
+        # state["data_position"] (set in decay_phase.maybe_inject) rather
+        # than maintaining a separate counter.
+        ids = batch.get("input_ids")
+        if ids is not None and hasattr(ids, "shape") and len(ids.shape) == 2:
+            tokens_this_batch = int(ids.shape[0]) * int(ids.shape[1])
+            state["data_position"] = int(state.get("data_position", 0)) + tokens_this_batch
+            # Keep decay_phase.position_fn._pos in sync (it's a back-reference
+            # used by maybe_inject to query the teacher cache; never the
+            # authority). After the offline-corpus refactor (B2) this dual
+            # bookkeeping goes away.
+            if (
+                decay_phase is not None
+                and getattr(decay_phase, "position_fn", None) is not None
+                and hasattr(decay_phase.position_fn, "_pos")
+            ):
+                decay_phase.position_fn._pos = int(state["data_position"])
 
         # If train_step atomically reverted because of non-finite loss/grads
         # (P0-1 audit fix), DO NOT feed the NaN loss into the watchdog — it

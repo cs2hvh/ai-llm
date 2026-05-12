@@ -187,13 +187,21 @@ def make_train_step(
         new_non_trainable_final = jax.tree.map(_pick, new_non_trainable, state["non_trainable_variables"])
         new_opt_state = jax.tree.map(_pick, candidate_opt_state, state["opt_state"])
 
-        new_state = {
+        # P0 fix from 2026-05-12 re-audit: PRESERVE all unknown state keys.
+        # The loop persists `data_position` (+ potentially more keys added
+        # in future Phase B work) on the same state dict. If train_step
+        # builds new_state from scratch, those keys disappear at every step
+        # — silently breaking checkpoint round-trip and per-step counters.
+        # Pattern: start from a copy of the input state, then overwrite
+        # the keys we DO know how to update.
+        new_state = dict(state)
+        new_state.update({
             "trainable_variables": new_trainable,
             "non_trainable_variables": new_non_trainable_final,
             "opt_state": new_opt_state,
             "step": state["step"] + 1,  # data step advances on every call
             "lr_recovery_multiplier": state["lr_recovery_multiplier"],
-        }
+        })
         # Expose `nan_skipped` (0.0/1.0) in metrics so the loop can count +
         # log how many bad batches we silently reverted. The reported `loss`
         # is still the raw NaN (informational); the loop should NOT feed NaN

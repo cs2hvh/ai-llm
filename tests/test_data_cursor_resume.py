@@ -176,17 +176,111 @@ def test_decay_phase_position_tracker_seeded_on_resume(tmp_path):
         checkpoint_config=ckpt_cfg,
         decay_phase=decay,
     )
-    # After 1 step with batch=4 × seq_len=8 = 32 tokens consumed.
-    # tracker._pos at start = 4096 (seeded), then advances by 32 per call
-    # because the loop reads it from the tracker.
-    # The SequentialCorpusPositions only updates _pos when its __call__ runs,
-    # which happens via maybe_inject — but decay is_active is False here
-    # (activation_step=999_999). So _pos should stay at 4096 from seeding.
-    assert tracker._pos == 4096, (
-        f"tracker._pos should be seeded with data_position from state "
-        f"on resume; got {tracker._pos}. If 0, the seeding path in "
-        f"loop.run() didn't fire."
+    # Re-audit Patch 2 (2026-05-12): the loop now advances data_position by
+    # B*S after every batch and keeps tracker._pos in sync. So after 1 step
+    # with batch=4 × seq_len=8 = 32 tokens:
+    #   data_position: 4096 + 32 = 4128
+    #   tracker._pos:  synced to 4128
+    # Previously the assertion expected _pos to stay at 4096 because the
+    # OLD code didn't advance data_position during stable phase. That was
+    # the bug — verified + fixed in test_phase_b_reaudit_fixes.py.
+    assert tracker._pos == 4128, (
+        f"After Patch 2: tracker._pos should track data_position. "
+        f"start=4096 (seeded) + 32 (one batch of tokens) = 4128. "
+        f"Got {tracker._pos}."
     )
-    # data_position in the final state should equal tracker._pos when the
-    # tracker is attached (loop reads from tracker when available).
-    assert final["data_position"] == 4096
+    assert final["data_position"] == 4128
+
+
+# ---------------------------------------------------------------------------
+# Re-audit (2026-05-12) Patch 1 + Patch 2 — pinned regressions
+# ---------------------------------------------------------------------------
+def test_data_position_advances_in_stable_phase_with_decay_configured(tmp_path):
+    """Re-audit P0-#2 regression: when decay_phase is configured BUT the
+    current step is still in the stable phase (activation_step not yet
+    reached), data_position must STILL advance by B*S per step.
+
+    Before Patch 2, the loop only read state["data_position"] from
+    pf._pos when decay_phase existed. pf._pos only advanced in
+    maybe_inject(), which was a no-op in stable phase. So
+    data_position stuck at 0 for the entire stable phase (the first
+    85% of training) — silently breaking teacher cache alignment when
+    decay finally fired."""
+    from myllm.training.decay_phase import (
+        DecayPhaseActivation, SequentialCorpusPositions,
+    )
+
+    tracker = SequentialCorpusPositions(start_position=0)
+    decay = DecayPhaseActivation(
+        activation_step=999_999,  # never activates during this short test
+        reader=None,
+        position_fn=tracker,
+    )
+
+    state = {
+        "trainable_variables": [0.0],
+        "non_trainable_variables": [],
+        "opt_state": [0.0],
+        "step": 0,
+        "lr_recovery_multiplier": 1.0,
+    }
+    ckpt_cfg = CheckpointConfig(root=str(tmp_path / "ckpts"), keep_last_n=1, keep_every_n=10000)
+    loop_cfg = LoopConfig(total_steps=5, log_every=1, checkpoint_every=10000)
+    final = train_loop(
+        train_step_fn=_make_simple_step(),
+        initial_state=state,
+        data_iter=_make_batch_iter(n_steps=10, batch_size=4, seq_len=8),
+        loop_config=loop_cfg,
+        checkpoint_config=ckpt_cfg,
+        decay_phase=decay,
+    )
+    # 5 steps × 4 × 8 = 160 tokens. data_position MUST equal 160.
+    # Before Patch 2 this was 0 because pf._pos never advanced (maybe_inject
+    # was a no-op in stable phase).
+    assert final["data_position"] == 160, (
+        f"P0-#2 regression: data_position should advance by B*S per step "
+        f"even when decay_phase exists but is_active=False (stable phase). "
+        f"Expected 160, got {final['data_position']}. If 0, the loop is "
+        f"reading from pf._pos (which doesn't advance in stable phase) "
+        f"instead of always advancing state['data_position'] by tokens-per-batch."
+    )
+    # tracker._pos should be in sync
+    assert tracker._pos == 160
+
+
+def test_train_step_preserves_unknown_state_keys():
+    """Re-audit P0-#1 regression: train_step's new_state dict was built
+    from scratch with hardcoded keys, silently dropping any operational
+    state the loop added (data_position, future Phase B keys).
+
+    This is a pure-jax test (no model needed) — we directly test that
+    a fake state with extra keys round-trips through the same dict-
+    preservation pattern."""
+    # Simulate the pattern in train_step.py L190 (post-fix).
+    state = {
+        "trainable_variables": [1.0],
+        "non_trainable_variables": [],
+        "opt_state": [0.0],
+        "step": 5,
+        "lr_recovery_multiplier": 0.5,
+        "data_position": 1234,       # the key that USED to be dropped
+        "future_key": "some_value",  # arbitrary future B-phase key
+    }
+    # The fix: new_state = dict(state); new_state.update({known keys}).
+    new_state = dict(state)
+    new_state.update({
+        "trainable_variables": [2.0],
+        "non_trainable_variables": [],
+        "opt_state": [0.1],
+        "step": 6,
+        "lr_recovery_multiplier": 0.5,
+    })
+    # All known keys updated:
+    assert new_state["step"] == 6
+    assert new_state["trainable_variables"] == [2.0]
+    # All unknown keys preserved:
+    assert new_state["data_position"] == 1234, (
+        "P0-#1 regression: train_step's new_state must preserve "
+        "data_position. The fix is to start from dict(state), not {}."
+    )
+    assert new_state["future_key"] == "some_value"

@@ -75,21 +75,30 @@ def build_mesh(config: ShardingConfig) -> Any:
 
 
 def shard_state(state: dict[str, Any], replicate_sharding: Any) -> dict[str, Any]:
-    """Place every tensor in ``state`` onto every device (replicated)."""
+    """Place every tensor in ``state`` onto every device (replicated).
+
+    2026-05-12 re-audit P0 fix: this function used to hardcode only 4
+    state keys (trainable_variables, non_trainable_variables, opt_state,
+    step), dropping ``lr_recovery_multiplier`` and ``data_position`` and
+    any other operational keys the loop relies on. Now generic: every
+    key in ``state`` survives. Python scalars / dicts that ``device_put``
+    can't handle pass through unchanged (e.g. integer ``step``).
+    """
     try:
         import jax
     except ImportError as e:
         raise ImportError("jax not installed") from e
 
-    def put(x: Any) -> Any:
-        return jax.device_put(x, replicate_sharding)
+    def put_if_arraylike(x: Any) -> Any:
+        # device_put accepts arrays + scalars. Python ints, strings,
+        # nested dicts that aren't JAX-typed get returned unchanged so
+        # the caller can keep tracking them.
+        try:
+            return jax.device_put(x, replicate_sharding)
+        except (TypeError, ValueError):
+            return x
 
-    return {
-        "trainable_variables": jax.tree.map(put, state["trainable_variables"]),
-        "non_trainable_variables": jax.tree.map(put, state["non_trainable_variables"]),
-        "opt_state": jax.tree.map(put, state["opt_state"]),
-        "step": state["step"],
-    }
+    return {key: jax.tree.map(put_if_arraylike, value) for key, value in state.items()}
 
 
 def shard_batch(batch: dict[str, Any], data_sharding: Any) -> dict[str, Any]:

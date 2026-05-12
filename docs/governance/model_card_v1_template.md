@@ -11,10 +11,13 @@
 - **Model versions**:
   - v1: 1T-token internal pretrain checkpoint (this card)
   - v1.5 (planned): continued to 3T tokens if v1 eval clears continuation criteria
-- **Architecture**: 16 layers × 2048 hidden × 4× FFN × GQA 16:4 × tied embeddings × RMSNorm + SwiGLU + RoPE (base 130K) + QK-norm
-- **Training tokens**: 1T (target for v1)
+- **Architecture**: 16 layers × 2048 hidden × 4× FFN × GQA 16:4 × tied embeddings × RMSNorm + SwiGLU + RoPE (base 500000, Llama-3.2 value) + QK-norm
+- **Training tokens**: 1T (target for v1, called "internal v1 / stack validation"; continuation path to 3T planned if eval curves are healthy)
 - **Tokenizer**: SentencePiece Unigram, 131k vocab, NFKC + Metaspace, byte_fallback
-- **Context length**: 4k (base) — long-context anneal to 32k via YaRN in v1.x (Phase 4 follow-up)
+- **Context length**: 8k natively (matches Llama 3.2 1B) — long-context anneal to 32k via YaRN in v1.x (Phase 4 follow-up)
+- **Mixed precision**: bf16
+
+> **Note**: these values pull from `configs/base_1b.yaml` + `configs/data/pretrain_mix.yaml` + `configs/decay_phase_distillation.yaml`. They MUST be regenerated from the live configs at each release — see `docs/governance/README.md` for the Phase 5 work item to add `scripts/render_governance_cards.py`. The values below are accurate as of 2026-05-12 commit.
 
 ## Intended use
 
@@ -30,17 +33,22 @@
 
 ## Training data
 
-See [data_card_v1.md](data_card_v1.md). Summary:
-- 44% FineWeb-Edu (HuggingFaceFW/fineweb-edu, ODC-By)
-- 18% bigcode/the-stack-v2 (BigCode T&Cs accepted)
-- 13.5% nvidia/Nemotron-CC (gated — pending NVIDIA approval; placeholder)
-- 6% Wikipedia (wikimedia/wikipedia, CC-BY-SA)
-- 5% pg19 (public domain)
-- 6% allenai/peS2o (ODC-By)
-- 7% open-web-math/open-web-math (ODC-By)
-- 2% HuggingFaceH4/stack-exchange-preferences (CC-BY-SA)
-- 4% ai4bharat/sangraha (CC-BY-4.0) — Hindi
-- 8% mc4 → allenai/c4 multilingual (es/zh/ar/fr/de) (ODC-By)
+See [data_card_v1_template.md](data_card_v1_template.md). Summary (matches the LIVE configs/data/pretrain_mix.yaml as of 2026-05-12; Nemotron-CC excluded pending NVIDIA approval, its share absorbed by FineWeb-Edu):
+- **44%** FineWeb-Edu (HuggingFaceFW/fineweb-edu, ODC-By)
+- **18%** bigcode/the-stack-v2 (BigCode T&Cs accepted)
+- **6%** Wikipedia (wikimedia/wikipedia, CC-BY-SA, config 20231101.en)
+- **5%** pg19 (public domain)
+- **6%** allenai/peS2o (ODC-By)
+- **7%** open-web-math/open-web-math (ODC-By; absorbs proof-pile-2's math share since proof-pile-2 was dropped permanently after loader fragility)
+- **2%** HuggingFaceH4/stack-exchange-preferences (CC-BY-SA)
+- **4%** ai4bharat/sangraha split=hin (CC-BY-4.0) — Hindi only
+- **8%** mc4 → allenai/c4 multilingual (es:1.5% / zh:1.5% / ar:1.5% / fr:1.5% / de:2%) (ODC-By)
+
+Total: 100%.
+
+Excluded from this v1 mix:
+- **nvidia/Nemotron-CC** (was 13.5%): gated, NVIDIA approval pending. Re-include when access lands. Absorbed by FineWeb-Edu.
+- **EleutherAI/proof-pile-2**: dropped permanently after multiple loader failures (zstd decompression error mid-stream).
 
 ## Training methodology
 

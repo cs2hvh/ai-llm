@@ -125,17 +125,48 @@ def build_grid(
 # --------------------------------------------------------------------------- #
 # Cell launch helpers
 # --------------------------------------------------------------------------- #
+def _read_model_yaml(model_config_path: str) -> dict:
+    import yaml as _yaml
+    with open(model_config_path) as f:
+        return _yaml.safe_load(f)
+
+
+def _read_data_yaml(data_config_path: str) -> dict:
+    """Read the data yaml; return {} if path is a stub (test convenience)."""
+    import yaml as _yaml
+    try:
+        with open(data_config_path) as f:
+            return _yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError):
+        return {}
+
+
 def _read_context_length(model_config_path: str) -> int:
     """Read the proxy model's context_length from its yaml. Authoritative
     source for seq-len math — see P0-3 fix in run_pretrain.py."""
-    import yaml as _yaml
-    with open(model_config_path) as f:
-        cfg = _yaml.safe_load(f)
+    cfg = _read_model_yaml(model_config_path)
     if "context_length" not in cfg:
         raise ValueError(
             f"{model_config_path}: missing required 'context_length' field"
         )
     return int(cfg["context_length"])
+
+
+def _resolve_micro_batch_from_yamls(
+    model_yaml: dict | None,
+    data_yaml: dict | None,
+    default: int = 8,
+) -> int:
+    """Pure helper mirroring run_pretrain.resolve_micro_batch's priority
+    order (model > data > default). The sweep can't accept a CLI override
+    on each cell — that's set per-cell via the cell config — so this
+    helper omits the CLI tier.
+    """
+    if model_yaml and "batch" in model_yaml and "micro_batch_per_device" in model_yaml["batch"]:
+        return int(model_yaml["batch"]["micro_batch_per_device"])
+    if data_yaml and "batch" in data_yaml and "micro_batch_per_device" in data_yaml["batch"]:
+        return int(data_yaml["batch"]["micro_batch_per_device"])
+    return int(default)
 
 
 def cell_command(
@@ -145,7 +176,7 @@ def cell_command(
     tokenizer_path: str,
     checkpoint_root: str,
     log_path: str,
-    micro_batch_per_device: int = 8,
+    micro_batch_per_device: int | None = None,
     sequence_length: int | None = None,
 ) -> list[str]:
     """Return the argv list for running one cell via scripts/run_pretrain.py.
@@ -153,13 +184,22 @@ def cell_command(
     `sequence_length` defaults to the model config's `context_length` (the
     authoritative source post 2026-05-12 audit). Passing it explicitly is
     allowed but must match; mismatch is detected at run_pretrain.py startup.
+
+    `micro_batch_per_device` follows the same resolver as run_pretrain.py:
+        model yaml's batch.micro_batch_per_device > data yaml's >
+        hardcoded 8. Explicit kwarg here is highest priority (test convenience).
+    Re-audit 2026-05-12: previously hardcoded to 8 here, which silently
+    ignored Proxy B's micro_batch=4 setting and would have caused OOM at
+    sweep time.
     """
-    # P0-3 fix: read the actual model context_length so total_steps math
-    # matches what the runtime will use. Previously this defaulted to 2048
-    # but the runtime used data_cfg.batch.sequence_length (often 4096),
-    # meaning cells trained on ~2× the planned tokens per cell.
     if sequence_length is None:
         sequence_length = _read_context_length(model_config)
+    if micro_batch_per_device is None:
+        model_yaml = _read_model_yaml(model_config) if model_config else {}
+        data_yaml = _read_data_yaml(data_config) if data_config else {}
+        micro_batch_per_device = _resolve_micro_batch_from_yamls(
+            model_yaml, data_yaml, default=8
+        )
 
     # tokens per step = micro_batch × seq_len × devices (we assume 1 device for
     # the sweep — 30M model fits comfortably on a single H100/B200).
@@ -180,6 +220,9 @@ def cell_command(
         "--no-watchdog",  # cells must run to completion; spike → high loss IS the signal we want
         "--peak-lr-override", repr(cell.peak_lr),
         "--init-std-override", repr(cell.init_std),
+        # Pass micro_batch explicitly so the launched run_pretrain agrees
+        # with this script's tokens_per_step math (re-audit 2026-05-12 fix).
+        "--micro-batch-override", str(micro_batch_per_device),
     ]
 
 

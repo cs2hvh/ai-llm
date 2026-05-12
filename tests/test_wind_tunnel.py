@@ -86,7 +86,8 @@ class TestCellCommand:
             tokenizer_path="tok.json",
             checkpoint_root="ckpts",
             log_path="log.txt",
-            sequence_length=2048,  # bypass yaml read (path is a stub)
+            sequence_length=2048,  # bypass model-yaml read (path is a stub)
+            micro_batch_per_device=8,  # bypass micro_batch resolver (path stubs)
         )
         assert "--peak-lr-override" in cmd
         assert "--init-std-override" in cmd
@@ -102,6 +103,7 @@ class TestCellCommand:
         cmd = wt.cell_command(
             self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt",
             sequence_length=2048,
+            micro_batch_per_device=8,
         )
         assert "--no-wandb" in cmd
 
@@ -109,6 +111,7 @@ class TestCellCommand:
         cmd = wt.cell_command(
             self._make_cell(), "c.yaml", "d.yaml", "t.json", "ckpts", "log.txt",
             sequence_length=2048,
+            micro_batch_per_device=8,
         )
         rn_idx = cmd.index("--run-name")
         assert "lr1e-3_init2e-2" in cmd[rn_idx + 1]
