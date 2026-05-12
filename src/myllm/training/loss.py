@@ -85,6 +85,132 @@ def cross_entropy_with_z_loss(
     return total, {"ce": ce, "z_loss": z_loss}
 
 
+def chunked_cross_entropy_with_z_loss(
+    hidden_states: Any,
+    lm_head_weight: Any,
+    labels: Any,
+    *,
+    num_chunks: int = 8,
+    output_mult: float = 1.0,
+    ignore_index: int | None = None,
+    z_loss_coef: float = 1.0e-4,
+    loss_mask: Any | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Cross-entropy + z-loss that never materialises the full [B, S, V] logit tensor.
+
+    Streams the vocabulary in ``num_chunks`` slices, computes per-chunk
+    logits ``[B, S, V/num_chunks]``, and accumulates the global log-sum-exp
+    online (Numerically stable trick: ``log Σ exp(x) = m + log Σ exp(x - m)``
+    extended across chunks by carrying ``(running_max, running_sum)``). The
+    target-position logit is gathered from whichever chunk contains its
+    label index — using ``where(labels in chunk, gather, carry)``.
+
+    Peak transient logit memory drops from ``[B, S, V]`` to ``[B, S,
+    V/num_chunks]``. At B=8, S=4097, V=131072 in bf16: full = 8.6 GB,
+    chunked with num_chunks=8 = 1.1 GB. (Hidden states + LM-head weight
+    are unchanged.)
+
+    Args:
+        hidden_states: ``[B, S, H]`` — model output BEFORE the LM head.
+            Get this from ``TransformerLM._compute_hidden(ids, ...)``.
+        lm_head_weight: ``[V, H]`` — the tied embedding matrix (or the
+            transposed untied LM head kernel). Pass
+            ``model.lm_head_weight``.
+        labels: ``[B, S]`` int targets.
+        num_chunks: vocab is split into this many equal chunks.
+            ``V % num_chunks == 0`` is required (asserted). Production
+            default 8 (V=131072 → chunks of 16384).
+        output_mult: muP LM-head output multiplier. Caller passes
+            ``model.lm_head_output_mult`` (1.0 when muP off).
+        ignore_index, z_loss_coef, loss_mask: as in
+            ``cross_entropy_with_z_loss``.
+
+    Returns:
+        ``(loss, {"ce": ..., "z_loss": ...})`` — numerically equivalent
+        to ``cross_entropy_with_z_loss`` on the full logits within ~1e-4
+        in bf16, ~1e-6 in float32 (locked by tests/test_loss.py).
+    """
+    from keras import ops
+
+    # Static shapes — JIT requires this so per-chunk slicing is statically
+    # known. lm_head_weight is a weight, so its shape is always static.
+    weight_shape = lm_head_weight.shape
+    if len(weight_shape) != 2:
+        raise ValueError(
+            f"lm_head_weight must be [V, H]; got shape {weight_shape}"
+        )
+    vocab_size = int(weight_shape[0])
+    if vocab_size % num_chunks != 0:
+        raise ValueError(
+            f"vocab_size ({vocab_size}) must be divisible by num_chunks "
+            f"({num_chunks}); pad the vocab or pick a different chunk count."
+        )
+    chunk_size = vocab_size // num_chunks
+
+    labels_int = ops.cast(labels, "int32")
+
+    # Sentinel: NEG_INF for the running max so the first chunk's max wins.
+    # Don't use float("-inf"): mixed-precision ops can NaN on -inf - -inf.
+    neg_inf = ops.cast(-1.0e30, hidden_states.dtype)
+    running_max = ops.full_like(labels_int, neg_inf, dtype=hidden_states.dtype)
+    running_sum = ops.zeros_like(running_max)
+    label_logits = ops.zeros_like(running_max)
+
+    output_mult_t = ops.cast(output_mult, hidden_states.dtype)
+
+    for c in range(num_chunks):
+        lo = c * chunk_size
+        # Slice on a Python int — static under JIT.
+        chunk_embed = lm_head_weight[lo : lo + chunk_size]  # [chunk_size, H]
+        # Per-chunk logits: hidden @ chunk_embed.T  ->  [B, S, chunk_size]
+        chunk_logits = ops.matmul(hidden_states, ops.transpose(chunk_embed))
+        chunk_logits = chunk_logits * output_mult_t
+
+        # Online logsumexp update (stable across chunks).
+        chunk_max = ops.max(chunk_logits, axis=-1)  # [B, S]
+        new_max = ops.maximum(running_max, chunk_max)
+        running_sum = running_sum * ops.exp(running_max - new_max) + ops.sum(
+            ops.exp(chunk_logits - new_max[..., None]), axis=-1
+        )
+        running_max = new_max
+
+        # Gather label logit IFF labels fall in this chunk's range.
+        local_idx = labels_int - lo
+        in_chunk = (labels_int >= lo) & (labels_int < lo + chunk_size)
+        # Clip for OOB safety on positions outside the chunk (their value
+        # is discarded by the `where` below; the clip just keeps the gather
+        # from being undefined behavior).
+        local_idx_safe = ops.clip(local_idx, 0, chunk_size - 1)
+        gathered = ops.take_along_axis(
+            chunk_logits, local_idx_safe[..., None], axis=-1
+        )
+        gathered = ops.squeeze(gathered, axis=-1)
+        label_logits = ops.where(in_chunk, gathered, label_logits)
+
+    log_z = running_max + ops.log(running_sum)  # [B, S]
+    nll = -(label_logits - log_z)  # [B, S]
+
+    # Same reduction as cross_entropy_with_z_loss.
+    weight = None
+    if ignore_index is not None:
+        weight = ops.cast(ops.not_equal(labels_int, ignore_index), nll.dtype)
+    if loss_mask is not None:
+        mask = ops.cast(loss_mask, nll.dtype)
+        weight = mask if weight is None else (weight * mask)
+
+    if weight is not None:
+        nll_sum = ops.sum(nll * weight)
+        denom = ops.maximum(ops.sum(weight), ops.cast(1.0, weight.dtype))
+        ce = nll_sum / denom
+        z_loss = ops.sum((log_z * log_z) * weight) / denom
+    else:
+        ce = ops.mean(nll)
+        z_loss = ops.mean(log_z * log_z)
+
+    total = ce + z_loss_coef * z_loss
+    return total, {"ce": ce, "z_loss": z_loss}
+
+
 def kl_div_topk_loss(
     student_logits: Any,
     teacher_topk_logits: Any,

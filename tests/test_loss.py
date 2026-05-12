@@ -25,6 +25,7 @@ os.environ.setdefault("KERAS_BACKEND", "jax")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from myllm.training.loss import (  # noqa: E402
+    chunked_cross_entropy_with_z_loss,
     cross_entropy_with_z_loss,
     distillation_mixed_loss,
     kl_div_topk_loss,
@@ -107,6 +108,136 @@ class TestCrossEntropyEquivalence:
         )
         expected = float(metrics["ce"]) + z_coef * float(metrics["z_loss"])
         assert np.isclose(float(total), expected, atol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# Chunked CE equivalence
+# --------------------------------------------------------------------------- #
+class TestChunkedCrossEntropy:
+    """Locks the invariant that chunked tied-LM-head CE produces the same
+    loss as the full-logits CE within numerical tolerance.
+
+    Production V=131072, num_chunks=8 -> chunk_size=16384.  Tests use
+    smaller V (divisible by chunk count) so they run fast on CPU.
+    """
+
+    @staticmethod
+    def _full_loss(hidden, embed, labels, output_mult, **kw):
+        """Reference: compute full logits, run cross_entropy_with_z_loss."""
+        from keras import ops
+        logits = ops.matmul(hidden, ops.transpose(embed)) * output_mult
+        return cross_entropy_with_z_loss(logits, labels, **kw)
+
+    def test_chunked_matches_full_no_muP(self):
+        rng = np.random.default_rng(100)
+        B, S, H, V = 2, 4, 16, 32
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed = rng.standard_normal((V, H)).astype(np.float32)
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+
+        full_total, full_m = self._full_loss(
+            hidden, embed, labels, 1.0, z_loss_coef=0.05
+        )
+        chunked_total, chunked_m = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels, num_chunks=4,
+            output_mult=1.0, z_loss_coef=0.05,
+        )
+        # Match within tight float32 tolerance.
+        assert np.isclose(float(full_total), float(chunked_total), atol=1e-5), \
+            (float(full_total), float(chunked_total))
+        assert np.isclose(float(full_m["ce"]), float(chunked_m["ce"]), atol=1e-5)
+        assert np.isclose(float(full_m["z_loss"]), float(chunked_m["z_loss"]), atol=1e-5)
+
+    def test_chunked_matches_full_with_muP_output_mult(self):
+        # muP applies a multiplier to the LM-head output. The chunked path
+        # must apply it inside each chunk so the gathered + accumulated
+        # values are consistent with the full-logit reference.
+        rng = np.random.default_rng(101)
+        B, S, H, V = 1, 3, 8, 24
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed = rng.standard_normal((V, H)).astype(np.float32)
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+        output_mult = 0.5  # muP-style scale
+
+        full_total, _ = self._full_loss(
+            hidden, embed, labels, output_mult, z_loss_coef=1e-4
+        )
+        chunked_total, _ = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels, num_chunks=3,
+            output_mult=output_mult, z_loss_coef=1e-4,
+        )
+        assert np.isclose(float(full_total), float(chunked_total), atol=1e-5)
+
+    def test_chunked_matches_full_with_ignore_index(self):
+        rng = np.random.default_rng(102)
+        B, S, H, V = 1, 4, 8, 16
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed = rng.standard_normal((V, H)).astype(np.float32)
+        labels = np.array([[0, 1, 2, 3]], dtype=np.int32)
+
+        full_total, _ = self._full_loss(
+            hidden, embed, labels, 1.0,
+            ignore_index=2, z_loss_coef=0.0,
+        )
+        chunked_total, _ = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels, num_chunks=4,
+            output_mult=1.0, ignore_index=2, z_loss_coef=0.0,
+        )
+        assert np.isclose(float(full_total), float(chunked_total), atol=1e-5)
+
+    def test_chunked_matches_full_with_loss_mask(self):
+        rng = np.random.default_rng(103)
+        B, S, H, V = 2, 3, 8, 12
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed = rng.standard_normal((V, H)).astype(np.float32)
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+        loss_mask = rng.integers(0, 2, size=(B, S)).astype(np.int32)
+
+        full_total, _ = self._full_loss(
+            hidden, embed, labels, 1.0,
+            loss_mask=loss_mask, z_loss_coef=1e-4,
+        )
+        chunked_total, _ = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels, num_chunks=2,
+            output_mult=1.0, loss_mask=loss_mask, z_loss_coef=1e-4,
+        )
+        assert np.isclose(float(full_total), float(chunked_total), atol=1e-5)
+
+    def test_chunked_matches_full_production_shape(self):
+        # V=131072 is too big for CPU; use V=4096 with num_chunks=8 to
+        # exercise the "chunk_size = 512" code path which mirrors production
+        # arithmetic structure (multi-chunk online logsumexp, multi-chunk
+        # label gather).
+        rng = np.random.default_rng(104)
+        B, S, H, V, K = 2, 8, 32, 4096, 8
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed = rng.standard_normal((V, H)).astype(np.float32)
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+
+        full_total, full_m = self._full_loss(
+            hidden, embed, labels, 1.0, z_loss_coef=1e-4
+        )
+        chunked_total, chunked_m = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels, num_chunks=K,
+            output_mult=1.0, z_loss_coef=1e-4,
+        )
+        # Larger logit ranges → slightly more accumulated noise; tolerate 1e-4.
+        assert np.isclose(float(full_total), float(chunked_total), atol=1e-4), \
+            (float(full_total), float(chunked_total))
+        assert np.isclose(float(full_m["ce"]), float(chunked_m["ce"]), atol=1e-4)
+        assert np.isclose(
+            float(full_m["z_loss"]), float(chunked_m["z_loss"]), atol=1e-3
+        )
+
+    def test_chunked_rejects_non_divisible_vocab(self):
+        rng = np.random.default_rng(105)
+        hidden = rng.standard_normal((1, 2, 4)).astype(np.float32)
+        embed = rng.standard_normal((10, 4)).astype(np.float32)
+        labels = np.array([[0, 1]], dtype=np.int32)
+        with pytest.raises(ValueError, match="divisible"):
+            chunked_cross_entropy_with_z_loss(
+                hidden, embed, labels, num_chunks=3,  # 10 % 3 != 0
+            )
 
 
 # --------------------------------------------------------------------------- #
