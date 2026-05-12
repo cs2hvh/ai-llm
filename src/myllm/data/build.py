@@ -222,6 +222,11 @@ class BuildStats:
     docs_kept: int = 0
     tokens_emitted: int = 0
     sequences_emitted: int = 0
+    # Production-mix target share for this source (read from pretrain_mix.yaml).
+    # Per-source corpus's WITHIN-CORPUS target is always 1.0 (the corpus is
+    # 100% one source by construction). This field is the planned share
+    # *within the composed training mix* and is informational only.
+    production_target_share: float = 0.0
 
 
 # Default MinHash config — FineWeb/DataTrove deployed values.
@@ -386,6 +391,12 @@ def build_one_source(
         stats.tokens_emitted += sequence_length
 
     writer.close()
+    # A per-source corpus is 100% one source by construction. The
+    # production-mix target share lives in pretrain_mix.yaml + the
+    # composed corpus's manifest, NOT here. (Earlier code stamped the
+    # production share onto every per-source manifest, which made the
+    # L5 source-share drift check fire spuriously on per-source
+    # corpora — caught by 2026-05-12 smoke test.)
     manifest = write_corpus_manifest(
         output_dir,
         corpus_name=source_id,
@@ -393,8 +404,11 @@ def build_one_source(
         sequence_length=sequence_length,
         sequences_per_shard=sequences_per_shard,
         source_revisions={source_id: revision_id},
-        target_source_share={source_id: float(target_share)},
+        target_source_share={source_id: 1.0},
     )
+    # ``target_share`` (passed in) is informational — kept on the
+    # BuildStats record so the compose pass / launcher can read it.
+    stats.production_target_share = float(target_share)
 
     log.info(
         "build_one_source_done",

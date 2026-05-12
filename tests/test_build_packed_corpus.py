@@ -322,9 +322,13 @@ class TestBuildOneSource:
         )
         assert manifest.source_revisions == {"synth": "abc123commitsha"}
 
-    def test_target_share_recorded(self, tmp_path):
+    def test_target_share_in_manifest_is_within_corpus(self, tmp_path):
+        """Per-source corpus's MANIFEST target_source_share = {src: 1.0}
+        always (within-corpus, the corpus is 100% one source). The
+        production-mix target share is informational and lives in
+        BuildStats.production_target_share."""
         docs = [_make_doc("d1", "some text " * 10)]
-        _, manifest = build_one_source(
+        stats, manifest = build_one_source(
             source_id="src_b",
             docs=docs,
             tokenizer=_StubTokenizer(),
@@ -338,7 +342,10 @@ class TestBuildOneSource:
             target_share=0.18,
             drop_last=False,
         )
-        assert manifest.target_source_share == {"src_b": 0.18}
+        # WITHIN-corpus target = 1.0 (single-source corpus).
+        assert manifest.target_source_share == {"src_b": 1.0}
+        # Production-mix target preserved on stats for the launcher.
+        assert stats.production_target_share == 0.18
 
     def test_stats_counters_sum_correctly(self, tmp_path):
         """docs_seen == docs_kept + docs_filtered + docs_contaminated + docs_deduped."""

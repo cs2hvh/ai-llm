@@ -187,9 +187,16 @@ def main() -> int:
     p.add_argument("--sequences-per-shard", type=int, default=65536,
                    help="Default 65,536 (~256K tokens × 8k seq = 524M tokens/shard).")
     p.add_argument("--revision-id", default="unpinned",
-                   help="Revision tag stored in the manifest "
-                        "(HF commit SHA or dataset version tag). "
-                        "Defaults to 'unpinned' which is a smell — pass a real one.")
+                   help="Label stored in the corpus manifest (free-form: "
+                        "an HF commit SHA, a date tag, 'smoke-test', etc.). "
+                        "This is the provenance value that ends up in "
+                        "DocSpan.dataset_revision_id. It is NOT passed to "
+                        "HF's load_dataset — see --hf-revision for that.")
+    p.add_argument("--hf-revision", default=None,
+                   help="HF Hub revision (commit SHA or branch) passed to "
+                        "datasets.load_dataset(revision=...). Default None "
+                        "= HF default (usually 'main'). Pass a real SHA "
+                        "to pin the dataset version for reproducibility.")
     p.add_argument("--sample-limit", type=int, default=None,
                    help="Cap on docs to PROCESS (pre-filter). For smoke tests.")
     p.add_argument("--no-dedupe", action="store_true",
@@ -259,7 +266,7 @@ def main() -> int:
     # Stream + build.
     docs = _open_hf_stream(
         source_entry,
-        revision=None if args.revision_id == "unpinned" else args.revision_id,
+        revision=args.hf_revision,
         sample_limit=args.sample_limit,
     )
     target_share = float(source_entry.get("share", 0.0))
