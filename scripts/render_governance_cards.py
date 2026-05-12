@@ -97,7 +97,10 @@ def render_architecture_block(model_cfg: dict, base_cfg: dict | None) -> str:
         tok_vocab = f"{round(raw_vocab / 1000)}k"
     else:
         tok_vocab = str(raw_vocab)
-    extension = model_cfg.get("context_extension_yarn_target")
+    # 2026-05-12: prior code used 'context_extension_yarn_target' which is a
+    # typo not present in ModelConfig's schema (the dataclass field is
+    # 'context_extension_target'). Aligned to match.
+    extension = model_cfg.get("context_extension_target")
     context_note = (
         f"{context // 1024}k natively"
         + (f" — long-context anneal to {extension // 1024}k via YaRN" if extension else "")

@@ -3,9 +3,13 @@
 
 Wires:
     1. data: HF stream → filter chain → tokenize → pack → batch
+       (live path; for the B2 packed-corpus path see docs/plan_v3_after_review3.md §4)
     2. model: Keras 3 + JAX backend (KERAS_BACKEND=jax)
-    3. optimizer: Optax AdamW with cosine-warmup schedule
-    4. JAX mesh: data-parallel sharding across visible GPUs (FSDP later)
+    3. optimizer: Optax AdamW with WSD schedule (Warmup-Stable-Decay)
+       — see resolve_wsd_schedule_params() for the resolver
+    4. JAX mesh: data-parallel sharding across visible GPUs
+       (full FSDP weight partitioning is overkill at 1B per 2026-05-12 review;
+       see docs/plan_v3_after_review3.md §2.4 for the size-vs-strategy threshold)
     5. W&B: experiment tracking
     6. checkpoint manager: Orbax + R2 mirror
     7. training loop: with watchdog + resume
@@ -74,7 +78,6 @@ from myllm.training.mesh import (  # noqa: E402
     shard_state,
 )
 from myllm.training.optimizer import OptimizerConfig, build_optimizer, label_model_variables  # noqa: E402
-from myllm.training.schedule import cosine_with_warmup  # noqa: E402
 from myllm.training.train_step import make_train_step  # noqa: E402
 from myllm.training.watchdog import LossSpikeWatchdog  # noqa: E402
 from myllm.utils import configure_logging, get_logger  # noqa: E402

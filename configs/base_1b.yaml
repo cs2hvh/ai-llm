@@ -38,7 +38,9 @@ vocab_size: 131072
 tie_embeddings: true
 
 context_length: 8192     # train at 8k natively (Llama 3.2 also did this)
-context_extension_yarn_target: 32768  # extend later via YaRN
+context_extension_target: 32768  # extend later via YaRN
+# NOTE 2026-05-12: prior key `context_extension_yarn_target` was a schema typo
+# that ModelConfig silently dropped. Fixed to match the dataclass field.
 
 # Position
 position: rope
@@ -95,15 +97,36 @@ mixed_precision: bfloat16
 # distillation and recipe upgrades. Plan: ship v1 at 1T, gate-test all
 # capabilities, then ramp to 3T or 9T as v2 if quality demands.
 target_tokens_v1:        1_000_000_000_000  # 1T — LOCKED for v1
-target_tokens_v2_strong: 3_000_000_000_000  # 3T — Llama-3.2-1B parity (v2 option A)
-target_tokens_v2_max:    9_000_000_000_000  # 9T — Llama 3.2 1B regime (v2 option B)
+target_tokens_v2_strong: 3_000_000_000_000  # 3T — OLMo-2-1B-class token budget (v2 option A; standard continuation per OLMo 2 / SmolLM3 / Qwen3 pattern)
+target_tokens_v2_max:    9_000_000_000_000  # 9T — Llama 3.2 1B token regime, NOTE not parity (Llama 3.2 1B was pruned from 8B + distilled in-pretrain; see docs/plan_v3_after_review3.md §2.1)
 
 # Checkpointing
 checkpoint_every_steps: 500
 keep_last_n: 3
 keep_every_n_steps: 5000
 
-# Compute target (planning, re-validate at booking time)
-expected_pods: 4x_pod_8xH100_SXM   # 32 GPUs multi-node (validate interconnect)
-expected_hours_baseline_1T: 2000
-expected_cost_usd_baseline_1T: 240000
+# Compute target (planning, re-validate at booking time).
+#
+# 2026-05-12 update: revised after measured-throughput review.
+# Prior estimate was 4× pod-of-8×H100 SXM @ 240K USD — that was an
+# over-provisioned multi-pod number that didn't reflect either current
+# H200/B200 availability OR realistic 1B-on-8GPU throughput.
+#
+# Measured baseline (MosaicML LLM Foundry MPT-1B, bf16, FSDP, seq=8192):
+#   8× H100 SXM = 233K tok/s aggregate, 37.7% MFU
+#   8× H200 SXM ≈ 240-280K tok/s (same compute, +15% HBM bandwidth)
+#   32× H200 SXM ≈ 1.6M tok/s (near-linear scaling through 64 GPUs)
+#
+# Two viable SKU paths for 1T tokens:
+expected_pods_multi:           4x_pod_8xH200_SXM   # 32 GPUs IB-clustered (Lambda 1-Click)
+expected_hours_baseline_multi: 168                 # ~7 days
+expected_cost_usd_multi:       22000               # ~32× $3.99/GPU/hr × 168h
+#
+expected_pods_single:           1x_pod_8xH200_SXM  # 8 GPUs, no inter-node
+expected_hours_baseline_single: 1040               # ~43 days
+expected_cost_usd_single:       33000              # ~8× $3.99/GPU/hr × 1040h
+#
+# Multi-pod is BOTH faster AND cheaper than single-pod when scaling
+# efficiency holds (~95% to 32 GPUs per published 1B benchmarks).
+# Single-pod is simpler operationally and avoids IB-link-flap risk.
+# See docs/plan_v3_after_review3.md §2.8 for the cost-derivation chain.

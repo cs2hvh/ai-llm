@@ -2,12 +2,19 @@
 
 Wraps ``datasets.load_dataset(..., streaming=True)`` with:
     - retry on transient network errors (tenacity)
-    - per-shard checkpointing of byte offsets (resumable on pod failure)
+    - optional ``skip_first`` counter for coarse resume / smoke-test offsets
+      (NOT token-exact byte-offset checkpointing — that lives in the offline
+      packed-corpus path; see ``docs/plan_v3_after_review3.md`` §4 / B2)
     - normalisation into our ``Document`` type
     - optional sample limit for smoke tests
 
 Designed to run inside a training pod or a CPU data-prep pod. The HF auth
 token is read from ``HF_TOKEN`` env var.
+
+2026-05-12 docstring fix: prior wording claimed "per-shard checkpointing
+of byte offsets (resumable on pod failure)". The code is and has always
+been a streaming wrapper with retry + a ``skip_first`` index counter.
+Token-exact resume comes from the packed-corpus reader, not this module.
 """
 from __future__ import annotations
 

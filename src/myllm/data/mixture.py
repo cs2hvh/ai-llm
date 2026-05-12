@@ -33,6 +33,21 @@ Backwards compat:
       ``len(example.text)`` for Document-like objects, ``len(example)`` for
       list/str/tuple, else 1 (one-example-per-pick legacy behavior).
     - The yielded type is still ``(source_name, example)`` — no API break.
+
+KNOWN LIMITATION (2026-05-12 review 3):
+    In the LIVE pretrain path (``scripts/run_pretrain.py::build_data_pipeline``),
+    MixtureSampler operates on Document objects BEFORE tokenization, so the
+    default ``len(text)`` measure is a CHAR count, not a token count. For
+    English/Latin text, char/token ≈ 4 and the approximation is acceptable.
+    For code (~3 chars/token), Hindi/Devanagari (1-2 chars/token), and
+    other multilingual sources the deviation can be 2× or worse.
+
+    True token-share enforcement requires measuring on PRE-TOKENIZED shards.
+    This is handled in the B2 offline packed-corpus path (see
+    ``docs/plan_v3_after_review3.md`` §4): once tokens are materialized to
+    disk, the mixture sampler can read shard manifests and emit exact
+    token-share by sampling pre-tokenized sequences. The live HF-stream path
+    above stays as the wind-tunnel/smoke-test path with the char-proxy.
 """
 from __future__ import annotations
 
