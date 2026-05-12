@@ -70,6 +70,28 @@ def _default_bucket() -> str:
     return b
 
 
+# Parallel multipart upload config. Empirically (2026-05-12, this server →
+# Cloudflare R2): max_concurrency=32 with 16MB chunks hits ~119 MB/s
+# (saturates ~1 Gbps uplink) vs ~25 MB/s with default config (10-way).
+# That's 4.7x. The multi-shard B2 corpus build is upload-bound, so this
+# directly cuts wall time by ~4x for typical 2GB shards.
+# Tune down if running on bandwidth-limited links (the parallel uploads
+# can monopolize the link, hurting concurrent training-loop checkpoint
+# uploads). Set MYLLM_S3_MAX_CONCURRENCY env var to override.
+def _transfer_config():
+    try:
+        from boto3.s3.transfer import TransferConfig
+    except ImportError as e:
+        raise ImportError("boto3 not installed; pip install boto3") from e
+    max_concurrency = int(os.environ.get("MYLLM_S3_MAX_CONCURRENCY", "32"))
+    return TransferConfig(
+        multipart_threshold=8 * 1024 * 1024,
+        multipart_chunksize=16 * 1024 * 1024,
+        max_concurrency=max_concurrency,
+        use_threads=True,
+    )
+
+
 @_RETRY
 def upload_file(local_path: str | Path, key: str, bucket: str | None = None) -> str:
     bucket = bucket or _default_bucket()
@@ -77,7 +99,7 @@ def upload_file(local_path: str | Path, key: str, bucket: str | None = None) -> 
     if not Path(local).exists():
         raise StorageError(f"local file not found: {local}")
     log.info("storage_upload", local=local, bucket=bucket, key=key)
-    _client().upload_file(local, bucket, key)
+    _client().upload_file(local, bucket, key, Config=_transfer_config())
     return f"s3://{bucket}/{key}"
 
 
