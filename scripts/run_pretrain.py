@@ -661,6 +661,23 @@ def main() -> int:
         help="Override micro_batch_per_device. Highest priority in the "
              "resolver: CLI > model yaml > data yaml > default 8.",
     )
+    p.add_argument(
+        "--use-chunked-ce",
+        action="store_true",
+        help="Use the chunked tied-LM-head CE loss path (avoids "
+             "[B, S, V] logit materialisation). Required for production "
+             "1B+ training at large vocab to avoid OOM; recommended in "
+             "general. 2026-05-12 reviewer P0-4: was previously exposed "
+             "only in benchmark_throughput.py — production silently used "
+             "the full-logit path.",
+    )
+    p.add_argument(
+        "--chunked-ce-num-chunks",
+        type=int,
+        default=8,
+        help="Number of vocab chunks for --use-chunked-ce. Must divide "
+             "model.vocab_size. Production V=131072 / 8 = 16384.",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -956,7 +973,16 @@ def main() -> int:
         distill_alpha=distill_alpha,
         distill_temperature=distill_temperature,
         teacher_weights=teacher_weights,
+        use_chunked_ce=args.use_chunked_ce,
+        chunked_ce_num_chunks=args.chunked_ce_num_chunks,
     )
+    if args.use_chunked_ce:
+        log.info(
+            "chunked_ce_enabled",
+            num_chunks=args.chunked_ce_num_chunks,
+            vocab_size=model_cfg.vocab_size,
+            chunk_size=model_cfg.vocab_size // args.chunked_ce_num_chunks,
+        )
 
     # W&B
     config_dump = {

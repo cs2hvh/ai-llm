@@ -126,6 +126,14 @@ def main() -> int:
                    help="RNG seed for the bootstrap-phase weighted draws.")
     p.add_argument("--bootstrap-steps", type=int, default=16,
                    help="Number of weighted picks before deficit-driven mode.")
+    p.add_argument("--strict-sources", action="store_true",
+                   help="2026-05-12 reviewer P0-6 fix: fail-closed when any "
+                        "source declared in pretrain_mix.yaml is missing "
+                        "from sources_root. By default (off), missing "
+                        "sources are silently skipped + shares renormalized "
+                        "over the present sources. Use --strict-sources for "
+                        "production compose runs to enforce 'corpus matches "
+                        "yaml exactly or build fails'.")
     args = p.parse_args()
 
     configure_logging()
@@ -134,6 +142,22 @@ def main() -> int:
     output_dir = Path(args.output_dir).resolve()
 
     sources_map, target_shares = _resolve_sources(pretrain_mix, sources_root)
+    # Strict-sources gate: count yaml entries vs. resolved corpora.
+    declared = [
+        e["dataset"] for e in pretrain_mix.get("sources", []) if "dataset" in e
+    ]
+    n_declared = len(declared)
+    n_resolved = len(sources_map)
+    if args.strict_sources and n_resolved != n_declared:
+        log.error(
+            "strict_sources_count_mismatch",
+            declared=n_declared,
+            resolved=n_resolved,
+            missing=n_declared - n_resolved,
+            hint="Either build the missing source corpora first, or drop "
+                 "--strict-sources for an infra-validation compose.",
+        )
+        return 4
     log.info(
         "compose_resolved",
         n_sources=len(sources_map),

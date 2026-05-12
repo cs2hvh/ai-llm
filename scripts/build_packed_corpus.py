@@ -227,6 +227,17 @@ def main() -> int:
                    help="With --r2-prefix, delete the local shard files after "
                         "a successful upload. Lets a multi-TB build run on a "
                         "machine with limited local disk (streams to R2).")
+    p.add_argument("--production", action="store_true",
+                   help="Production mode (2026-05-12 reviewer P0-5 fix): "
+                        "fail-closed on (a) decontamination skipped without "
+                        "a pre-built index, and (b) --no-decontam unless "
+                        "--allow-unsafe-no-decontam is also set. Default "
+                        "off, so infra-validation builds still run.")
+    p.add_argument("--allow-unsafe-no-decontam", action="store_true",
+                   help="Required to combine --production with --no-decontam. "
+                        "Use only when explicitly building a corpus that is "
+                        "not intended for benchmark-claim training (e.g. the "
+                        "current infra_validation corpus).")
     args = p.parse_args()
 
     configure_logging()
@@ -251,7 +262,19 @@ def main() -> int:
             return 2
     pretrain_mix = yaml.safe_load(Path(args.pretrain_mix_config).read_text())
     model_cfg = yaml.safe_load(Path(args.model_config).read_text())
-    seq_len = int(args.sequence_length or model_cfg["context_length"])
+    # 2026-05-12 senior review P0-3 fix: default packed sequence length is
+    # model_cfg.context_length + 1, NOT context_length. The training loop's
+    # `make_input_label_pairs` does a next-token shift on each packed
+    # sequence, so a packed sequence of length S becomes input/label of
+    # length S-1 each. For the model's RoPE table (precomputed at
+    # context_length) to be a perfect fit, the packed sequence must be
+    # context_length + 1 long. run_pretrain.py asserts this via the
+    # packed_seq_len == reader.sequence_length check; with the previous
+    # default of `context_length`, the trainer refused the corpus.
+    seq_len = int(
+        args.sequence_length if args.sequence_length is not None
+        else (model_cfg["context_length"] + 1)
+    )
 
     source_entry = _resolve_source_config(pretrain_mix, args.source)
     source_id = args.source_id or (
@@ -280,6 +303,22 @@ def main() -> int:
     filter_fn = _make_filter_callable(filter_chain)
 
     # Decontamination.
+    #
+    # 2026-05-12 reviewer P0-5 fix: in --production mode, ANY of the
+    # following becomes a hard error:
+    #   (a) --no-decontam without --allow-unsafe-no-decontam
+    #   (b) decontamination.enabled=true in yaml but no index_path AND
+    #       no --allow-unsafe-no-decontam
+    # Infra-validation / smoke builds (no --production flag) continue to
+    # log a warning and skip, as before.
+    if args.production and args.no_decontam and not args.allow_unsafe_no_decontam:
+        log.error(
+            "production_mode_refuses_no_decontam",
+            hint="Pass --allow-unsafe-no-decontam if you intend to build a "
+                 "corpus that won't be used for benchmark-claim training.",
+        )
+        return 3
+
     decontaminator = None
     if not args.no_decontam:
         decon_cfg = pretrain_mix.get("decontamination", {})
@@ -290,6 +329,19 @@ def main() -> int:
                 decontaminator = DecontaminationIndex.load_json(index_path)
                 log.info("decontamination_index_loaded", path=index_path)
             else:
+                # Same fail-closed gate as above, for the "enabled=true but
+                # no index" path. The default smoke/infra warning is
+                # preserved; --production upgrades it to an error.
+                if args.production and not args.allow_unsafe_no_decontam:
+                    log.error(
+                        "production_mode_refuses_decontam_without_index",
+                        hint="Pre-build the index via "
+                             "scripts/build_decontamination_index.py and "
+                             "set decontamination.index_path in "
+                             "pretrain_mix.yaml; OR pass "
+                             "--allow-unsafe-no-decontam.",
+                    )
+                    return 3
                 log.warning(
                     "decontamination_skipped_no_prebuilt_index_for_corpus_build "
                     "(use scripts/build_decontamination_index.py to make one)"

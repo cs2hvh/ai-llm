@@ -122,25 +122,44 @@ keep_every_n_steps: 5000
 # Compute target (planning, re-validate at booking time).
 #
 # 2026-05-12 update: revised after measured-throughput review.
-# Prior estimate was 4× pod-of-8×H100 SXM @ 240K USD — that was an
-# over-provisioned multi-pod number that didn't reflect either current
-# H200/B200 availability OR realistic 1B-on-8GPU throughput.
+# Prior estimate (pre-2026-05-12) of 7 days / $22K on 32×H200 IB-clustered
+# was based on extrapolation from MosaicML LLM Foundry MPT-1B (37.7% MFU
+# w/ FSDP). That number was theoretical-best-case for OUR specific stack.
 #
-# Measured baseline (MosaicML LLM Foundry MPT-1B, bf16, FSDP, seq=8192):
-#   8× H100 SXM = 233K tok/s aggregate, 37.7% MFU
-#   8× H200 SXM ≈ 240-280K tok/s (same compute, +15% HBM bandwidth)
-#   32× H200 SXM ≈ 1.6M tok/s (near-linear scaling through 64 GPUs)
+# 2026-05-12 measured baseline (5×H200 SXM, single pod, this codebase):
+#   1B @ seq=8192, mb=1, grad-ckpt ON, DP-replicated state:
+#     8.7K tok/sec/device, 3.3% MFU, 61 GB peak HBM (1 GPU)
+#     ~140 GB peak HBM on 5 GPUs (OOMs — NCCL + XLA scratch overhead)
+#   1B @ seq=4096, mb=1, no grad-ckpt:
+#     15.1K tok/sec/device, 5.7% MFU, 91 GB peak HBM
 #
-# Two viable SKU paths for 1T tokens:
-expected_pods_multi:           4x_pod_8xH200_SXM   # 32 GPUs IB-clustered (Lambda 1-Click)
-expected_hours_baseline_multi: 168                 # ~7 days
-expected_cost_usd_multi:       22000               # ~32× $3.99/GPU/hr × 168h
+# At measured numbers (NOT theoretical), single-pod 5×H200 hits:
+#   1T tokens at seq=4096:  ~150 days  ~$65K (no FSDP needed)
+#   1T tokens at seq=8192:  ~270 days  ~$117K (requires FSDP; mb=1 still)
 #
-expected_pods_single:           1x_pod_8xH200_SXM  # 8 GPUs, no inter-node
-expected_hours_baseline_single: 1040               # ~43 days
-expected_cost_usd_single:       33000              # ~8× $3.99/GPU/hr × 1040h
+# 2026-05-12 senior reviewer second-pass call: do NOT plan for 1T on the
+# current stack. Staged plan:
+#   Stage 0:  1-5B    1B-shape rehearsal       (validate FSDP + canaries)
+#   Stage 1: 30-50B   250M pilot               (~2-3 days, ~$1K)
+#   Stage 2: 10-30B   1B systems rehearsal
+#   Stage 3: 100-300B 1B base-v0
+#   Stage 4: 300B-1T  ONLY if curves + throughput justify
 #
-# Multi-pod is BOTH faster AND cheaper than single-pod when scaling
-# efficiency holds (~95% to 32 GPUs per published 1B benchmarks).
-# Single-pod is simpler operationally and avoids IB-link-flap risk.
-# See docs/plan_v3_after_review3.md §2.8 for the cost-derivation chain.
+# Theoretical-best-case (kept for the v2 retrospective, post-FSDP):
+expected_pods_multi:           4x_pod_8xH200_SXM   # 32 GPUs IB-clustered
+expected_hours_baseline_multi: 168                 # ~7 days IF FSDP @ 38% MFU
+expected_cost_usd_multi:       22000               # NOT MEASURED — superseded
+#
+expected_pods_single:           1x_pod_8xH200_SXM
+expected_hours_baseline_single: 1040               # NOT MEASURED — superseded
+expected_cost_usd_single:       33000              # NOT MEASURED — superseded
+#
+# Measured (DP-replicated, current code, 2026-05-12):
+measured_5xh200_seq8192_tok_per_sec_device: 8674
+measured_5xh200_seq8192_mfu_pct:            3.3
+measured_5xh200_seq8192_peak_hbm_gb:        61   # single device
+measured_5xh200_seq4096_tok_per_sec_device: 15147
+measured_5xh200_seq4096_mfu_pct:            5.7
+#
+# Post-FSDP target (to re-measure after implementation):
+target_5xh200_seq8192_tok_per_sec_device:   "TBD — re-bench after FSDP lands"

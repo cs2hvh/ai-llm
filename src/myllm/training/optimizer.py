@@ -117,6 +117,28 @@ def build_optimizer(
             "optax not installed; install with `pip install optax`"
         ) from e
 
+    # 2026-05-12 senior review P0-2: pin Adam first moment to fp32
+    # defensively.
+    #
+    # Optax 0.2.5's `optax.adamw` accepts `mu_dtype` (first moment) but
+    # NOT `nu_dtype` (second moment, which defaults to param dtype via
+    # `jnp.zeros_like(params)`).
+    #
+    # **Verified 2026-05-12**: under our Keras 3 mixed_precision="mixed_bfloat16"
+    # policy, variables are stored as fp32 (compute happens in bf16 via
+    # autocast). So `optax.init(params_fp32)` produces fp32 m AND fp32 nu
+    # already — the reviewer's "weaker Adam second-moment precision" risk
+    # does NOT manifest in our current setup.
+    #
+    # Pinning `mu_dtype=fp32` is defensive: it locks the first moment to
+    # fp32 regardless of any future policy change (e.g. if someone moves
+    # the Keras policy to true bf16-storage mixed precision). The second
+    # moment will track param dtype until we upgrade Optax to a version
+    # that exposes `nu_dtype`. Add a post-init dtype audit to run_pretrain
+    # to catch policy drift early.
+    import jax.numpy as jnp
+    _FP32 = jnp.float32
+
     # Fast path: no muP, return the original single-AdamW chain.
     if mup_width_mult == 1.0 or param_labels is None:
         return optax.chain(
@@ -127,6 +149,7 @@ def build_optimizer(
                 b2=config.beta2,
                 eps=config.eps,
                 weight_decay=config.weight_decay,
+                mu_dtype=_FP32,
             ),
         )
 
@@ -154,6 +177,7 @@ def build_optimizer(
                 b2=config.beta2,
                 eps=config.eps,
                 weight_decay=config.weight_decay,
+                mu_dtype=_FP32,    # P0-2 fix (2026-05-12) — see top of function
             ),
             optax.scale(lr_scale),
         )
