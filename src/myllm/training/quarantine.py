@@ -58,9 +58,22 @@ class QuarantineWriter:
 
     def __init__(self, path: str | Path, max_token_preview: int = 32):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_token_preview = int(max_token_preview)
         self._count = 0
+        # Quarantine is a forensic aid, not load-bearing. If the parent
+        # directory can't be created (read-only volume, permission denied,
+        # out of inodes), log + degrade — never let init kill the run.
+        # The write() method already wraps the actual append in try/except.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._disabled = False
+        except OSError as e:
+            log.error(
+                "quarantine_disabled_parent_unwritable",
+                path=str(self.path),
+                error=str(e),
+            )
+            self._disabled = True
 
     @property
     def incident_count(self) -> int:
@@ -77,6 +90,8 @@ class QuarantineWriter:
     ) -> None:
         """Record one incident. Mostly best-effort — never raises on bad
         input (we're already in an unhappy path)."""
+        if self._disabled:
+            return
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "step": int(step),
