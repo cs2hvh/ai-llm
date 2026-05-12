@@ -46,6 +46,14 @@ dev = [
 tf = [
     "tensorflow>=2.18,<3.0",
 ]
+# CUDA-enabled JAX for GPU pods. Pull the NVIDIA CUDA prebuilt wheels via
+# the jax[cuda12] extra so we don't have to depend on the pod image's
+# system CUDA. Install with `pip install -e ".[cuda]"` on a GPU pod.
+# 2026-05-12: added after 5xH200 SXM pod's default install pulled the
+# CPU-only jaxlib and JAX fell back to TFRT_CPU_0.
+cuda = [
+    "jax[cuda12]>=0.4.30,<0.5",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/myllm"]
