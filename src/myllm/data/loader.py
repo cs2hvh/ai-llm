@@ -54,6 +54,7 @@ class HFStreamLoader:
     sample_limit: int | None = None
     skip_first: int = 0
     trust_remote_code: bool = False  # mc4 + a few others ship a custom loader script
+    revision: str | None = None  # HF dataset commit SHA / version tag — B2 requirement
 
     def __iter__(self) -> Iterator[Document]:
         return self._iter_with_retry()
@@ -87,6 +88,8 @@ class HFStreamLoader:
         }
         if self.trust_remote_code:
             load_kwargs["trust_remote_code"] = True
+        if self.revision is not None:
+            load_kwargs["revision"] = self.revision
         ds = load_dataset(self.dataset, **load_kwargs)
 
         for idx, row in enumerate(ds):
