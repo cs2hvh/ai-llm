@@ -47,7 +47,13 @@ class HFStreamLoader:
 
     dataset: str
     category: DocumentSource
-    text_field: str = "text"
+    # ``text_field`` can be a string (single field) or a list of strings
+    # (concatenated with "\n\n" in listed order). The list form was added
+    # 2026-05-12 for sources like stack-exchange where the useful content
+    # spans multiple fields (question + accepted answer). Keeping the
+    # default a single string preserves back-compat for all existing
+    # source configs.
+    text_field: str | list[str] = "text"
     id_field: str | None = None
     split: str = "train"
     config_name: str | None = None
@@ -98,7 +104,20 @@ class HFStreamLoader:
             if self.sample_limit is not None and idx - self.skip_first >= self.sample_limit:
                 break
             try:
-                text = row[self.text_field]
+                if isinstance(self.text_field, list):
+                    # Multi-field source: concatenate the listed fields in
+                    # order, separated by a blank line. Used for e.g.
+                    # stack-exchange where question + answer both carry
+                    # useful signal but live in different columns.
+                    parts: list[str] = []
+                    for field in self.text_field:
+                        val = row.get(field)
+                        if val is None:
+                            continue
+                        parts.append(val if isinstance(val, str) else str(val))
+                    text = "\n\n".join(parts)
+                else:
+                    text = row[self.text_field]
             except KeyError as e:
                 raise DataPipelineError(
                     f"text_field '{self.text_field}' missing from {self.dataset} row"

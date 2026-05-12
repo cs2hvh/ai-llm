@@ -62,6 +62,20 @@ qk_norm: true   # R3 from 2026-05-11 dossier: now industry default at 1B+
                 # for spike-robustness on long pretrain runs. See
                 # src/myllm/model/layers.py post-RoPE q_norm/k_norm.
 
+# muP HP transfer (2026-05-12 senior review pushback).
+#
+# This block lands HPs found at the wind_tunnel (hidden=384, base_width=256)
+# zero-shot onto base (hidden=2048). Without it, the model uses standard
+# parameterization and the HP sweep we ran at small scale would NOT
+# transfer to base — LR, init scale, attention output scale would all need
+# re-tuning at 2048. Shared base_width=256 across the
+# wind_tunnel -> pilot -> base chain; width multiplier here = 2048/256 = 8.0.
+mup:
+  base_width: 256
+  apply_attn_output_mult: true
+  apply_ffn_output_mult: true
+  apply_lm_head_output_mult: true
+
 # Training
 optimizer:
   type: adamw

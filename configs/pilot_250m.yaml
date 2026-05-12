@@ -43,7 +43,12 @@ activation: swiglu
 
 # Init
 init_std: 0.02
-scaled_init_for_residuals: false  # off for pilot; enable for base
+# 2026-05-12 senior review: must match base_1b for muP HP transfer validity.
+# Previously false (infra rehearsal-only); a Proxy A/B sweep with the pilot
+# in this config would NOT transfer HPs correctly because the init topology
+# differs from base. Flipping to true so the transfer chain
+# (wind_tunnel -> pilot -> base) is consistent.
+scaled_init_for_residuals: true
 
 # Stability
 z_loss_coef: 1.0e-4
@@ -52,6 +57,19 @@ qk_norm: true            # 2026-05-11 audit: flipped from false→true to match
                          # consistent qk_norm across the wind_tunnel → pilot →
                          # base chain (LR sensitivity differs by ~10-30% with
                          # QK-norm on/off, exceeds muP's ±10% transfer tolerance).
+
+# muP HP transfer (2026-05-12 senior review pushback).
+#
+# Without this block, the model uses standard parameterization and any HP
+# sweep we run as "Proxy A/B" is NOT a muP transfer experiment — it's a
+# standard-init sweep, which costs us the zero-shot HP transfer guarantee
+# to base. Shared base_width=256 with wind_tunnel.yaml + wind_tunnel_b.yaml
+# + base_1b.yaml; width multiplier here = hidden_dim/256 = 768/256 = 3.0.
+mup:
+  base_width: 256
+  apply_attn_output_mult: true
+  apply_ffn_output_mult: true
+  apply_lm_head_output_mult: true
 
 # Training
 optimizer:

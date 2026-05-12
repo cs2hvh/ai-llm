@@ -17,6 +17,32 @@
 #
 # Per-source fields:
 #   dataset, share, text_field, category, config_name, split, trust_remote_code
+#
+# ---------------------------------------------------------------------------
+# 2026-05-12 SENIOR REVIEW PUSHBACK — important context for any downstream
+# consumer of this yaml's "what corpus was used" question:
+#
+# (a) THE CURRENT IN-FLIGHT BUILD IS CODE-SKIPPED. starcoderdata is gated
+#     and `--skip-sources bigcode/starcoderdata` was passed at build time.
+#     The runner allocates per-source budgets as `target_tokens_per_source ×
+#     share`, so skipping the 18% code slot leaves a ~820M-token corpus,
+#     NOT 1B. This corpus is suitable for INFRA / PROXY-A VALIDATION ONLY.
+#     Use the label "infra-validation corpus v1 (no-code, 820M)" — NOT
+#     "1B mixed corpus" — in model card, eval reports, and external claims.
+#
+# (b) A FOLLOW-UP CODE-ONLY BUILD will land the missing 180M tokens via
+#     codeparrot/github-code-clean (public, content-inline; no gating).
+#     The composed v2 corpus = 12 sources from this build + that code
+#     build, totalling 1B with code share restored.
+#
+# (c) Decontamination is DISABLED in the current build (--no-decontam).
+#     This corpus is therefore not safe for benchmark-claim training; a
+#     pre-built decontam index + dual-mode (8-gram normalized + 13-gram)
+#     is required before training that produces published eval numbers.
+#
+# (d) StackExchange uses text_field=question, wasting the answer content.
+#     Tracked at the SE entry below.
+# ---------------------------------------------------------------------------
 
 name: pretrain_mix_v2_restored
 total_share_must_equal: 1.0
@@ -82,6 +108,15 @@ sources:
     category: math
 
   # --- Q&A / forums (2%) --------------------------------------------------
+  # KNOWN ISSUE (2026-05-12 senior review): text_field=question wastes the
+  # source — the dataset has both questions and answers. The right fix is
+  # to also include the highest-scored answer. The dataset is
+  # `preferences`-style (chosen vs. rejected answer per question) so the
+  # accurate combiner is `question + chosen_response`. Need to verify the
+  # column names on HF before flipping the yaml below (loader now supports
+  # list-of-fields, so the mechanical change is just `text_field: [...]`).
+  # Tracked: rebuild stack_exchange as part of the post-current-build
+  # code-source rebuild step (see corpus relabel note at top).
   - dataset: HuggingFaceH4/stack-exchange-preferences
     share: 0.020
     text_field: question
