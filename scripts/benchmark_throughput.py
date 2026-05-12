@@ -169,6 +169,17 @@ def main() -> int:
                    help="Steps to measure throughput over. Default 200.")
     p.add_argument("--micro-batch", type=int, default=None,
                    help="Override micro_batch_per_device. Default: read from configs.")
+    p.add_argument("--seq-len-override", type=int, default=None,
+                   help="Override sequence_length used for synthetic data and "
+                        "for the model's RoPE precompute window. Used for "
+                        "OOM-isolation diagnostics: e.g. benchmark a 1B-shape "
+                        "model at seq=4096 when seq=8192 OOMs, to determine "
+                        "whether sequence length or model size is the "
+                        "bottleneck. NOTE: the model's RoPE cache is "
+                        "precomputed at context_length, so seq-len-override "
+                        "must be <= the config's context_length. The model "
+                        "yaml is NOT mutated; only synthetic batches use the "
+                        "override length.")
     p.add_argument("--use-chunked-ce", action="store_true",
                    help="Use the chunked tied-LM-head CE loss path (avoids "
                         "[B,S,V] logit materialisation). Production-correct "
@@ -207,7 +218,20 @@ def main() -> int:
     if args.synthetic_data:
         from myllm.data.synthetic import make_synthetic_data_iter
         micro_batch = args.micro_batch or 8
-        seq_len = model_cfg.context_length
+        seq_len = args.seq_len_override or model_cfg.context_length
+        if args.seq_len_override is not None:
+            if args.seq_len_override > model_cfg.context_length:
+                raise SystemExit(
+                    f"--seq-len-override ({args.seq_len_override}) must be "
+                    f"<= model_cfg.context_length ({model_cfg.context_length}) "
+                    f"because the model's RoPE cache is precomputed at "
+                    f"context_length."
+                )
+            log.info(
+                "benchmark_seq_len_overridden",
+                config_context_length=model_cfg.context_length,
+                override=args.seq_len_override,
+            )
         data_iter = make_synthetic_data_iter(
             micro_batch=micro_batch,
             sequence_length=seq_len,
