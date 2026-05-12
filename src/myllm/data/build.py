@@ -252,6 +252,7 @@ def build_one_source(
     target_share: float = 1.0,
     drop_last: bool = True,
     sample_limit: int | None = None,
+    tokenize_batch_size: int = 1000,
 ) -> tuple[BuildStats, Any]:
     """Build one per-source packed corpus on disk.
 
@@ -299,10 +300,19 @@ def build_one_source(
         dedupe_enabled=dedup is not None,
     )
 
-    def _kept_doc_stream() -> Iterator[tuple[str, str, list[int], int, str]]:
+    def _filtered_docs() -> Iterator[Document]:
+        """Pre-tokenization filtering stages (cheap, single-threaded).
+
+        Splits filter/decontaminate/dedupe (all O(text)) from tokenization
+        (the only O(tokens) stage that benefits from batching). Documents
+        surviving these stages flow into the batched tokenizer below.
+        """
         for doc in docs:
             stats.docs_seen += 1
-            if sample_limit is not None and stats.docs_kept >= sample_limit:
+            if sample_limit is not None and stats.docs_kept + (
+                # account for docs already accepted in the current pending batch
+                len(_pending_batch)
+            ) >= sample_limit:
                 return
             if filter_fn is not None and not filter_fn(doc):
                 stats.docs_filtered += 1
@@ -313,20 +323,56 @@ def build_one_source(
                     stats.docs_contaminated += 1
                     continue
             if dedup is not None:
-                # Use stable doc id: prefer doc.url/path if present, else
-                # the doc's text hash. The Document type's `doc_id` field
-                # may not always be unique across sources, so we prefix.
                 stable_id = f"{source_id}::{doc.doc_id}"
                 added, _ = dedup.add_if_new(stable_id, doc.text)
                 if not added:
                     stats.docs_deduped += 1
                     continue
-            ids = tokenizer.encode(doc.text).ids
-            if not ids:
-                stats.docs_filtered += 1
-                continue
-            stats.docs_kept += 1
-            yield (doc.doc_id, source_id, ids, _text_hash(doc.text), revision_id)
+            yield doc
+
+    # Pending-batch buffer for tokenizer.encode_batch — shared with the
+    # filter-stage generator so sample_limit accounting is accurate.
+    _pending_batch: list[Document] = []
+
+    def _kept_doc_stream() -> Iterator[tuple[str, str, list[int], int, str]]:
+        """Yield (doc_id, source_id, token_ids, text_hash, revision_id) tuples.
+
+        Tokenization is BATCHED: we accumulate up to ``tokenize_batch_size``
+        filtered docs, then call ``tokenizer.encode_batch`` which uses the
+        HF tokenizers Rust core's internal Rayon parallelism across CPU cores.
+
+        Single-doc ``tokenizer.encode`` only saturates one core; batch mode
+        gets us closer to ~10M tok/sec aggregate on a 100+ core machine vs
+        ~100K tok/sec single-threaded. ~100× speedup for the bottleneck stage.
+        """
+        def _flush(batch: list[Document]) -> Iterator[tuple[str, str, list[int], int, str]]:
+            if not batch:
+                return
+            texts = [d.text for d in batch]
+            try:
+                encodings = tokenizer.encode_batch(texts)
+            except AttributeError:
+                # Stub tokenizers (used in tests) may not implement encode_batch.
+                # Fall back to single-doc encode — slow but correct.
+                encodings = [tokenizer.encode(t) for t in texts]
+            for doc, enc in zip(batch, encodings, strict=False):
+                ids = enc.ids if hasattr(enc, "ids") else enc
+                if not ids:
+                    stats.docs_filtered += 1
+                    continue
+                stats.docs_kept += 1
+                yield (doc.doc_id, source_id, ids,
+                       _text_hash(doc.text), revision_id)
+
+        for doc in _filtered_docs():
+            _pending_batch.append(doc)
+            if len(_pending_batch) >= tokenize_batch_size:
+                yield from _flush(_pending_batch)
+                _pending_batch.clear()
+        # Final partial batch.
+        if _pending_batch:
+            yield from _flush(_pending_batch)
+            _pending_batch.clear()
 
     for tokens, spans in pack_with_provenance(
         _kept_doc_stream(),

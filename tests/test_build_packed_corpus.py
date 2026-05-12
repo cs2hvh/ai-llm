@@ -452,3 +452,118 @@ class TestFineWebMinHashConfig:
         assert c.rows_per_band == 8
         assert c.ngram_size == 5
         assert c.threshold == 0.75
+
+
+# --------------------------------------------------------------------------- #
+# Batched tokenization — the perf-critical refactor
+# --------------------------------------------------------------------------- #
+class _BatchAwareStubTokenizer:
+    """Tokenizer stub that records whether encode_batch was actually used.
+
+    Lets us assert the build pipeline calls encode_batch (Rust Rayon path)
+    and not encode (single-core path).
+    """
+
+    def __init__(self):
+        self.encode_calls = 0
+        self.encode_batch_calls = 0
+        self.encode_batch_max_size = 0
+
+    def encode(self, text: str):
+        self.encode_calls += 1
+        return _StubEncoding([hash(text) & 0xFFFF])
+
+    def encode_batch(self, texts: list[str]):
+        self.encode_batch_calls += 1
+        self.encode_batch_max_size = max(self.encode_batch_max_size, len(texts))
+        return [_StubEncoding([hash(t) & 0xFFFF]) for t in texts]
+
+
+class TestBatchedTokenization:
+    def test_uses_encode_batch_when_available(self, tmp_path):
+        """The refactored pipeline must call encode_batch for the hot path,
+        NOT encode-per-doc. Single-call encode is the slow path that wastes
+        all cores beyond the first."""
+        tok = _BatchAwareStubTokenizer()
+        docs = [_make_doc(f"d{i}", f"document {i} text more text " * 5)
+                for i in range(50)]
+        build_one_source(
+            source_id="synth",
+            docs=docs,
+            tokenizer=tok,
+            output_dir=tmp_path / "c",
+            sequence_length=32,
+            sequences_per_shard=2,
+            revision_id="r",
+            tokenizer_sha256="x",
+            eos_token_id=1,
+            dedupe_config=None,
+            drop_last=False,
+            tokenize_batch_size=10,  # 50 docs / 10 = 5 batches
+        )
+        # 50 docs ÷ batch=10 → 5 calls to encode_batch
+        # encode() should NOT have been called on the hot path.
+        assert tok.encode_batch_calls == 5
+        assert tok.encode_calls == 0
+        assert tok.encode_batch_max_size == 10
+
+    def test_partial_final_batch_flushed(self, tmp_path):
+        """If the doc stream ends mid-batch, the partial must still flush."""
+        tok = _BatchAwareStubTokenizer()
+        docs = [_make_doc(f"d{i}", f"text words words {i} " * 5) for i in range(7)]
+        stats, _ = build_one_source(
+            source_id="synth", docs=docs, tokenizer=tok,
+            output_dir=tmp_path / "c", sequence_length=32, sequences_per_shard=2,
+            revision_id="r", tokenizer_sha256="x", eos_token_id=1,
+            dedupe_config=None, drop_last=False,
+            tokenize_batch_size=3,  # 7 docs → batch sizes 3, 3, 1
+        )
+        # 3 batches: two of size 3, one of size 1.
+        assert tok.encode_batch_calls == 3
+        assert stats.docs_kept == 7
+
+    def test_falls_back_to_encode_when_encode_batch_missing(self, tmp_path):
+        """Stub tokenizers (in some tests) only have .encode. The pipeline
+        must still work — slowly — without crashing."""
+        # The original _StubTokenizer above has only .encode (no .encode_batch).
+        tok = _StubTokenizer()
+        docs = [_make_doc(f"d{i}", f"document {i} text more text " * 5)
+                for i in range(5)]
+        stats, _ = build_one_source(
+            source_id="synth", docs=docs, tokenizer=tok,
+            output_dir=tmp_path / "c", sequence_length=32, sequences_per_shard=2,
+            revision_id="r", tokenizer_sha256="x", eos_token_id=1,
+            dedupe_config=None, drop_last=False,
+        )
+        assert stats.docs_kept == 5
+
+    def test_batch_size_does_not_change_output_tokens(self, tmp_path):
+        """Same input + same tokenizer, different batch sizes → identical
+        output tokens. The refactor must not change semantics."""
+        tok = _BatchAwareStubTokenizer()
+        docs = [_make_doc(f"d{i}", f"doc {i} content with words " * 5)
+                for i in range(20)]
+
+        # Build with batch_size=5 then with batch_size=20.
+        build_one_source(
+            source_id="a", docs=list(docs), tokenizer=tok,
+            output_dir=tmp_path / "out_5", sequence_length=32, sequences_per_shard=4,
+            revision_id="r", tokenizer_sha256="x", eos_token_id=1,
+            dedupe_config=None, drop_last=False, tokenize_batch_size=5,
+        )
+        build_one_source(
+            source_id="a", docs=list(docs), tokenizer=tok,
+            output_dir=tmp_path / "out_20", sequence_length=32, sequences_per_shard=4,
+            revision_id="r", tokenizer_sha256="x", eos_token_id=1,
+            dedupe_config=None, drop_last=False, tokenize_batch_size=20,
+        )
+        # Compare the produced corpora's tokens byte-exact.
+        from myllm.data.packed_corpus import PackedCorpusReader
+
+        r5 = PackedCorpusReader(tmp_path / "out_5")
+        r20 = PackedCorpusReader(tmp_path / "out_20")
+        assert r5.total_sequences == r20.total_sequences
+        for sid in range(r5.total_sequences):
+            np.testing.assert_array_equal(
+                r5.get_sequence(sid), r20.get_sequence(sid),
+            )
