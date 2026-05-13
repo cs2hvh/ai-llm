@@ -152,7 +152,19 @@ unset LD_LIBRARY_PATH || true
 
 pip install --no-cache-dir \
     -r requirements.txt \
-    -r requirements-gpu.txt
+    -r requirements-gpu.txt \
+    "torch>=2.4" "transformers>=4.45" "accelerate>=0.30"
+
+# Why torch+transformers+accelerate are installed HERE (not lazily in
+# run_teacher_audit.sh): when those packages install separately AFTER
+# jax, pip's resolver picks an older `nvidia-cudnn-cu12` that torch is
+# happy with (e.g. 9.1.0.70). That silently downgrades the cuDNN that
+# JAX bundled (9.5+), and any subsequent jax.jit call hits
+# CUDNN_STATUS_NOT_INITIALIZED. Installing in one transaction lets pip
+# resolve a single cuDNN version that satisfies both (typically 9.5+),
+# preventing the post-install downgrade. (Hit on the 2xH200 pod
+# 2026-05-13: gauntlet G1-G4 PASSed, then audit installed torch, then
+# G5 retry crashed on cuDNN init.)
 
 # ----------------------------------------------------------------------
 # 7. Optional: vLLM for the teacher audit

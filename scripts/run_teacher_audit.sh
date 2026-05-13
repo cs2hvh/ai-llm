@@ -62,11 +62,14 @@ AUDIT_CORPUS_DEFAULT="$RESULTS_DIR/audit_corpus.bin"
 AUDIT_CORPUS="${AUDIT_CORPUS:-$AUDIT_CORPUS_DEFAULT}"
 if [[ ! -f "$AUDIT_CORPUS" ]]; then
     log "no audit corpus at $AUDIT_CORPUS; fabricating a synthetic one"
+    # Use a SAFE vocab range that fits common teacher vocabularies
+    # (OLMo-2 ~100k, DeepSeek-V2-Lite ~102k, Qwen2.5 ~152k). Cap at
+    # 50k so the synthetic corpus works on any modern teacher. The
+    # forward() in cache_teacher_logits.py also clamps for safety.
     python - <<PY
 import numpy as np
 np.random.seed(0)
-# 256k tokens of uniform random ids in our vocab range.
-arr = np.random.randint(0, 131072, size=262144, dtype=np.uint32)
+arr = np.random.randint(0, 50000, size=262144, dtype=np.uint32)
 arr.tofile("$AUDIT_CORPUS")
 print(f"wrote {arr.size} tokens -> $AUDIT_CORPUS")
 PY
@@ -75,15 +78,14 @@ CORPUS_SIZE=$(stat -c%s "$AUDIT_CORPUS")
 log "audit corpus: $AUDIT_CORPUS ($CORPUS_SIZE bytes, $((CORPUS_SIZE/4)) tokens)"
 
 # ----------------------------------------------------------------------
-# 2. Check transformers + torch + accelerate are installed (lazy).
-# accelerate is required by transformers' device_map="auto" tensor-parallel
-# scatter (raised "ValueError: Using a `device_map`, `tp_plan`, ... requires
-# `accelerate`" on the first pod run).
+# 2. Verify transformers + torch + accelerate are present (installed by
+# pod_launch_gpu.sh in the SAME pip transaction as jax, so cuDNN versions
+# resolve consistently). If missing, fail fast — installing them here
+# (after jax already settled) caused the 2xH200 cuDNN regression
+# 2026-05-13.
 # ----------------------------------------------------------------------
-python -c "import transformers, torch, accelerate" 2>/dev/null || {
-    log "installing transformers + torch + accelerate (one-time)"
-    pip install --quiet "torch>=2.4" "transformers>=4.45" "accelerate>=0.30"
-}
+python -c "import transformers, torch, accelerate" 2>/dev/null || \
+    die "transformers/torch/accelerate missing. Re-run pod_launch_gpu.sh to install in one transaction with jax."
 
 # ----------------------------------------------------------------------
 # 3. Run audit per teacher

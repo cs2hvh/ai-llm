@@ -120,15 +120,24 @@ def _make_transformers_teacher(hf_model: str):
         torch_dtype=torch.bfloat16,
         device_map="auto",  # spreads weights across all visible GPUs
         low_cpu_mem_usage=True,
+        trust_remote_code=True,  # some teachers (DeepSeek-V2-Lite) need this
     )
     model.eval()
-    log.info("teacher_loaded", model=hf_model)
+    teacher_vocab = int(model.config.vocab_size)
+    log.info("teacher_loaded", model=hf_model, vocab_size=teacher_vocab)
 
     @torch.inference_mode()
     def forward(token_ids):
-        # token_ids: np.ndarray [B, S] (int)
-        # Return: float32 logits [B, S, V] on host (numpy).
+        # token_ids: np.ndarray [B, S] (int).
+        # Returns: float32 logits [B, S, V_teacher] on host (numpy).
+        #
+        # Clamp incoming token ids to the teacher's vocab range. The
+        # audit corpus may use IDs from our 131k SentencePiece vocab,
+        # but teacher vocabularies are typically 50k-130k. Without the
+        # clamp, embedding(input_ids) raises
+        # `IndexError: index out of range in self`.
         ids = torch.as_tensor(token_ids, dtype=torch.long)
+        ids = ids.clamp_(max=teacher_vocab - 1)
         # device_map="auto" places the embedding on the first device.
         first_device = next(model.parameters()).device
         ids = ids.to(first_device, non_blocking=True)
