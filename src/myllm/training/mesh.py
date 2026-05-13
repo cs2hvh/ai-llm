@@ -264,3 +264,71 @@ def make_param_shardings(
         ))
 
     return jax.tree.map(_make, params_pytree)
+
+
+# --------------------------------------------------------------------------- #
+# HLO inspection (FSDP Commit F, 2026-05-13)
+#
+# The agent's Risk #1 was "silent grad replication" — FSDP setup looks
+# correct (sharded params + opt state) but XLA emits all-reduce on grads
+# instead of reduce-scatter. Result: DDP-shaped bandwidth use with
+# FSDP-shaped memory. Training is mathematically correct but ~2-4x
+# slower than it should be. The bug is invisible without HLO inspection
+# because it has the right loss, the right memory profile, and the right
+# checkpoint structure.
+#
+# This helper lowers a JIT'd train_step and counts collective ops in
+# the compiled HLO. Use:
+#
+#     counts, hlo = inspect_train_step_collectives(
+#         train_step_fn, state, sample_batch,
+#     )
+#     # FSDP-correct compilation:
+#     assert counts["reduce_scatter"] > 0
+#     assert counts["all_reduce"] == 0    # on the trainable-grad path
+#
+# Use under `MYLLM_DEBUG_HLO=1` env-var gating (run_pretrain.py wires
+# this) so it doesn't fire on every production run (lowering + compile
+# is ~1-3 s overhead, fine for canaries, noise for the loop).
+# --------------------------------------------------------------------------- #
+def inspect_train_step_collectives(
+    jit_fn: Any,
+    sample_state: Any,
+    sample_batch: Any,
+) -> tuple[dict[str, int], str]:
+    """Lower and compile ``jit_fn(state, batch)``, return collective-op
+    counts plus the HLO text.
+
+    Args:
+        jit_fn: a ``jax.jit``-decorated function (e.g. the return value
+            of ``make_train_step``).
+        sample_state: a state PyTree compatible with ``jit_fn``'s
+            ``in_shardings[0]``. The values aren't executed; only the
+            shapes / dtypes / shardings matter.
+        sample_batch: a batch dict compatible with ``in_shardings[1]``.
+
+    Returns:
+        ``(counts, hlo_text)`` where ``counts`` has keys:
+          - "reduce_scatter" — count of ``reduce-scatter`` ops
+          - "all_reduce"     — count of ``all-reduce`` ops
+          - "all_gather"     — count of ``all-gather`` ops
+          - "all_to_all"     — count of ``all-to-all`` ops (rare)
+        and ``hlo_text`` is the full lowered HLO module as a string
+        (useful for grep / manual inspection on FAIL).
+    """
+    try:
+        import jax  # noqa: F401
+    except ImportError as e:
+        raise ImportError("jax not installed; install jax[cuda12]") from e
+
+    lowered = jit_fn.lower(sample_state, sample_batch)
+    compiled = lowered.compile()
+    hlo = compiled.as_text()
+
+    # Substring counts — HLO uses canonical names with hyphens.
+    return {
+        "reduce_scatter": hlo.count("reduce-scatter"),
+        "all_reduce": hlo.count("all-reduce"),
+        "all_gather": hlo.count("all-gather"),
+        "all_to_all": hlo.count("all-to-all"),
+    }, hlo

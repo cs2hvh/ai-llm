@@ -1118,6 +1118,101 @@ def main() -> int:
             chunk_size=model_cfg.vocab_size // args.chunked_ce_num_chunks,
         )
 
+    # FSDP Commit F (2026-05-13): MYLLM_DEBUG_HLO=1 lowers train_step,
+    # compiles, and inspects collective ops in the HLO. Catches the
+    # "silent grad replication" bug class: FSDP setup looks correct
+    # (sharded params + opt state) but XLA falls back to all-reduce on
+    # grads. Training is mathematically correct but ~2-4x slower than
+    # it should be. Bug is invisible without HLO inspection because
+    # loss, memory, and checkpoints all look normal.
+    if os.environ.get("MYLLM_DEBUG_HLO") == "1":
+        import jax
+        # Also turn on JAX's donation logger so we see if donate_argnums
+        # got silently disabled (e.g. due to a sharding mismatch between
+        # input and output).
+        try:
+            jax.config.update("jax_log_donation", True)
+        except Exception:
+            pass  # older JAX versions
+
+        from myllm.training.mesh import inspect_train_step_collectives
+
+        # Take one batch from the iterator for the inspection. We then
+        # push it back in front of the iterator so the actual training
+        # loop sees it first.
+        import itertools
+        peek_batch = next(iter(batch_iter))
+        batch_iter = itertools.chain([peek_batch], batch_iter)
+
+        try:
+            counts, hlo = inspect_train_step_collectives(
+                train_step_fn, state, peek_batch,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.error("debug_hlo_lowering_failed", error=str(e))
+            counts, hlo = {}, ""
+
+        # Detect the JAX platform — assertion semantics differ between
+        # CPU (where XLA lowers reduce-scatter into all-reduce + slice
+        # by default, so the string "reduce-scatter" rarely appears in
+        # HLO even on a correctly-FSDP'd program) and GPU/TPU (where
+        # NCCL/RCCL provides native reduce-scatter and the string IS
+        # the right signal).
+        platform = jax.devices()[0].platform if jax.devices() else "cpu"
+        log.info("debug_hlo_collective_counts", platform=platform, **counts)
+
+        # FSDP-active expectation on GPU: reduce-scatter must appear.
+        # On CPU, the same logical program lowers without that op name
+        # — log and continue, don't hard-fail (would block every
+        # canary on the simulated-CPU smoke path).
+        if (
+            state_shardings is not None
+            and counts
+            and platform in ("gpu", "tpu")
+            and counts.get("reduce_scatter", 0) == 0
+        ):
+            log.error(
+                "fsdp_compiled_to_all_reduce",
+                platform=platform,
+                counts=counts,
+                hint=(
+                    "FSDP path is active (state_shardings provided) "
+                    "but compiled HLO has zero reduce-scatter ops on "
+                    f"platform={platform}. XLA is emitting DDP-shaped "
+                    "collectives — FSDP memory savings but no bandwidth "
+                    "savings. Most likely cause: with_sharding_constraint "
+                    "on grads missing or applied to the wrong leaf in "
+                    "train_step.py:_train_step_body. Set "
+                    "MYLLM_DEBUG_HLO_DUMP=/tmp/hlo.txt to write the "
+                    "full HLO for inspection."
+                ),
+            )
+            return 5
+        elif (
+            state_shardings is not None
+            and counts
+            and platform == "cpu"
+            and counts.get("reduce_scatter", 0) == 0
+        ):
+            # CPU: log a soft note. CPU XLA backend often lowers
+            # reduce-scatter into all-reduce + slice, so this is
+            # expected. Real check happens on GPU.
+            log.info(
+                "debug_hlo_cpu_no_reduce_scatter_expected",
+                hint=(
+                    "Zero reduce-scatter ops on CPU is expected — XLA's "
+                    "CPU backend lowers FSDP semantics into all-reduce "
+                    "+ slice. Re-run on GPU to verify the actual "
+                    "reduce-scatter optimization fires."
+                ),
+            )
+
+        # Optional: dump full HLO if asked.
+        dump_path = os.environ.get("MYLLM_DEBUG_HLO_DUMP")
+        if dump_path:
+            Path(dump_path).write_text(hlo)
+            log.info("debug_hlo_dumped", path=dump_path, bytes=len(hlo))
+
     # W&B
     config_dump = {
         "model": model_cfg.model_dump(),
