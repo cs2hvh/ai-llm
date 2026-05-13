@@ -320,3 +320,117 @@ def find_resume_step(checkpoint_root: str) -> int | None:
             except (ValueError, KeyError):
                 continue
     return max(candidates) if candidates else None
+
+
+# --------------------------------------------------------------------------- #
+# Reshard utility (FSDP Commit G, 2026-05-13)
+#
+# Use case: development workflow saves a checkpoint on 1 device (or
+# under one mesh layout); production wants to load it on 5x H200 with
+# FSDP sharding (a DIFFERENT layout). Without this utility you'd have
+# to either:
+#   - Train fresh on the new mesh (wasteful)
+#   - Hand-edit the Orbax tensorstore metadata (fragile)
+#
+# This function loads a checkpoint, places each leaf onto a new target
+# mesh / sharding layout via `jax.device_put`, and re-saves to a fresh
+# location. Bitwise-equal values; just different placement.
+#
+# Memory caveat: the intermediate state is materialised on the host's
+# default device during the load step. At 1B params (~20 GB of state)
+# this is fine. For 7B+ models, the Orbax `template=` path with
+# explicit shardings is the right way; we use the simpler device_put
+# path here because it's the v1 1B workflow's actual need.
+# --------------------------------------------------------------------------- #
+def reshard_checkpoint(
+    src_root: str | Path,
+    dst_root: str | Path,
+    src_step: int,
+    target_devices: int,
+    *,
+    target_mesh_axis: str = "data",
+) -> Path:
+    """Load a checkpoint from ``src_root`` and re-save to ``dst_root`` with
+    a new mesh layout (``target_devices`` data-parallel devices).
+
+    Args:
+        src_root:    directory containing the source checkpoint.
+        dst_root:    destination directory (created if missing).
+        src_step:    step number to load from src. The destination
+                     checkpoint is saved at the same step number.
+        target_devices: number of data-parallel devices in the target mesh.
+        target_mesh_axis: name of the data axis in the target mesh
+                     (default "data"; matches build_mesh_and_shardings).
+
+    Returns:
+        The path of the saved destination step directory.
+
+    Raises:
+        CheckpointError: if no complete checkpoint exists at ``src_step``.
+
+    Memory: the intermediate state is materialised on the host's
+    default device during load. Fine at 1B; for 7B+, switch to Orbax
+    ``item=`` template-based reshard (out of scope here).
+    """
+    try:
+        import jax
+    except ImportError as e:
+        raise ImportError("jax not installed; install jax[cuda12]") from e
+
+    from myllm.training.mesh import (
+        ShardingConfig, build_mesh_and_shardings, make_param_shardings,
+    )
+
+    # 1. Load source — no sharding constraints; Orbax restores to default
+    #    device. For 1B params (~20 GB) this is feasible on host CPU
+    #    or a single GPU.
+    src_mgr = CheckpointManager(CheckpointConfig(root=str(src_root)))
+    state = src_mgr.restore(src_step)
+    log.info(
+        "reshard_checkpoint_loaded",
+        src=str(src_root),
+        step=src_step,
+    )
+
+    # 2. Build target mesh + shardings.
+    target_cfg = ShardingConfig(
+        data_parallel=int(target_devices), model_parallel=1,
+    )
+    mesh, _data_sharding, replicate_sharding = build_mesh_and_shardings(
+        target_cfg
+    )
+
+    # Per-leaf shardings for the trainable / non-trainable / opt-state
+    # pytrees. Scalars (step, lr_recovery_multiplier, data_position) get
+    # replicate_sharding.
+    state_resharded: dict[str, Any] = {}
+    for key, val in state.items():
+        if key in ("trainable_variables", "non_trainable_variables", "opt_state"):
+            shardings = make_param_shardings(
+                val, mesh, mesh_axis=target_mesh_axis,
+            )
+            state_resharded[key] = jax.tree.map(
+                lambda x, s: jax.device_put(x, s), val, shardings,
+            )
+        else:
+            # Scalars / metadata — replicate onto every target device.
+            state_resharded[key] = jax.device_put(val, replicate_sharding)
+
+    # 3. Save to destination. Preserves the step number so resume-from-
+    #    dst works without flag changes.
+    dst_mgr = CheckpointManager(CheckpointConfig(root=str(dst_root)))
+    out_path = dst_mgr.save(
+        src_step, state_resharded,
+        extra={
+            "reshard_from": str(src_root),
+            "reshard_target_devices": int(target_devices),
+        },
+    )
+    log.info(
+        "reshard_checkpoint_saved",
+        dst=str(dst_root),
+        step=src_step,
+        target_devices=int(target_devices),
+        path=str(out_path),
+    )
+    return out_path
