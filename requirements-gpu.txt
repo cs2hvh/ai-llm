@@ -13,7 +13,10 @@
 #     Possibly insufficient driver version: 570.172.8
 # Pinning JAX 0.4.35 stays compatible with cuDNN 9.1-9.5 and avoids the
 # downgrade-under-the-feet bug. (Pod 2026-05-13 incident.)
-jax[cuda12]==0.4.35
+# 0.4.38 is confirmed working on driver 570.172.08 (the RunPod A100-80GB
+# image as of 2026-05-13). 0.4.35 broke on a `nvidia.cuda_nvcc` empty-
+# namespace import issue. If 0.4.38 ever regresses, try 0.4.34 next.
+jax[cuda12]==0.4.38
 
 # FlashAttention via JAX-Pallas is built in; no separate dep needed.
 
