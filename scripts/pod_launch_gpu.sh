@@ -187,37 +187,59 @@ for KEY_LOCAL in \
 done
 
 # ----------------------------------------------------------------------
-# 9. Defensive checks BEFORE the JAX-uses-GPU smoke.
-# Detects the "nvidia/<subpkg>/ empty namespace dir" failure mode that
-# would otherwise crash JAX's _try_cuda_nvcc_import with a confusing
-# pathlib.Path(None) error. Done as a separate step so a corrupt install
-# fails fast with a clear message instead of cascading into JAX init.
+# 9. Defensive check that the nvidia/* wheels actually delivered files.
+#
+# IMPORTANT: nvidia-*-cu12 wheels ship as PEP 420 implicit namespace
+# packages, so `__file__` is ALWAYS None on the parent module
+# (e.g. nvidia.cuda_nvcc.__file__ is None even when the wheel installed
+# perfectly). The real check is whether the namespace's __path__
+# contains a directory with actual files. JAX 0.4.36+ handles the
+# None-__file__ case correctly via __path__ walking.
+#
+# This guards against the actual failure mode (empty `nvidia/<subpkg>/`
+# directory leftover from a broken pip install) without false-alarming
+# on the normal namespace-package state.
 # ----------------------------------------------------------------------
-log "checking nvidia/* namespace integrity"
+log "checking nvidia/* wheel content integrity"
 python - <<'PY'
-import importlib, sys
+import importlib, pathlib, sys
 fail = []
 for sub in (
     "cuda_nvcc", "cudnn", "cublas", "cuda_runtime", "cuda_cupti",
     "cuda_nvrtc", "cufft", "curand", "cusolver", "cusparse",
-    "nccl", "nvjitlink", "nvtx",
+    "nccl", "nvjitlink",
 ):
     name = f"nvidia.{sub}"
     try:
         m = importlib.import_module(name)
     except ImportError:
-        continue  # ok — wheel not in dependency tree (e.g. nvtx is optional)
-    if getattr(m, "__file__", None) is None:
-        fail.append(f"  - {name} is a namespace-only package (__file__=None); "
-                    f"wheel install was corrupted")
+        continue  # wheel not in dep tree — fine
+    # __file__ may legitimately be None (namespace package); rely on __path__
+    paths = list(getattr(m, "__path__", []) or [])
+    if not paths:
+        fail.append(f"  - {name}: no __path__ — wheel never installed?")
+        continue
+    # At least one __path__ entry must contain real files (the wheel's
+    # bin/include/lib subdir, an __init__.py, anything non-trivial).
+    has_content = False
+    for p in paths:
+        try:
+            entries = [e for e in pathlib.Path(p).iterdir()]
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if entries:
+            has_content = True
+            break
+    if not has_content:
+        fail.append(f"  - {name}: __path__ exists but every dir is empty "
+                    f"({paths!r}) — partial install")
 if fail:
-    print("CORRUPT NVIDIA NAMESPACE — JAX will crash on import:")
+    print("CORRUPT NVIDIA WHEELS:")
     for line in fail: print(line)
-    print()
     print("Recovery: rm -rf .venv && bash scripts/pod_launch_gpu.sh")
     print("(do NOT use --force-reinstall, see script header)")
     sys.exit(1)
-print("nvidia/* namespace OK")
+print("nvidia/* wheels OK (all have non-empty __path__)")
 PY
 
 # Also pip check — surfaces dep version conflicts pip may have left
