@@ -193,3 +193,68 @@ def build_optimizer(
             param_labels=param_labels,
         ),
     )
+
+
+# --------------------------------------------------------------------------- #
+# FSDP / ZeRO-3 optimizer-state sharding (2026-05-13)
+#
+# Companion to `myllm.training.mesh.make_param_shardings`. Builds a
+# NamedSharding pytree that matches the *shape* of `optimizer.init(params)`
+# without actually allocating any opt-state. Used by run_pretrain.py's
+# sharded-init flow:
+#
+#     opt_state_sharding = make_optimizer_state_sharding(
+#         optimizer, trainable_sharded, mesh,
+#     )
+#     opt_init_jit = jax.jit(optimizer.init, out_shardings=opt_state_sharding)
+#     opt_state = opt_init_jit(trainable_sharded)
+#
+# Why this is its own function (not just a call to make_param_shardings):
+#   - We use `jax.eval_shape` to query the optimizer's output structure
+#     without running it. That gives us a pytree of ShapeDtypeStruct in
+#     EXACTLY the same nested form as the real opt_state — including
+#     namedtuple types (optax.MultiTransformState, ScaleByAdamState, etc.).
+#   - Critical: muP uses optax.multi_transform whose state IS a namedtuple
+#     (`MultiTransformState`). If a sharding helper accidentally flattens
+#     the tree (e.g. via tree_leaves -> tree_unflatten with a generic
+#     treedef), restore via `template=` would still work BUT live
+#     opt-state updates would break: `state.inner_states` (a namedtuple
+#     field access) becomes a dict key access and silently fails. This
+#     is the same bug class as the B1 fix from 2026-05-12 audit.
+#   - Using jax.tree.map preserves namedtuple types by default. Verified
+#     by the test_namedtuple_preserved test in tests/test_mesh_fsdp.py.
+# --------------------------------------------------------------------------- #
+def make_optimizer_state_sharding(
+    optimizer: Any,
+    params: Any,
+    mesh: Any,
+    mesh_axis: str = "data",
+) -> Any:
+    """Derive a NamedSharding pytree for ``optimizer.init(params)``.
+
+    Args:
+        optimizer: an ``optax.GradientTransformation`` (the return value of
+            ``make_optimizer(...)``).
+        params: the params pytree the optimizer will operate on. Can be
+            real arrays or ``jax.ShapeDtypeStruct`` (eval_shape style).
+            Only the *shape and dtype* of each leaf is used.
+        mesh: the JAX ``Mesh`` (from ``build_mesh_and_shardings``).
+        mesh_axis: the axis name to shard along (default ``"data"``).
+
+    Returns:
+        A PyTree of ``NamedSharding`` with the SAME tree structure as
+        ``optimizer.init(params)`` would produce. Pass this as
+        ``out_shardings`` to ``jax.jit(optimizer.init, ...)`` so the
+        initial opt-state lands sharded without an unsharded transient.
+    """
+    try:
+        import jax
+    except ImportError as e:
+        raise ImportError("jax not installed; install jax[cuda12]") from e
+    from myllm.training.mesh import make_param_shardings
+
+    # eval_shape returns a pytree of ShapeDtypeStruct in the SAME structure
+    # as optimizer.init(params) — including namedtuples like
+    # MultiTransformState / ScaleByAdamState. No real allocation occurs.
+    abstract_state = jax.eval_shape(lambda p: optimizer.init(p), params)
+    return make_param_shardings(abstract_state, mesh, mesh_axis=mesh_axis)
