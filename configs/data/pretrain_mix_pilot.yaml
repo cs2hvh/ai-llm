@@ -1,0 +1,259 @@
+# Pretraining data mixture for Phase 2 pilot + Phase 3 base.
+#
+# Restored to full multi-source mix after 2026-05-11 wind-tunnel debug session
+# revealed several gated/fragile sources. Changes from original:
+#   - Nemotron-CC: PENDING NVIDIA approval (manual review). Its 13.5% share
+#     is temporarily absorbed by FineWeb-Edu (now 45%). When approval lands,
+#     re-introduce Nemotron-CC and drop FineWeb-Edu back to 31.5%.
+#     Track: https://huggingface.co/datasets/nvidia/Nemotron-CC
+#   - the-stack-v2: T&C ACCEPTED, restored at 18% (the code source).
+#   - proof-pile-2: REMOVED permanently. Its 4.2% absorbed by open-web-math
+#     (now 7%). proof-pile-2's loader hit zstd decompress errors mid-stream
+#     + multiple config issues. open-web-math covers the math-text slice.
+#   - sangraha: now uses split=hin explicitly (was failing with default split=train).
+#   - mc4: deprecated but functional with trust_remote_code; auto-redirects to allenai/c4.
+#
+# Total = 1.0 exactly. Shares re-verified.
+#
+# Per-source fields:
+#   dataset, share, text_field, category, config_name, split, trust_remote_code
+#
+# ---------------------------------------------------------------------------
+# 2026-05-12 SENIOR REVIEW PUSHBACK — important context for any downstream
+# consumer of this yaml's "what corpus was used" question:
+#
+# (a) THE CURRENT IN-FLIGHT BUILD IS CODE-SKIPPED. starcoderdata is gated
+#     and `--skip-sources bigcode/starcoderdata` was passed at build time.
+#     The runner allocates per-source budgets as `target_tokens_per_source ×
+#     share`, so skipping the 18% code slot leaves a ~820M-token corpus,
+#     NOT 1B. This corpus is suitable for INFRA / PROXY-A VALIDATION ONLY.
+#     Use the label "infra-validation corpus v1 (no-code, 820M)" — NOT
+#     "1B mixed corpus" — in model card, eval reports, and external claims.
+#
+# (b) A FOLLOW-UP CODE-ONLY BUILD will land the missing 180M tokens via
+#     codeparrot/github-code-clean (public, content-inline; no gating).
+#     The composed v2 corpus = 12 sources from this build + that code
+#     build, totalling 1B with code share restored.
+#
+# (c) Decontamination is DISABLED in the current build (--no-decontam).
+#     This corpus is therefore not safe for benchmark-claim training; a
+#     pre-built decontam index + dual-mode (8-gram normalized + 13-gram)
+#     is required before training that produces published eval numbers.
+#
+# (d) StackExchange uses text_field=question, wasting the answer content.
+#     Tracked at the SE entry below.
+# ---------------------------------------------------------------------------
+
+name: pretrain_mix_pilot_v1
+# This yaml is the Stage 1 pilot (250M) variant of pretrain_mix.yaml.
+# Differences vs the parent:
+#   - codeparrot/github-code-clean (PUBLIC) replaces bigcode/starcoderdata
+#     (GATED) in the 18% code slot. The substitution is permanent for the
+#     pilot path; pretrain_mix.yaml stays unchanged so the original
+#     starcoderdata target can be reactivated when its HF gate is
+#     eventually approved.
+#   - Intended for use with `--target-tokens-per-source 5_000_000_000`
+#     via run_parallel_builds.py (lands a ~5B-token corpus).
+#   - See docs/pilot_corpus_rebuild_plan.md for the full execution
+#     playbook.
+total_share_must_equal: 1.0
+
+sources:
+  # --- High-quality web (44%) ----------------------------------------------
+  # FineWeb-Edu temporarily covers Nemotron-CC's slot (Nemotron pending approval).
+  # When Nemotron-CC lands, drop FineWeb-Edu back to 0.305 and re-add Nemotron @ 0.135.
+  - dataset: HuggingFaceFW/fineweb-edu
+    share: 0.44
+    text_field: text
+    category: web
+
+  # --- Code (18%) ----------------------------------------------------------
+  # PILOT VARIANT: using codeparrot/github-code-clean (PUBLIC) instead of
+  # the gated bigcode/starcoderdata. Already built once at 180M tokens
+  # (28 min wall) and uploaded to corpus_v1/sources/codeparrot-github-code-clean/.
+  # The pilot rebuild lifts that to 900M (5B × 0.18) via the same source.
+  - dataset: codeparrot/github-code-clean
+    share: 0.18
+    text_field: code
+    category: code
+    trust_remote_code: true
+
+  # --- Wiki + encyclopedic (6%) -------------------------------------------
+  - dataset: wikimedia/wikipedia
+    share: 0.06
+    text_field: text
+    category: wiki
+    config_name: 20231101.en
+
+  # --- Books, open license (5%) -------------------------------------------
+  - dataset: pg19
+    share: 0.05
+    text_field: text
+    category: books
+    trust_remote_code: true
+
+  # --- Academic (6%) -------------------------------------------------------
+  - dataset: allenai/peS2o
+    share: 0.06
+    text_field: text
+    category: academic
+    trust_remote_code: true
+
+  # --- Math (7% total; absorbed proof-pile-2's 4.2%) ----------------------
+  # Math is single-sourced now. open-web-math is parquet-native (no custom
+  # loader), so it just works.
+  - dataset: open-web-math/open-web-math
+    share: 0.07
+    text_field: text
+    category: math
+
+  # --- Q&A / forums (2%) --------------------------------------------------
+  # KNOWN ISSUE (2026-05-12 senior review): text_field=question wastes the
+  # source — the dataset has both questions and answers. The right fix is
+  # to also include the highest-scored answer. The dataset is
+  # `preferences`-style (chosen vs. rejected answer per question) so the
+  # accurate combiner is `question + chosen_response`. Need to verify the
+  # column names on HF before flipping the yaml below (loader now supports
+  # list-of-fields, so the mechanical change is just `text_field: [...]`).
+  # Tracked: rebuild stack_exchange as part of the post-current-build
+  # code-source rebuild step (see corpus relabel note at top).
+  - dataset: HuggingFaceH4/stack-exchange-preferences
+    share: 0.020
+    text_field: question
+    category: qa
+    trust_remote_code: true
+
+  # --- Multilingual (12%) — Hindi from Sangraha (sovereign hedge),
+  #     rest from mc4 (which redirects to allenai/c4 multilingual).
+  - dataset: ai4bharat/sangraha
+    share: 0.04
+    text_field: text
+    category: multilingual
+    config_name: verified
+    split: hin              # Sangraha uses per-language splits (asm/ben/.../hin/.../urd)
+    trust_remote_code: true
+  - dataset: mc4
+    share: 0.015
+    text_field: text
+    category: multilingual
+    config_name: es
+    trust_remote_code: true
+  - dataset: mc4
+    share: 0.015
+    text_field: text
+    category: multilingual
+    config_name: zh
+    trust_remote_code: true
+  - dataset: mc4
+    share: 0.015
+    text_field: text
+    category: multilingual
+    config_name: ar
+    trust_remote_code: true
+  - dataset: mc4
+    share: 0.015
+    text_field: text
+    category: multilingual
+    config_name: fr
+    trust_remote_code: true
+  - dataset: mc4
+    share: 0.020
+    text_field: text
+    category: multilingual
+    config_name: de
+    trust_remote_code: true
+
+# Filter chain — applied per-document at load time.
+filters:
+  length:
+    min_chars: 200
+    max_chars: 1_000_000
+  repetition:
+    max_top_word_share: 0.20
+    max_top_ngram_share: 0.10
+    ngram_n: 5
+  symbol_ratio:
+    max_symbol_ratio: 0.30
+  pii:
+    redact_email: true
+    redact_phone: true
+    redact_ipv4: false
+
+# R6 benchmark decontamination (B4 2026-05-12 audit: enabled by default).
+#
+# 2026-05-13 (reviewer Q7): default is now DUAL-MODE. Two pre-built indexes,
+# unioned at scan time:
+#   - 8-gram (recall) : flags any 8-word span overlap with a benchmark.
+#   - 13-gram (precision) : near-zero false positives at the cost of recall.
+# DualModeDecontaminationIndex returns the UNION of matches and reports the
+# secondary mode's per-benchmark counts separately so eval-deck signal-to-
+# noise can be audited per-source.
+#
+# Three operator modes (in yaml-priority order — first hit wins):
+#   (1) index_path_primary + index_path_secondary -> DualModeDecontaminationIndex
+#   (2) index_path                                -> single-mode (back-compat)
+#   (3) (none of the above)                       -> live-build (slow, ~5–15 min)
+#       — or fail-closed under --production.
+#
+# Pre-built indexes ship in R2 at decontamination/decontamination_index_{8,13}gram.json.
+# pod_launch_cpu.sh stages both into artifacts/ for offline reads.
+decontamination:
+  enabled: true
+  hash_seed: 0xDECAF
+  # Dual-mode (RECOMMENDED default for production / pilot / base):
+  index_path_primary:   artifacts/decontamination_index_8gram.json
+  index_path_secondary: artifacts/decontamination_index_13gram.json
+  # Single-mode (legacy back-compat — kept commented for reference):
+  # index_path: artifacts/decontamination_index.json
+  # ngram_size is only consulted for the live-build fallback. The pre-built
+  # indexes carry their own ngram_size on load.
+  ngram_size: 13
+  benchmarks:
+    # Multilingual MCQ adapters (used via the heavyweight Benchmark adapter path)
+    - id: mmlu-prox
+      sample_size: 200
+    - id: belebele
+      sample_size: 200
+    - id: milu
+      sample_size: 200
+    # Extended v1-gate prompt-only loaders (added 2026-05-12 per model card).
+    # These cover the rest of the planned eval gate. Use a pre-built index
+    # in production (index_path above) — live-build of all 11 benchmarks
+    # is ~10-15 min at run-start.
+    - id: mmlu-pro
+      sample_size: 200
+    - id: humaneval-plus
+      sample_size: 200
+    - id: mbpp-plus
+      sample_size: 200
+    - id: gsm8k
+      sample_size: 200
+    - id: math
+      sample_size: 200
+    - id: mgsm
+      sample_size: 50   # per-language; 50×7 langs = 350 effective
+    - id: bbh
+      sample_size: 30   # per-subtask; 30×27 subtasks = 810 effective
+    - id: ifeval
+      sample_size: 200
+  report_csv_path: artifacts/decontamination_report.csv
+
+# Batch settings shared across wind-tunnel / pilot / base.
+#
+# IMPORTANT (P0-3 fix, 2026-05-12 audit):
+# `sequence_length` is now DERIVED at runtime from `model_cfg.context_length + 1`.
+# The value below is informational only; run_pretrain.py overrides it with
+# `model_cfg.context_length + 1` after validating any explicit value matches.
+# If you set it here it MUST match `model_cfg.context_length + 1` of whatever
+# model config you launch with, else startup will error.
+#
+# Why this is shared: the packer + filter chain don't care about model size;
+# only sequence packing does, and that's derived. micro_batch_per_device
+# also belongs here because it's a data-side property (how many sequences
+# per device per step).
+batch:
+  micro_batch_per_device: 8
+  # sequence_length intentionally omitted — derived from model config.
+  grad_accum_steps: 1
+
+data_seed: 1234
