@@ -217,30 +217,47 @@ def iter_mgsm(
     *,
     dataset_id: str = "juletxara/mgsm",
     split: str = "test",
-    languages: tuple[str, ...] = ("en", "es", "fr", "de", "zh", "hi", "ar"),
+    # 2026-05-13: juletxara/mgsm has 11 configs: bn de en es fr ja ru sw te th zh.
+    # Our product langs (hi, ar) are NOT in this fork; we get bn + te as
+    # bonus Indic coverage. We attempt all the langs we'd like but skip
+    # any that the dataset doesn't actually publish (logged at WARN).
+    languages: tuple[str, ...] = (
+        "en", "es", "fr", "de", "zh",  # high-resource
+        "bn", "te",                    # Indic bonus (in dataset)
+        "hi", "ar",                    # our product langs — skipped if missing
+    ),
     sample_size: int | None = None,
     examples_provider: ExamplesProvider | None = None,
 ) -> Iterator[str]:
-    """MGSM: multilingual GSM8K (translated to 11 languages).
+    """MGSM: multilingual GSM8K. Each language is a separate HF config.
 
-    Each language is a separate HF config. We default to our 7 product
-    languages — same coverage as MMLU-ProX. Per language, sample_size is
-    applied independently.
+    Defensive against per-language config availability: skips languages
+    not in the current dataset version rather than crashing the run.
 
     Row schema (per config): {question: str, answer: str | None,
     answer_number: int, ...}.
     """
     for lang in languages:
         n = 0
-        for row in _load_hf(
-            dataset_id, split, name=lang, examples_provider=examples_provider
-        ):
-            text = row.get("question") or ""
-            if text.strip():
-                yield _truncate_if_huge(text)
-                n += 1
-                if sample_size is not None and n >= sample_size:
-                    break
+        try:
+            for row in _load_hf(
+                dataset_id, split, name=lang, examples_provider=examples_provider
+            ):
+                text = row.get("question") or ""
+                if text.strip():
+                    yield _truncate_if_huge(text)
+                    n += 1
+                    if sample_size is not None and n >= sample_size:
+                        break
+        except ValueError as e:
+            # "BuilderConfig '<lang>' not found" — log and skip.
+            log.warning(
+                "mgsm_skipped_unavailable_lang",
+                dataset_id=dataset_id,
+                lang=lang,
+                error=str(e),
+            )
+            continue
 
 
 def iter_bbh(

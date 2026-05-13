@@ -333,6 +333,117 @@ class DecontaminationIndex:
 
 
 # --------------------------------------------------------------------------- #
+# Dual-mode wrapper (2026-05-13, senior reviewer Q7)
+#
+# Reviewer recommendation: use 8-gram normalized matching for
+# benchmark-prompt recall (lower false-negative rate; protects eval
+# integrity) PLUS 13-gram exact matching as a secondary high-precision
+# report (lower false-positive rate; useful for "how much do we
+# *definitely* contaminate"). 13-gram alone is too conservative for
+# benchmark protection; 8-gram alone over-removes.
+#
+# This class wraps two DecontaminationIndex objects (each loaded from
+# a separate JSON file) and presents the same scan_document interface.
+# Drop decision: union — a match in EITHER mode drops the doc (the
+# 8-gram is the protective gate; 13-gram contributes additional
+# coverage on top). The reporting tracks per-mode counts independently
+# so the operator can see "X% removed by 8-gram, Y% by 13-gram, Z% by
+# both."
+# --------------------------------------------------------------------------- #
+class DualModeDecontaminationIndex:
+    """Two underlying DecontaminationIndex objects with different n-gram
+    sizes; presents a single scan_document interface that unions matches.
+
+    Use:
+        idx_8 = DecontaminationIndex.load_json("decontam_8gram.json")
+        idx_13 = DecontaminationIndex.load_json("decontam_13gram.json")
+        dual = DualModeDecontaminationIndex(primary=idx_8, secondary=idx_13)
+        matches = dual.scan_document(text, report=report)
+        # matches: {benchmark_id: count} — union of both modes
+        # report.per_mode: {"primary": {...}, "secondary": {...}}
+
+    Conventions:
+      - ``primary``  is the high-recall mode (8-gram), drives drop decisions
+      - ``secondary`` is the high-precision mode (13-gram), informational
+
+    Either underlying index can be None to disable that mode.
+    """
+
+    def __init__(
+        self,
+        *,
+        primary: "DecontaminationIndex | None" = None,
+        secondary: "DecontaminationIndex | None" = None,
+    ):
+        if primary is None and secondary is None:
+            raise ValueError(
+                "DualModeDecontaminationIndex requires at least one of "
+                "primary= / secondary= to be a real DecontaminationIndex"
+            )
+        self.primary = primary
+        self.secondary = secondary
+
+    @property
+    def signatures(self) -> dict[str, "BenchmarkSignature"]:
+        """Return the union of benchmark signatures across both modes.
+
+        For a benchmark present in both modes, the primary signature wins
+        (the secondary one has the same benchmark_id and example count;
+        only the n-gram set differs by construction). Callers that need
+        per-mode signatures access ``self.primary.signatures`` and
+        ``self.secondary.signatures`` directly.
+        """
+        sigs: dict[str, BenchmarkSignature] = {}
+        if self.secondary is not None:
+            sigs.update(self.secondary.signatures)
+        if self.primary is not None:
+            sigs.update(self.primary.signatures)
+        return sigs
+
+    def scan_document(
+        self,
+        text: str,
+        *,
+        report: "DecontaminationReport | None" = None,
+        doc_id: str | None = None,
+    ) -> dict[str, int]:
+        """Scan via both modes; return union of matches.
+
+        Returns a single ``{benchmark_id: count}`` dict where the count
+        is the SUM of per-mode counts (i.e., total n-gram matches across
+        both modes). The exact per-mode breakdown is in the report.
+        """
+        matches: dict[str, int] = {}
+
+        if self.primary is not None:
+            m = self.primary.scan_document(text, report=report, doc_id=doc_id)
+            for b, c in m.items():
+                matches[b] = matches.get(b, 0) + c
+
+        if self.secondary is not None:
+            # IMPORTANT: pass report=None here so the secondary index
+            # doesn't double-count n_corpus_docs_scanned (which gets
+            # incremented inside scan_document). We track secondary
+            # counts as separate metadata below.
+            m = self.secondary.scan_document(text, report=None, doc_id=doc_id)
+            for b, c in m.items():
+                matches[b] = matches.get(b, 0) + c
+
+            # Attach the secondary-mode breakdown to the report, if any.
+            if report is not None and m:
+                sec_per_mode = getattr(report, "secondary_per_bench", None)
+                if sec_per_mode is None:
+                    sec_per_mode = {}
+                    setattr(report, "secondary_per_bench", sec_per_mode)
+                for b, c in m.items():
+                    cur = sec_per_mode.get(b, {"n_corpus_docs_matched": 0})
+                    cur["n_corpus_docs_matched"] += 1
+                    sec_per_mode[b] = cur
+
+        return matches
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline helper — wrap a corpus iterator with decontamination filtering
 # --------------------------------------------------------------------------- #
 def decontaminate_iter(
