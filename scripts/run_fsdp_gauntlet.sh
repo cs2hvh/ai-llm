@@ -245,26 +245,46 @@ else
         --run-name g5_fsdp --total-steps "$STEPS" --fsdp \
         > "$G5_FSDP_LOG" 2>&1
 
-    # Extract tokens_per_sec from the structlog JSON events. Take median of
-    # all step-level entries to avoid first-step warmup pollution.
+    # run_pretrain.py doesn't emit a tokens_per_sec field — only a "step"
+    # event with {step, timestamp, loss}. So we compute throughput from
+    # consecutive step timestamp deltas. Skip the first few steps (JIT
+    # compile + warmup) and take the median across the remaining deltas.
     extract_med_tps() {
         local logfile="$1"
+        local micro_batch="$2"
+        local seq_len="$3"
         python - <<PY
-import json, sys, statistics
-xs = []
+import json, statistics, datetime
+events = []
 for line in open("$logfile"):
+    line = line.lstrip()
+    if not line.startswith("{"): continue
     try:
-        if not line.lstrip().startswith("{"): continue
         e = json.loads(line)
-        tps = e.get("tokens_per_sec") or e.get("toks_per_sec")
-        if tps is not None: xs.append(float(tps))
     except Exception:
         continue
-print(round(statistics.median(xs), 1) if xs else "")
+    if e.get("event") == "step" and "step" in e and "timestamp" in e:
+        ts = datetime.datetime.fromisoformat(e["timestamp"].rstrip("Z"))
+        events.append((int(e["step"]), ts))
+events.sort()
+# Drop first 5 steps to skip JIT compile + warmup noise.
+events = events[5:]
+if len(events) < 2:
+    print(""); raise SystemExit
+tokens_per_step = $micro_batch * $seq_len
+deltas = []
+for (s1, t1), (s2, t2) in zip(events[:-1], events[1:]):
+    dt = (t2 - t1).total_seconds()
+    if dt > 0:
+        deltas.append((s2 - s1) * tokens_per_step / dt)
+print(round(statistics.median(deltas), 1) if deltas else "")
 PY
     }
-    DP_TPS=$(extract_med_tps "$G5_DP_LOG")
-    FSDP_TPS=$(extract_med_tps "$G5_FSDP_LOG")
+    # wind_tunnel.yaml is 2048 ctx; seq_len passed to packer is ctx+1=2049
+    # but the on-GPU tokens-per-step uses the model's input length (2048).
+    SEQ_LEN_FOR_TPS=2048
+    DP_TPS=$(extract_med_tps   "$G5_DP_LOG"   "$MICRO_BATCH" "$SEQ_LEN_FOR_TPS")
+    FSDP_TPS=$(extract_med_tps "$G5_FSDP_LOG" "$MICRO_BATCH" "$SEQ_LEN_FOR_TPS")
 
     if [[ -n "$DP_TPS" && -n "$FSDP_TPS" && "$DP_TPS" != "0.0" ]]; then
         RATIO=$(python -c "print(round($FSDP_TPS / $DP_TPS, 3))")
