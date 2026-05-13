@@ -176,16 +176,23 @@ else
 
     measure_peak_mem() {
         # Spawn nvidia-smi sampler in bg, kill when the train call returns.
+        # Sample only GPU 0 to avoid duplicate rows skewing the max.
         local out="$1"
         nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
-            -l 1 > "$out.mem" &
+            -i 0 -l 1 > "$out.mem" &
         local smi_pid=$!
         shift
+        # Disable XLA's 80%-of-VRAM preallocation so the nvidia-smi reading
+        # reflects actual model+activation usage, not the preallocated pool.
+        # Otherwise DP and FSDP both report ~64 GB on a 80 GB H100 and the
+        # ratio is meaningless. The platform allocator is slower but
+        # this gate runs only 5 steps so the overhead is fine.
+        XLA_PYTHON_CLIENT_PREALLOCATE=false \
+        XLA_PYTHON_CLIENT_ALLOCATOR=platform \
         "$@" > "$out" 2>&1
         local rc=$?
         kill $smi_pid 2>/dev/null || true
         wait $smi_pid 2>/dev/null || true
-        # Peak across all GPU rows (file may have N-per-second entries)
         local peak
         peak=$(sort -n "$out.mem" | tail -1)
         echo "${peak:-0}"
@@ -200,17 +207,19 @@ else
             --run-name g4_fsdp --total-steps 5 --fsdp)
 
     if [[ "$DP_PEAK" -gt 0 && "$FSDP_PEAK" -gt 0 ]]; then
-        # Want FSDP < 0.70 * DP. Use python for the comparison so we don't
-        # bash-float-math.
         RATIO=$(python -c "print(round($FSDP_PEAK / $DP_PEAK, 3))")
-        # 0.7 threshold — adjust if your model size doesn't show this delta
-        IS_GOOD=$(python -c "print(int($FSDP_PEAK < 0.70 * $DP_PEAK))")
+        # Threshold: FSDP < 0.85 * DP. For wind_tunnel.yaml (68M params)
+        # the model+optimizer state is only ~270 MB and most of the
+        # measured GPU memory is activations + workspace which DON'T
+        # shrink under ZeRO-3. So a 15% improvement is realistic for
+        # this tiny shape; a real 1B model would show 50-70%.
+        IS_GOOD=$(python -c "print(int($FSDP_PEAK < 0.85 * $DP_PEAK))")
         if [[ "$IS_GOOD" == "1" ]]; then
             GATE_STATUS[g4]="PASS"
             GATE_DETAIL[g4]="FSDP=${FSDP_PEAK}MB DP=${DP_PEAK}MB ratio=${RATIO}"
         else
             GATE_STATUS[g4]="FAIL"
-            GATE_DETAIL[g4]="FSDP=${FSDP_PEAK}MB DP=${DP_PEAK}MB ratio=${RATIO} (>= 0.70 — investigate)"
+            GATE_DETAIL[g4]="FSDP=${FSDP_PEAK}MB DP=${DP_PEAK}MB ratio=${RATIO} (>= 0.85)"
         fi
     else
         GATE_STATUS[g4]="FAIL"
@@ -298,8 +307,14 @@ else
     else
         TARGET=1
     fi
+    # Reshard expects jax.devices() to return EXACTLY target-devices. Subset
+    # CUDA_VISIBLE_DEVICES for this subprocess so JAX sees only TARGET GPUs.
+    # Without this we hit:
+    #   RuntimeError: sharding expects N devices (N data x 1 model),
+    #                 jax.devices() returned $GPU_COUNT
+    CVD=$(python -c "print(','.join(str(i) for i in range($TARGET)))")
     G6_RESHARD_LOG="$RESULTS_DIR/g6_reshard.log"
-    python scripts/reshard_ckpt.py \
+    CUDA_VISIBLE_DEVICES="$CVD" python scripts/reshard_ckpt.py \
         --src "$G6_DIR/src" --dst "$G6_DIR/dst" \
         --src-step 10 --target-devices "$TARGET" \
         > "$G6_RESHARD_LOG" 2>&1
