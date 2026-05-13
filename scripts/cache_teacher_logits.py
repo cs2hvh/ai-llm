@@ -114,7 +114,19 @@ def _make_transformers_teacher(hf_model: str):
         ) from e
     import numpy as np
 
-    log.info("loading_teacher_transformers", model=hf_model)
+    # Validate torch can see CUDA before loading — bail loudly if not,
+    # since "device_map='auto'" silently falls back to CPU which is
+    # ~100x slower (the audit pod 2026-05-13 ran an OLMo-2 forward on
+    # CPU for 15+ min before we noticed).
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "torch.cuda.is_available() is False. With cuda_runtime / cuDNN "
+            "potentially out of sync after the cuDNN pin downgrade, "
+            "fix with: pip install --upgrade --no-deps 'torch>=2.4' && "
+            "pip install --upgrade 'torch>=2.4'. Then re-run the audit."
+        )
+    n_visible = torch.cuda.device_count()
+    log.info("loading_teacher_transformers", model=hf_model, n_gpus=n_visible)
     model = AutoModelForCausalLM.from_pretrained(
         hf_model,
         torch_dtype=torch.bfloat16,
@@ -123,8 +135,19 @@ def _make_transformers_teacher(hf_model: str):
         trust_remote_code=True,  # some teachers (DeepSeek-V2-Lite) need this
     )
     model.eval()
+    # Sanity check that device_map="auto" actually placed weights on a
+    # GPU (not CPU fallback). If not, force the first parameter device
+    # to be CUDA so the forward runs on GPU.
+    first_param_device = next(model.parameters()).device
+    if first_param_device.type != "cuda":
+        log.warning("device_map_fell_back_to_cpu", first_param_device=str(first_param_device))
+        model = model.to("cuda:0")
+        first_param_device = next(model.parameters()).device
     teacher_vocab = int(model.config.vocab_size)
-    log.info("teacher_loaded", model=hf_model, vocab_size=teacher_vocab)
+    log.info(
+        "teacher_loaded", model=hf_model, vocab_size=teacher_vocab,
+        first_param_device=str(first_param_device),
+    )
 
     @torch.inference_mode()
     def forward(token_ids):
