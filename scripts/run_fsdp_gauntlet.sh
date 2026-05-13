@@ -59,6 +59,32 @@ if [[ "$GPU_COUNT" -lt 2 ]]; then
     die "FSDP gauntlet requires >=2 GPUs; saw $GPU_COUNT"
 fi
 
+# FSDP shards the per-step batch along the 'data' mesh axis, so the
+# global batch must be divisible by GPU_COUNT. wind_tunnel.yaml's
+# default micro_batch_per_device=8 fails on 3 GPUs (8 mod 3 != 0).
+# Pick the smallest reasonable multiple of GPU_COUNT (>=8) and pass it
+# via --micro-batch-override. Same value is used for the DP runs so
+# G4 / G5 comparisons are apples-to-apples.
+MIN_BATCH=8
+MICRO_BATCH="${GAUNTLET_MICRO_BATCH:-}"
+if [[ -z "$MICRO_BATCH" ]]; then
+    # smallest multiple of GPU_COUNT that is >= MIN_BATCH
+    MICRO_BATCH=$(( ((MIN_BATCH + GPU_COUNT - 1) / GPU_COUNT) * GPU_COUNT ))
+fi
+log "micro_batch (global, divisible by $GPU_COUNT): $MICRO_BATCH"
+
+# Common run_pretrain args used by every gate. --micro-batch-override
+# forces a value compatible with FSDP's data-axis sharding for this
+# GPU count. --synthetic-data avoids needing a real corpus on disk.
+COMMON_ARGS=(
+    --model-config "$MODEL_CFG"
+    --data-config "$DATA_CFG"
+    --tokenizer-path artifacts/tokenizer_v1.json
+    --no-wandb
+    --synthetic-data
+    --micro-batch-override "$MICRO_BATCH"
+)
+
 # Helper: gate-skipped check
 is_skipped() {
     local gate="$1"
@@ -77,15 +103,8 @@ if is_skipped g1; then
 else
     log "G1: FSDP boot + 3 steps without NaN"
     G1_LOG="$RESULTS_DIR/g1.log"
-    python scripts/run_pretrain.py \
-        --model-config "$MODEL_CFG" \
-        --data-config "$DATA_CFG" \
-        --tokenizer-path artifacts/tokenizer_v1.json \
-        --run-name g1_boot \
-        --total-steps 3 \
-        --no-wandb \
-        --synthetic-data \
-        --fsdp \
+    python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+        --run-name g1_boot --total-steps 3 --fsdp \
         > "$G1_LOG" 2>&1
     G1_RC=$?
     if [[ $G1_RC -eq 0 ]] && ! grep -qi "nan\|NaN" "$G1_LOG"; then
@@ -106,15 +125,8 @@ if is_skipped g2; then
 else
     log "G2: HLO collective inspection (MYLLM_DEBUG_HLO=1)"
     G2_LOG="$RESULTS_DIR/g2.log"
-    MYLLM_DEBUG_HLO=1 python scripts/run_pretrain.py \
-        --model-config "$MODEL_CFG" \
-        --data-config "$DATA_CFG" \
-        --tokenizer-path artifacts/tokenizer_v1.json \
-        --run-name g2_hlo \
-        --total-steps 3 \
-        --no-wandb \
-        --synthetic-data \
-        --fsdp \
+    MYLLM_DEBUG_HLO=1 python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+        --run-name g2_hlo --total-steps 3 --fsdp \
         > "$G2_LOG" 2>&1
     G2_RC=$?
     RS_COUNT=$(grep -oE '"reduce_scatter":[[:space:]]*[0-9]+' "$G2_LOG" | head -1 | grep -oE '[0-9]+' || echo 0)
@@ -181,15 +193,11 @@ else
     }
 
     DP_PEAK=$(measure_peak_mem "$G4_DP_LOG" \
-        python scripts/run_pretrain.py \
-            --model-config "$MODEL_CFG" --data-config "$DATA_CFG" \
-            --tokenizer-path artifacts/tokenizer_v1.json \
-            --run-name g4_dp --total-steps 5 --no-wandb --synthetic-data)
+        python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+            --run-name g4_dp --total-steps 5)
     FSDP_PEAK=$(measure_peak_mem "$G4_FSDP_LOG" \
-        python scripts/run_pretrain.py \
-            --model-config "$MODEL_CFG" --data-config "$DATA_CFG" \
-            --tokenizer-path artifacts/tokenizer_v1.json \
-            --run-name g4_fsdp --total-steps 5 --no-wandb --synthetic-data --fsdp)
+        python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+            --run-name g4_fsdp --total-steps 5 --fsdp)
 
     if [[ "$DP_PEAK" -gt 0 && "$FSDP_PEAK" -gt 0 ]]; then
         # Want FSDP < 0.70 * DP. Use python for the comparison so we don't
@@ -221,15 +229,11 @@ else
     G5_DP_LOG="$RESULTS_DIR/g5_dp.log"
     G5_FSDP_LOG="$RESULTS_DIR/g5_fsdp.log"
 
-    python scripts/run_pretrain.py \
-        --model-config "$MODEL_CFG" --data-config "$DATA_CFG" \
-        --tokenizer-path artifacts/tokenizer_v1.json \
-        --run-name g5_dp --total-steps "$STEPS" --no-wandb --synthetic-data \
+    python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+        --run-name g5_dp --total-steps "$STEPS" \
         > "$G5_DP_LOG" 2>&1
-    python scripts/run_pretrain.py \
-        --model-config "$MODEL_CFG" --data-config "$DATA_CFG" \
-        --tokenizer-path artifacts/tokenizer_v1.json \
-        --run-name g5_fsdp --total-steps "$STEPS" --no-wandb --synthetic-data --fsdp \
+    python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
+        --run-name g5_fsdp --total-steps "$STEPS" --fsdp \
         > "$G5_FSDP_LOG" 2>&1
 
     # Extract tokens_per_sec from the structlog JSON events. Take median of
@@ -282,12 +286,9 @@ else
     rm -rf "$G6_DIR" && mkdir -p "$G6_DIR"
 
     G6_SRC_LOG="$RESULTS_DIR/g6_src.log"
-    python scripts/run_pretrain.py \
-        --model-config "$MODEL_CFG" --data-config "$DATA_CFG" \
-        --tokenizer-path artifacts/tokenizer_v1.json \
+    python scripts/run_pretrain.py "${COMMON_ARGS[@]}" \
         --run-name g6_src --total-steps 10 --checkpoint-every 10 \
-        --checkpoint-root "$G6_DIR/src" \
-        --no-wandb --synthetic-data --fsdp \
+        --checkpoint-root "$G6_DIR/src" --fsdp \
         > "$G6_SRC_LOG" 2>&1
     G6_RC1=$?
 
