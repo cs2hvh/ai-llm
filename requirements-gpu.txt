@@ -1,41 +1,40 @@
 # GPU-pod deps. Install on RunPod after base image, in addition to requirements.txt.
-# CUDA 12 assumed. Pin to RunPod's actual CUDA at pod-launch time.
-
-# JAX with CUDA 12 wheels.
+# Single-venv co-existence of JAX (FSDP training) + PyTorch (teacher audit).
 #
-# Why we pin 0.4.35 (not >=0.4.30,<0.5):
-# Driver 570.x ships with cuDNN 9.1-class libraries from older nvidia-cudnn-cu12
-# pip wheels. When transformers + accelerate are installed for the teacher
-# audit, pip's resolver picks the older nvidia-cudnn-cu12 (9.1.0.70) that
-# matches their constraints, downgrading the cuDNN that JAX 0.4.38+ bundled.
-# JAX then can't find symbols it needs and emits:
-#     CUDNN_STATUS_NOT_INITIALIZED
-#     Possibly insufficient driver version: 570.172.8
-# Pinning JAX 0.4.35 stays compatible with cuDNN 9.1-9.5 and avoids the
-# downgrade-under-the-feet bug. (Pod 2026-05-13 incident.)
-# 0.4.38 is confirmed working on driver 570.172.08 (the RunPod A100-80GB
-# image as of 2026-05-13). 0.4.35 broke on a `nvidia.cuda_nvcc` empty-
-# namespace import issue. If 0.4.38 ever regresses, try 0.4.34 next.
+# Why this exact combo (researched 2026-05-13 after pod whack-a-mole):
+#   torch==2.7.1 pins every nvidia-*-cu12 with == constraints to the
+#   CUDA 12.6 ABI set (cuDNN 9.5.1.17, cublas 12.6.4.1, nccl 2.26.2, ...).
+#   jax[cuda12]==0.4.38 accepts those same versions via its >= ranges
+#   (cuDNN >=9.1,<10; cublas >=12.1.3.1; nccl >=2.18.1; ...). So pip
+#   resolves a single nvidia-* set that satisfies both stacks in ONE
+#   transaction. No --force-reinstall, no --no-deps, no manual cuDNN
+#   pin needed.
+#
+#   The CUDA 12.6 ABI is forward-compat with driver 12.8.x (current
+#   RunPod default) and driver 12.9+ (future B200 pods).
+#
+# Sources for this choice:
+#   - jax-cuda12-plugin 0.4.38 PyPI metadata (loose >= pins)
+#   - torch 2.7.1 PyPI metadata (strict == CUDA 12.6 pins)
+#   - apple/axlearn pyproject.toml (production JAX + torch combo)
+#
+# Anti-patterns we hit and the script now avoids:
+#   - DO NOT bump JAX past 0.5.x without also bumping torch: JAX 0.6+
+#     raises its cuDNN floor to 9.8 → collides with torch 2.7.1's
+#     ==9.5.1.17. When that day comes, see apple/axlearn.
+#   - DO NOT --upgrade nvidia-cudnn-cu12 after install. Pip pulls
+#     9.22.x → CUDNN_STATUS_NOT_INITIALIZED on JAX 0.4.38.
+#   - DO NOT install torch from whl/cu124 (= torch 2.6 with cuDNN
+#     9.1.0.70). The default PyPI torch 2.7.1 (cu126 build) is the
+#     answer.
+#   - DO NOT --force-reinstall any single nvidia-* package. The
+#     nvidia namespace package (PEP 420) breaks on interleaved
+#     uninstall + reinstall.
+
+torch==2.7.1
+torchvision==0.22.1
 jax[cuda12]==0.4.38
 
-# Pin cuDNN to a version JAX 0.4.38 was built against. The latest
-# nvidia-cudnn-cu12 9.22.x is too new and trips a CUDNN_STATUS_NOT_INITIALIZED
-# at jax.jit time even though the symbol layout looks compatible.
-# (2xH200 incident 2026-05-13.)
-nvidia-cudnn-cu12==9.5.0.50
-
-# torch from PyPI default ships built for CUDA 12.9+ which requires
-# driver >= 12.9. RunPod pods commonly have driver 12.8.x, so install
-# torch from the cu124 index instead (forward-compatible with any
-# 12.4+ driver). The teacher audit needs torch + transformers +
-# accelerate; without this pin, the audit silently falls back to
-# CPU forward passes which take ~40 min per teacher. Specify the
-# index-url at install time, NOT in requirements-gpu.txt (pip flags
-# in requirements files are per-line and clutter):
-#   pip install --upgrade "torch>=2.4,<2.7" \
-#       --index-url https://download.pytorch.org/whl/cu124
-
 # FlashAttention via JAX-Pallas is built in; no separate dep needed.
-
-# Optional: TensorFlow GPU only if running TF-backed inference on the pod.
-# tensorflow[and-cuda]>=2.18,<3.0
+# transformers + accelerate handled in the main install transaction
+# by pod_launch_gpu.sh (so the single resolver pass settles everything).
