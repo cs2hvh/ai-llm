@@ -1,9 +1,19 @@
 # GPU-pod deps. Install on RunPod after base image, in addition to requirements.txt.
 # CUDA 12 assumed. Pin to RunPod's actual CUDA at pod-launch time.
 
-# JAX with CUDA 12 wheels (use the official find-links for current versions):
-#   pip install --upgrade "jax[cuda12]>=0.4.30,<0.5"
-jax[cuda12]>=0.4.30,<0.5
+# JAX with CUDA 12 wheels.
+#
+# Why we pin 0.4.35 (not >=0.4.30,<0.5):
+# Driver 570.x ships with cuDNN 9.1-class libraries from older nvidia-cudnn-cu12
+# pip wheels. When transformers + accelerate are installed for the teacher
+# audit, pip's resolver picks the older nvidia-cudnn-cu12 (9.1.0.70) that
+# matches their constraints, downgrading the cuDNN that JAX 0.4.38+ bundled.
+# JAX then can't find symbols it needs and emits:
+#     CUDNN_STATUS_NOT_INITIALIZED
+#     Possibly insufficient driver version: 570.172.8
+# Pinning JAX 0.4.35 stays compatible with cuDNN 9.1-9.5 and avoids the
+# downgrade-under-the-feet bug. (Pod 2026-05-13 incident.)
+jax[cuda12]==0.4.35
 
 # FlashAttention via JAX-Pallas is built in; no separate dep needed.
 
