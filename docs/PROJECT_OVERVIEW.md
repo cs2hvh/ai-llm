@@ -2,7 +2,7 @@
 
 **Status doc, kept current.** Single source of truth for "what is this project, how does it work, where is it." If something in here is out of date, fix it first.
 
-**Last update:** 2026-05-12 (evening)
+**Last update:** 2026-05-13 (evening) — FSDP shipped + validated on 2× H200 SXM; dual-mode decontam wired; code-only source built (180M tokens); audit machinery green; **Stage 1 pilot unblocked**.
 **Lead:** harshit.hv@samatva.com (solo, treats project as enterprise)
 **Build partner:** Claude (Anthropic) — pair-programming + research agent fleet
 **Repo:** https://github.com/cs2hvh/ai-llm — `main` branch is canonical
@@ -26,7 +26,7 @@ A **1B-parameter decoder-only foundation model**, trained from scratch with a mu
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    CURRENT STATE (2026-05-12)                    │
+│                    CURRENT STATE (2026-05-13)                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │   PHASE                              STATUS                      │
@@ -38,16 +38,24 @@ A **1B-parameter decoder-only foundation model**, trained from scratch with a mu
 │   Throughput baseline                ✓ Measured (1B+250M)        │
 │   Senior review round 1              ✓ Processed                 │
 │   Senior review round 2              ✓ All P0 fixes shipped      │
+│   FSDP-in-JAX (Commits A–G)          ✓ DONE (gauntlet G1-G4 PASS │
+│                                        on 2× H200 SXM 2026-05-13)│
+│   Code-only source (codeparrot)      ✓ DONE (180M tokens, R2)    │
+│   Dual-mode decontam (8+13 gram)     ✓ DONE (wired+indexed, 10   │
+│                                        benchmarks on R2)         │
+│   Teacher audit machinery            ✓ DONE (real-text rerun TBD)│
 │                                                                  │
-│   ▶ FSDP-in-JAX                      ◐ NEXT (3-5 dev-days)       │
-│   ▶ L2 multi-GPU parity canary       ◯ blocks on FSDP            │
-│   ▶ Corpus rebuild (correct seq)     ◯ blocks on FSDP            │
-│   ▶ Stage 0/1/2 rehearsals           ◯ blocks on FSDP            │
-│   ▶ Base v1 (600B tokens, 1B params) ◯ blocks on above           │
+│   ▶ Compose v2 1B corpus             ◐ NEXT (~30 min on GPU pod) │
+│   ▶ Re-bench 1B-shape post-FSDP      ◯ during Stage 1 warmup     │
+│   ▶ Stage 1: 250M pilot @ 30-50B     ◐ READY TO LAUNCH           │
+│   ▶ Stage 2: 1B rehearsal @ 10-30B   ◯ blocks on Stage 1 green   │
+│   ▶ Stage 3: Base v1 (600B tokens)   ◯ blocks on Stage 2 green   │
 │   ▶ Release scorecard                ◯ blocks on base run        │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+**Reference today's commits** (chronological): cc56daa wires dual-mode decontam through `build_packed_corpus.py`; aaff2fb fixes the mmlu-prox column-schema bug; b1dd5dd ships the teacher top-K mass audit script + 14 tests; eab98c9 lands `pod_setup_apt.sh` + `pod_launch_gpu.sh` + `run_fsdp_gauntlet.sh` + `run_teacher_audit.sh`; 7002d50 isolates gauntlet checkpoints from real-run state; 6cf299e pins the canonical `torch==2.7.1 + jax[cuda12]==0.4.38` single-venv recipe after a 7-attempt CUDA-version saga.
 
 ---
 
@@ -699,26 +707,30 @@ llm-build/
 | Loss-spike watchdog + checkpoint rollback | ✓ unit-tested | Not yet stress-tested in real training |
 | Orbax checkpoint save + R2 mirror | ✓ proven | 2.7 GiB at 744 MiB/s |
 | R2-streaming corpus build with delete-local | ✓ proven | 808M-token build on 384GB-disk server |
-| FSDP / ZeRO-3 sharded state | ◯ not yet | Plan exists; 3-5 dev-days |
-| Multi-GPU loss parity | ◯ not yet | L2 canary planned |
-| Real training at 1B scale | ◯ not yet | Blocks on FSDP + Stage 1 pilot |
-| Distillation teacher cache build | ◯ not yet | Design exists; implementation TBD |
-| Eval pipeline run end-to-end | ◯ not yet | Eval adapters exist; not yet wired |
+| **FSDP / ZeRO-3 sharded state** | **✓ proven** | **Gauntlet G2: reduce_scatter=46 in HLO (not silent DDP); G4: 1617 MB FSDP vs 14803 MB DP = 89% savings on 2× H200 SXM** |
+| **Multi-GPU loss parity (L2 canary)** | **✓ proven** | **DP vs FSDP loss curves match within atol=5e-3 over 50 synthetic steps** |
+| **Dual-mode decontam (8+13 gram MinHash)** | **✓ proven** | **10 benchmarks indexed (1.75M / 1.74M ngrams); 558 docs flagged in codeparrot build (real catch)** |
+| **Code-only source build** | **✓ proven** | **180M tokens from codeparrot/github-code-clean, 2 shards, R2-hosted (codeparrot fallback for gated starcoderdata)** |
+| **Teacher-audit machinery (top-K mass)** | **✓ proven** | **OLMo-2-13B + DeepSeek-V2-Lite loaded on H200 SXM, audit forward ran, top-K masses computed. K decision deferred until re-run on real text (synthetic random tokens → uniform softmax → K=32 recommendation is a methodology artifact, not real)** |
+| Reshard checkpoint across mesh shapes (G6) | ◐ partial | Orbax restore call lacks RestoreArgs.sharding; correctness logic exists, API call needs fix before Stage 2 pod transitions |
+| Real training at 1B scale | ◯ not yet | Unblocked: Stage 1 pilot can launch |
+| Distillation teacher cache build | ◯ not yet | Audit machinery ready; cache step pending Stage 3 prep |
+| Eval pipeline run end-to-end | ◯ not yet | Eval adapters exist; not yet wired into training loop |
 | Release scorecard | ◯ not yet | Format defined; depends on a v1 model |
 
-**Translation:** the data + canary + single-step infra is **done and proven**. The multi-GPU training + distillation + eval pipeline is **designed but not yet validated end-to-end**.
+**Translation (2026-05-13):** the data + canary + single-step infra is **done and proven**, and the **FSDP correctness gates are green**. We are unblocked for Stage 1 pilot training. The remaining items are operational (compose v2 corpus, run pilot, run rehearsal, run base) rather than design or correctness.
 
 ---
 
 ## 15. Open decisions (need explicit calls before Stage 3)
 
-1. **seq=4096 vs seq=8192 for base v1.** Depends on FSDP throughput. Decision: re-bench after FSDP, pick the one with better cost/wall-time.
-2. **Code source: starcoderdata vs codeparrot/github-code-clean.** starcoderdata is gated; codeparrot is public. Decision pending HF gate review.
-3. **StackExchange formatting.** Current text_field=question wastes the answer. Need to verify the exact preferences-dataset schema (question + chosen_response).
-4. **Decontam policy: 8gram-only / 13gram-only / dual-mode.** Reviewer recommends dual. Default in code: 13gram. Need to wire 8gram option + dual reporting.
-5. **Teacher selection final.** DeepSeek-V4-Pro + Olmo-3-32B are locked, but the actual cache build hasn't happened. Top-K=64 needs a mass-audit before commit.
-6. **Pod selection for Stage 3.** 5×H200 single-pod vs 8×H100/H200 pod (when available). Cost vs throughput tradeoff.
-7. **Eval suite scope for v1.** Full reviewer list (11 benchmarks) vs minimal MMLU/GSM8K/HumanEval. Depends on time/budget.
+1. **seq=4096 vs seq=8192 for base v1.** ◯ STILL OPEN. Depends on FSDP throughput on real training. Decision: re-bench after Stage 1 pilot, pick the one with better cost/wall-time.
+2. ~~**Code source: starcoderdata vs codeparrot.**~~ ✓ DECIDED 2026-05-13 — codeparrot/github-code-clean, 180M tokens built and uploaded to R2 at `corpus_v1/sources/codeparrot-github-code-clean/`. Compose-time swap: edit `pretrain_mix.yaml` to replace `bigcode/starcoderdata` with `codeparrot/github-code-clean` in the code slot.
+3. **StackExchange formatting.** ◯ STILL OPEN. Current text_field=question wastes the answer. Need to verify the exact preferences-dataset schema (question + chosen_response). Tracked as a Phase 2 rebuild.
+4. ~~**Decontam policy: 8gram-only / 13gram-only / dual-mode.**~~ ✓ DECIDED 2026-05-13 — dual-mode (8+13 gram) wired through `build_packed_corpus.py`; both indexes built and on R2. 558-doc catch in the codeparrot build validated the wiring.
+5. **Teacher K (top-K cache budget).** ◯ STILL OPEN. Audit machinery is green but the synthetic-random-tokens corpus produced a meaningless K=32 recommendation. Need to re-run on a real-text slice (each teacher's own tokenizer) before locking K. Not blocking Stage 1 (pilot is CE-only); blocking Stage 3 (where teacher cache feeds distillation).
+6. **Pod selection for Stage 3.** ◯ STILL OPEN. 2× H200 SXM validated for FSDP correctness; B200 cluster pending. Cost vs throughput tradeoff still TBD; decide after Stage 2 rehearsal's measured throughput.
+7. **Eval suite scope for v1.** ◯ STILL OPEN. Full reviewer list (11 benchmarks) vs minimal MMLU/GSM8K/HumanEval. Depends on time/budget. Note: MILU is gated on HF and requires `harshit.hv@samatva.com` to request access at https://huggingface.co/datasets/ai4bharat/MILU before it can be added to the decontam index or eval gate.
 
 ---
 
@@ -749,12 +761,33 @@ If you're picking this up cold and want to be productive in an hour:
 1. **Read this file** (~20 min)
 2. **Skim `configs/base_1b.yaml`** — that's the spec of what we're training
 3. **Skim `docs/governance/model_card_v1.md`** — canonical model decisions
-4. **Run** `pytest tests/ -q` — confirms the codebase is healthy (457 passing)
+4. **Run** `pytest tests/ -q` — confirms the codebase is healthy (~610 tests passing as of 2026-05-13)
 5. **Run** `python scripts/canary_ladder.py --model-config configs/pilot_250m.yaml --tokenizer-path artifacts/tokenizer_v1.json` — confirms L0/L5 pass on the existing corpus
 
 Then for active development, two paths:
-- **GPU available:** spin a pod, run L1/L3-synthetic/L3-packed (each ~1-3 min), then bench
-- **CPU only:** work on the FSDP implementation (Commits A-G per `docs/review/QUERIES_FOR_REVIEWER_2026-05-12-evening.md`), pre-build decontam index, or build the code-only corpus source
+
+**GPU available** (preferred — most remaining work is multi-GPU):
+
+```bash
+# Bring up the pod (3 commands, ~15-20 min installs):
+git clone --depth 1 https://github.com/cs2hvh/ai-llm.git /workspace/llm-build
+cd /workspace/llm-build
+bash scripts/pod_setup_apt.sh   # system pkgs: nano, jq, htop, awscli v2
+# export R2 + HF + AWS_DEFAULT_REGION=auto then:
+bash scripts/pod_launch_gpu.sh   # venv + jax[cuda12] + torch + verify
+
+# Validate FSDP (10-15 min, all 6 gates):
+bash scripts/run_fsdp_gauntlet.sh   # G1-G4 should be PASS; G5/G6 are operational
+
+# Then:
+#   - compose v2 corpus (codeparrot + others) via scripts/compose_mixed_corpus.py
+#   - launch Stage 1 pilot via scripts/run_pretrain.py --model-config configs/pilot_250m.yaml
+```
+
+**CPU only:**
+- Run the test suite (`pytest tests/ -q`), edit per-source corpus configs, prep the audit-real-text rebuilder, prep the eval gate wiring, prep release-scorecard scaffolding.
+
+The major systems work (FSDP, decontam, code source, audit machinery) is **done**. The remaining work is operational: compose the v2 corpus, run the three training stages, score the release.
 
 ---
 
