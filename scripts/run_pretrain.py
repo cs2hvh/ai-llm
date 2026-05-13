@@ -690,6 +690,25 @@ def main() -> int:
         help="Number of vocab chunks for --use-chunked-ce. Must divide "
              "model.vocab_size. Production V=131072 / 8 = 16384.",
     )
+    # Eval-during-training (MVP: validation loss + perplexity on a held-out
+    # batch slice). Benchmark scoring (MMLU/HumanEval) comes in a follow-up
+    # once the pilot has shown the wiring is sound.
+    p.add_argument(
+        "--eval-every",
+        type=int,
+        default=None,
+        help="Run eval (validation loss + perplexity) every N steps. "
+             "None disables eval. Recommended for Stage 1 pilot: 5000.",
+    )
+    p.add_argument(
+        "--eval-n-batches",
+        type=int,
+        default=8,
+        help="How many batches to hold out at training start for the eval "
+             "set. Same shape as train batches so JIT doesn't recompile. "
+             "Default 8 = small enough that eval is <5%% of train cost, "
+             "large enough for a stable mean estimate.",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -1226,11 +1245,13 @@ def main() -> int:
     if args.no_watchdog:
         log.warning("watchdog_disabled", reason="--no-watchdog flag set")
 
-    # Loop config
+    # Loop config — eval_every threads through to the periodic eval hook
+    # built below. None disables eval entirely.
     loop_cfg = LoopConfig(
         total_steps=args.total_steps,
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
+        eval_every=args.eval_every,
     )
     ckpt_cfg = CheckpointConfig(
         root=args.checkpoint_root,
@@ -1253,6 +1274,49 @@ def main() -> int:
     quarantine = QuarantineWriter(path=quarantine_path)
     log.info("quarantine_writer_attached", path=str(quarantine_path))
 
+    # Eval-during-training (MVP: validation loss + perplexity on a small
+    # held-out slice of the data iterator, taken before training starts).
+    # When --eval-every is not set, eval is disabled and the loop runs
+    # exactly as before. Batches are taken off the top of the iterator so
+    # the same data isn't seen during both eval and training.
+    #
+    # Caveat: when FSDP is on, train_step's JIT uses donate_argnums=(0,)
+    # which destroys the input state's buffer to save GPU memory. Reusing
+    # train_step_fn for eval would corrupt training state on the next
+    # training call. Skip eval in that mode for now — a proper
+    # forward-only eval_step (no grads, no opt, no donation) is the right
+    # fix and goes in alongside the Stage 2 prep work. Stage 1 pilot at
+    # 250M doesn't need FSDP (fits on a single H200), so eval works there.
+    eval_fn = None
+    if args.eval_every is not None:
+        if args.fsdp:
+            log.warning(
+                "eval_hook_skipped_fsdp",
+                msg="--eval-every ignored when --fsdp is set: train_step's "
+                    "donate_argnums=(0,) would corrupt state on eval reuse. "
+                    "Eval will be wired with a forward-only eval_step before "
+                    "Stage 2.",
+            )
+        else:
+            from myllm.training.eval_hook import (
+                make_validation_loss_eval,
+                take_held_out_batches,
+            )
+            log.info(
+                "eval_hook_enabling",
+                eval_every=args.eval_every,
+                n_held_out_batches=args.eval_n_batches,
+            )
+            held_out, batch_iter = take_held_out_batches(batch_iter, args.eval_n_batches)
+            if held_out:
+                eval_fn = make_validation_loss_eval(train_step_fn, held_out, label="val")
+                log.info("eval_hook_attached", n_batches=len(held_out))
+            else:
+                log.warning(
+                    "eval_hook_skipped",
+                    reason="data iterator produced 0 held-out batches",
+                )
+
     final_state = train_loop(
         train_step_fn=train_step_fn,
         initial_state=state,
@@ -1263,6 +1327,7 @@ def main() -> int:
         on_metrics=on_metrics,
         decay_phase=decay_phase_activation,
         quarantine=quarantine,
+        eval_fn=eval_fn,
     )
 
     # R6: emit the per-gate contamination CSV. Only populated when

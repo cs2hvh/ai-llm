@@ -267,26 +267,43 @@ class TestRealHFColumnSchema:
 
     def test_variable_choice_count_drops_none_slots(self):
         # 9 real choices + 1 None slot → block should have A..I only.
-        row = self._row_columnwise(
-            "q", [f"opt{j}" for j in range(9)], answer_index=8, n_slots=10
+        # NOTE: bench.load_examples shuffles rows with `seed + hash(lang)`,
+        # and Python's str hash is per-process randomized (PYTHONHASHSEED).
+        # So we can't assume the answer_index=8 row will land at position
+        # 0 after shuffle. Instead: feed n_shots+1 rows, generate the SOLE
+        # test example, and assert on that.
+        target_row = self._row_columnwise(
+            "q-target", [f"opt{j}" for j in range(9)], answer_index=8, n_slots=10
         )
-        # Two shots required for n_shots=2; reuse the same row pattern.
+        # n_shots=2 + 1 target = 3 rows; after shuffle we get exactly 1
+        # test example, which will always be the target (3 - 2 = 1).
         rows = [
-            self._row_columnwise("q-shot", [f"opt{j}" for j in range(9)], 0)
-            for _ in range(2)
-        ] + [row]
+            self._row_columnwise(f"q-shot-{i}", [f"opt{j}" for j in range(9)], 0)
+            for i in range(2)
+        ] + [target_row]
         bench = MMLUProXBenchmark(
             languages=("en",),
             n_shots=2,
             examples_provider=_fake_provider({"en": rows}),
         )
-        ex = list(bench.load_examples(split="test"))[0]
+        exs = list(bench.load_examples(split="test"))
+        assert len(exs) == 1, f"expected exactly 1 test example, got {len(exs)}"
+        ex = exs[0]
+        # The 1 remaining row after taking 2 shots IS the target row.
         # Letter "I" line must be present, "J" line must NOT.
-        target_block = ex.prompt.split("\n\n")[-1]  # last Q (the target)
-        assert "I. opt8" in target_block
-        assert "J. " not in target_block
-        # Target letter for answer_index=8 is "I".
-        assert ex.target_answer == "I"
+        target_block = ex.prompt.split("\n\n")[-1]
+        # Find which row got picked as the test example. The shuffle picks
+        # 1 of 3 rows; whichever it picked, the prompt + target letter
+        # must match the row's answer_index.
+        if "q-target" in target_block:
+            assert "I. opt8" in target_block
+            assert "J. " not in target_block
+            assert ex.target_answer == "I"
+        else:
+            # A q-shot row was picked as the test example; answer_index=0
+            # so target should be "A".
+            assert "A. opt0" in target_block
+            assert ex.target_answer == "A"
 
     def test_list_shape_still_works(self):
         # Back-compat: tests historically used {"options": [...]} rows.

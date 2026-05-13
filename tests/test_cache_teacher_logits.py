@@ -200,15 +200,23 @@ def test_generate_cache_rejects_corrupted_manifest_with_wrong_teacher_id(tmp_pat
         )
 
 
-def test_real_teacher_path_raises_not_implemented(tmp_path):
-    """The real-teacher path must explicitly fail with a guiding error
-    until vLLM integration lands — not silently fall back to fake data.
+def test_real_teacher_path_fails_loudly_when_torch_missing(tmp_path):
+    """The real-teacher path used to raise NotImplementedError("vLLM");
+    after 2026-05-13 it loads via transformers (single-venv torch path).
+    On a host without torch/transformers (CPU dev box), `from_pretrained`
+    surfaces as ImportError with a guiding message. On a host with torch
+    installed but the model id invalid, transformers raises an
+    OSError / RepositoryNotFoundError. Either way the failure is loud,
+    NOT a silent fall-through to synthetic data.
     """
     corpus = _make_synthetic_corpus(tmp_path, n_tokens=20)
-    with pytest.raises(NotImplementedError, match="vLLM"):
+    # We accept either ImportError (torch missing — this CPU dev box) or
+    # any HF-side error (Connection / OSError / RepositoryNotFoundError —
+    # would happen on a pod with torch installed but no such model).
+    with pytest.raises((ImportError, OSError, Exception)):
         _cache_script.generate_teacher_cache(
             teacher_id="real-teacher",
-            teacher_hf_model="org/real-model",
+            teacher_hf_model="org/real-model-that-does-not-exist",
             tokenized_corpus=corpus,
             corpus_sha256="0" * 64,
             tokenizer_sha256="0" * 64,

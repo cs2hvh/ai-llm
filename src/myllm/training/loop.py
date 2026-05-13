@@ -85,6 +85,7 @@ def run(
     on_metrics: Any | None = None,
     decay_phase: Any | None = None,
     quarantine: QuarantineWriter | None = None,
+    eval_fn: Any | None = None,
 ) -> dict[str, Any]:
     """Run the training loop with auto-rollback. Returns the final state.
 
@@ -94,6 +95,14 @@ def run(
     In the stable phase this is a pass-through; in the decay phase the
     batch gets augmented with teacher top-K logits + indices, and the
     train_step's distillation-aware loss kicks in.
+
+    ``eval_fn`` is an optional ``Callable[[int, dict], dict | None]``
+    called every ``loop_config.eval_every`` steps with the current
+    ``(step, state)``. It should return a metrics dict (e.g.
+    ``{"val_loss": 3.1, "val_ppl": 22.1}``) which gets logged + passed to
+    ``on_metrics``. None disables eval entirely. Training is paused during
+    the eval call — the data iterator is NOT advanced. Eval failures are
+    logged but never crash training (the pilot's job is to keep going).
     """
     ckpt = CheckpointManager(checkpoint_config)
 
@@ -294,6 +303,38 @@ def run(
                     **{k: float(v) for k, v in metrics.items() if k != "loss"},
                 }
                 on_metrics(step_int, metrics_for_log)
+
+        # Eval ───────────────────────────────────────────────────────────────
+        # Periodic out-of-band eval (validation loss, perplexity, optionally
+        # benchmark scores). Runs synchronously between train steps; pauses
+        # the loop until done. Eval failures are logged but never raise —
+        # pilots prioritize keeping the training loop alive.
+        if (
+            eval_fn is not None
+            and loop_config.eval_every is not None
+            and step_int > 0
+            and step_int % loop_config.eval_every == 0
+        ):
+            try:
+                eval_metrics = eval_fn(step_int, state)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "eval_failed_non_fatal",
+                    step=step_int,
+                    error=str(e),
+                    msg="eval_fn raised; continuing training",
+                )
+                eval_metrics = None
+            if eval_metrics:
+                log.info("eval", step=step_int, **{
+                    k: float(v) if isinstance(v, (int, float)) else v
+                    for k, v in eval_metrics.items()
+                })
+                if on_metrics is not None:
+                    on_metrics(step_int, {
+                        f"eval/{k}": float(v) for k, v in eval_metrics.items()
+                        if isinstance(v, (int, float))
+                    })
 
         # Checkpoint ─────────────────────────────────────────────────────────
         if step_int % loop_config.checkpoint_every == 0:
