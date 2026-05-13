@@ -149,7 +149,30 @@ def _leaf_partition_spec(
     ``mesh_axis``. Falls back to a fully-replicated spec when no axis is
     divisible (or for scalars).
 
-    See module docstring for the design rule.
+    Tie-break rule (2026-05-13 agent-review fix):
+        On axes with equal length, prefer the LAST axis. This matches
+        Levanter / MaxText / JAX-scaling-book convention because:
+          - The last axis is typically the output / embed dim
+          - Last axis is contiguous in row-major memory (cheaper
+            collectives)
+          - Sharding the contracting/input axis on a matmul (e.g. the
+            output projection ``wo: [H, H]``) forces an all-gather of
+            the input before each matmul — a real performance loss
+
+        The previous rule (smaller-index bias) was correct but
+        sub-optimal: for ``wo`` it sharded axis 0 (the contracting dim),
+        forcing the perf-pathological collective. Switched to "last
+        wins" via `>=` instead of `>`.
+
+    Limitation: this is a SHAPE-based heuristic. Without named axes
+    (à la Flax `LogicallyPartitioned` / MaxText logical-axis-rules),
+    we can't distinguish e.g. ``wq`` (which wants heads sharded) from
+    ``wo`` (which wants embed sharded). Correctness is unaffected;
+    speed is. Revisit when tensor parallelism lands.
+
+    Edge case: ``mesh_size == 1`` short-circuits to ``P()``. Without
+    this, every leaf would get a ``P("data")`` over a 1-device mesh —
+    legal but produces noisier compiled HLO than necessary.
     """
     try:
         from jax.sharding import PartitionSpec as P
@@ -159,11 +182,17 @@ def _leaf_partition_spec(
     if not leaf_shape:
         return P()  # scalars (e.g. step, lr_recovery_multiplier)
 
+    if mesh_size == 1:
+        # Trivial mesh — nothing meaningful to shard. Returning P("data")
+        # would technically work but XLA emits worse HLO than replication.
+        return P()
+
     best_axis: int | None = None
     best_dim: int = -1
     for i, dim in enumerate(leaf_shape):
-        # `dim > best_dim` (strict >) biases toward smaller index on ties.
-        if dim % mesh_size == 0 and dim > best_dim:
+        # `dim >= best_dim` biases toward the LAST axis on ties (e.g. for
+        # a [H, H] weight, axis 1 wins). See docstring.
+        if dim % mesh_size == 0 and dim >= best_dim:
             best_axis = i
             best_dim = dim
 
@@ -204,6 +233,18 @@ def make_param_shardings(
         from jax.sharding import NamedSharding
     except ImportError as e:
         raise ImportError("jax not installed; install jax[cuda12]") from e
+
+    # Fail-fast on missing axis name (2026-05-13 agent-review fix).
+    # Without this, callers who built a mesh with axis names like
+    # ("dp", "fsdp", "tp") and forgot to pass mesh_axis="fsdp" would get
+    # a bare `KeyError("data")` deep in the tree.map. Loud error here.
+    if mesh_axis not in mesh.shape:
+        raise ValueError(
+            f"mesh_axis {mesh_axis!r} is not an axis of this Mesh "
+            f"(have axis_names={tuple(mesh.shape.keys())}). Check the "
+            f"mesh built by `build_mesh_and_shardings` or pass the "
+            f"correct axis name."
+        )
 
     mesh_size = int(mesh.shape[mesh_axis])
     if mesh_size < 1:

@@ -82,13 +82,50 @@ class TestLeafPartitionSpec:
         spec = _leaf_partition_spec((9, 8), mesh_size=4)
         assert spec == P(None, "data")
 
-    def test_2d_tie_breaks_to_smaller_index(self):
+    def test_2d_tie_breaks_to_last_axis(self):
         # [8, 8] with mesh=4: both axes equal-size and divisible.
-        # Rule: smaller index (axis 0) wins.
+        # Rule (post 2026-05-13 agent-review fix): LAST axis wins (axis 1).
+        # Matches Levanter / MaxText / JAX-scaling-book convention.
+        # Reason: last axis is typically the output / embed dim, and
+        # sharding the contracting/input axis on a matmul forces an
+        # all-gather before the matmul (perf-pathological).
         from myllm.training.mesh import _leaf_partition_spec
         from jax.sharding import PartitionSpec as P
         spec = _leaf_partition_spec((8, 8), mesh_size=4)
+        assert spec == P(None, "data")
+
+    def test_wo_projection_shards_output_axis(self):
+        # Attention output projection ``wo: [H, H]``. With the LAST-axis
+        # bias, axis 1 (the output / embed dim) wins. Axis 0 here is the
+        # contracting dim; sharding it would force all-gather of the
+        # input before matmul.
+        from myllm.training.mesh import _leaf_partition_spec
+        from jax.sharding import PartitionSpec as P
+        spec = _leaf_partition_spec((2048, 2048), mesh_size=8)
+        assert spec == P(None, "data"), (
+            "wo: [H, H] must shard axis 1 (output), not axis 0 (contracting)"
+        )
+
+    def test_gqa_kv_weight_when_rectangular(self):
+        # ``wk: [H=2048, H_kv=512]`` with mesh=8: 2048 > 512, so axis 0
+        # still wins on size. Note: a proper named-axis system would
+        # prefer axis 1 (the H_kv heads-concat dim). We document this
+        # as a known limitation in the docstring.
+        from myllm.training.mesh import _leaf_partition_spec
+        from jax.sharding import PartitionSpec as P
+        spec = _leaf_partition_spec((2048, 512), mesh_size=8)
+        # Largest divisible axis (2048) wins. Axis 0.
         assert spec == P("data", None)
+
+    def test_mesh_size_1_short_circuits_to_replicated(self):
+        # mesh_size=1: every leaf "trivially divides", but sharding over
+        # 1 device produces noisier compiled HLO than replication.
+        # Short-circuit to P() for clarity.
+        from myllm.training.mesh import _leaf_partition_spec
+        from jax.sharding import PartitionSpec as P
+        assert _leaf_partition_spec((128, 32), mesh_size=1) == P()
+        assert _leaf_partition_spec((8,), mesh_size=1) == P()
+        assert _leaf_partition_spec((), mesh_size=1) == P()
 
     def test_3d_picks_largest_divisible(self):
         # FFN-style [in=2048, out=8192, group=3]: axis 1 is largest divisible
@@ -257,3 +294,14 @@ class TestMakeParamShardings:
         mesh = _mesh(4)  # the smallest practical case
         out = make_param_shardings({"x": np.zeros((4,), dtype=np.float32)}, mesh)
         assert out["x"].spec == P("data")
+
+    def test_unknown_mesh_axis_raises_value_error(self):
+        # Agent-review fix B3: a caller that builds a mesh with axis names
+        # like ("dp", "fsdp", "tp") and forgets to pass mesh_axis="fsdp"
+        # used to get a bare KeyError("data") deep inside tree.map.
+        # Now: clear ValueError naming the available axes.
+        from myllm.training.mesh import make_param_shardings
+        mesh = _mesh(4)  # axis_names = ("data", "model")
+        params = {"x": np.zeros((4,), dtype=np.float32)}
+        with pytest.raises(ValueError, match="mesh_axis 'fsdp' is not an axis"):
+            make_param_shardings(params, mesh, mesh_axis="fsdp")
