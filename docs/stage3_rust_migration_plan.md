@@ -1,11 +1,29 @@
-# Stage 3 Data-Prep Rust Migration Plan — DRAFT v0.1
+# Stage 3 Data-Prep Rust Migration Plan — v0.2
 
-**Status**: 🟡 DRAFT, awaiting user + reviewer cross-verification before Session B starts.
-**Author**: Session A (Claude), 2026-05-13, after 3 parallel research agents.
-**Owner once approved**: Session B (works on a fork in a separate folder with their own git remote).
-**Scope target**: rewrite the Python data-prep hot paths in Rust + adopt one modern algorithmic upgrade, so the Stage 3 (600B-1T token) build is feasible on our single 128-core node.
-**Effort target**: 3-4 weeks of focused work by Session B (~120 hours).
+**Status**: 🟢 LOCKED 2026-05-13 after external reviewer pass. Implementer can start.
+**Author**: Session A v0.1 (2026-05-13 morning) + external reviewer + Session B confirmation pass (2026-05-13 evening).
+**Owner**: implementer working on a fork at `/workspace/llm-build-rust/` (separate folder, same GitHub origin, feature branches).
+**Scope target**: hand-port Python data-prep hot paths to Rust + adopt Dolma's Rust bloom filter as a library + ship Python-side pre-Rust wins, so the Stage 3 (600B-1T token) build is feasible on our single 128-core node.
+**Effort target**: 3-4 weeks of focused implementer work (~80-120 hours).
 **Speedup target**: 5B-token build wall time **2.5 h → 15-25 min** (≈10× E2E); 1T-token build wall time **70-100 days → 2-5 days** (≈30-50× E2E).
+
+---
+
+## v0.2 changelog (deltas from v0.1)
+
+External reviewer (the implementer-to-be) caught 3 material flaws + 2 simplifications hiding in v0.1. All applied here:
+
+- **D3 (hashing)**: KEEP xxh64 + hand-port. **DROP rensa adoption** — rensa hardcodes a non-xxh64 hasher, would silently invalidate our existing R2 decontam indexes. Realistic speedup 20-40× (matches the dolma/datasketch deltas), not the 608× rensa README claims.
+- **D6 (BFF source)**: CHANGE from `revbucket/bff` (frozen 2024-04) → **`mlfoundations/dclm/dedup/bff`** (MIT, active 2025 commits, same author lineage, vendored copy).
+- **D11 (concurrency, NEW)**: GIL-build Python + `py.detach()` + rayon inside Rust. **Single `abi3-py310` wheel**. Do NOT ship free-threaded (cp313t/cp314t) wheels — costs 10% single-thread perf + 15-20% memory for zero gain in our pipeline. PyO3 0.28 uses `Python::detach` (renamed from `allow_threads` in 0.27); implementer must consult 2026 docs, not 0.27-era blog posts.
+- **Phase 5 (BFF)**: Use **Dolma as a Python library** (`pip install dolma` exposes AI2's Rust `bloom_filter.rs` + `deduper.rs` via PyO3) — kills the from-scratch 1500-2500 LoC BFF port. `by_ngram` mode is algorithmically equivalent to BFF. Effort ~5 days, not 5-7.
+- **Phase 5 RAM decision**: **Option C — rent a 1 TB-RAM box (AWS x2gd.metal / u-3tb1) for ONE dedup pass at 1T scale** (~$30-50). 251 GB local fits ≤210B ngrams at fp=0.01 globally; 1T needs 1.20 TB. Per-snapshot (Option A) loses cross-source dedup quality; hash-partitioned sequential (Option B) adds 2-4 days of I/O. Option C matches DCLM-Baseline recipe verbatim and fits our "ephemeral workers" pattern.
+- **Phase 6**: SPLIT into 6a/6b. **6a DCLM via `fasttext-rs`** (classic fastText, MIT) — unchanged from v0.1. **6b FineWeb-Edu via ONNX export + `ort` (Rust) or `candle`** — FineWeb-Edu is a transformer (Snowflake-arctic-embed + linear head), NOT classic fastText. `fasttext-rs` cannot load it. Community port (`kenhktsui/fineweb-edu-fasttext-classifier`) has 68% accuracy / Spearman 0.58 vs original — material quality regression, rejected.
+- **Phase 0+ (NEW)**: Pre-Rust **Python wins** that de-risk before any Rust is written:
+  - **3a**: `src/myllm/data/build.py:125-162` — pending-list linear scan → sorted + binary search on `buf_start`. O(n) → O(log n) per sequence.
+  - **3b**: `src/myllm/data/filters.py:88-99` — repetition filter materializes `tuple(words[i:i+ngram_n])` for every position + builds a Counter. Replace with one-pass rolling window. Strictly O(n·ngram_n) Python tuple churn → O(n) one-pass scan.
+  - **3c**: Compose multiprocessing-on-shards. Defers Rusting compose UNLESS measured source-share drift > 2% across N workers. Two partitioning strategies to test: (i) range-partition by source share (guaranteed bounded drift, uneven worker sizes); (ii) shard-partition by output range (even worker sizes, drift can stack). Implementer benches both on 5B corpus before locking.
+- **Compose Rusting**: deferred. Measured 92 seq/sec single-threaded CPU/GIL-bound on 2026-05-13 (not I/O-bound — reviewer's instinct was wrong here; `vmstat 0 bi 0 bo`). ~2 hr one-time per build. **Mandatory fix (multiprocessing OR Rust) before the 600B base run**, not the Stage 1 pilot.
 
 ---
 
@@ -152,6 +170,27 @@ Each phase is a separate landable PR. Each phase has:
 - A test plan
 - Estimated effort
 
+### Phase 0+: Pre-Rust Python wins (NEW in v0.2, 1-2 days, do FIRST)
+
+**Goal**: ship the Python-side algorithmic fixes BEFORE any Rust scaffolding. De-risks Phase 1 by separating "is the algorithm bad?" from "is Python slow?". If these alone are enough for Stage 2 throughput, the Rust migration can be paced more deliberately.
+
+**3a — `src/myllm/data/build.py:125-162` pending-list refactor**:
+- Current: `for d in pending:` linear scan every sequence — O(n) per sequence, O(n²) over the corpus.
+- Fix: keep `pending` sorted by `buf_start`; binary-search the cutoff. Most pending docs end before `sequence_length`, so the carry-over list stays small.
+- Acceptance: same `_PendingDoc` carry semantics; same DocSpan output; 5-10× speedup on a synthetic stress test (>10k pending entries).
+
+**3b — `src/myllm/data/filters.py:88-99` one-pass repetition**:
+- Current: builds `tuple(words[i:i+ngram_n])` for every position + Counter — O(n·ngram_n) Python tuple churn.
+- Fix: rolling-hash one-pass; track top-share via streaming max while iterating words.
+- Acceptance: same `FilterDecision(passed, reason, value)` output bit-for-bit; 5-10× speedup on a 10k-doc bench.
+
+**3c — Compose multiprocessing**:
+- Current: 92 seq/sec single-threaded CPU/GIL-bound (measured 2026-05-13).
+- Fix: split output range across N workers; each worker runs its own deficit-driven scheduler.
+- Two strategies to bench: (i) range-partition by source share, (ii) shard-partition by output range.
+- Acceptance: source-share drift ≤ 2% vs single-threaded baseline; ≥N/2 speedup at N=8 workers; same output schema.
+- **Decision criterion**: if both strategies' drift > 2%, defer to Phase 4 Rust port. Otherwise compose stays in Python.
+
 ### Phase 0: Project scaffolding (1-2 days)
 
 **Goal**: get the empty Rust workspace building and shipping a Python-importable extension.
@@ -244,13 +283,14 @@ Each phase is a separate landable PR. Each phase has:
 
 ### Phase 4: Integration + E2E benchmarking (2-3 days)
 
-**Goal**: with all 3 hot paths in Rust, run a real 5B-token build on the same source list and compare wall time + output integrity to baseline.
+**Goal**: with all 3 hot paths in Rust + Phase 0+ Python wins applied, run a real 5B-token build on the same source list and compare wall time + output integrity to baseline.
 
 **Tasks**:
 - Add a `--use-native` flag to `scripts/build_packed_corpus.py` (default: auto-detect via `_USE_NATIVE`).
 - Update `scripts/run_parallel_builds.py` to forward the flag.
 - Run 5B build using existing `pretrain_mix_pilot.yaml` with all-Rust hot paths.
 - Diff resulting per-source manifests against Stage 1 build (should be bit-identical for filter/decontam outcomes; MinHash dedupe outputs may differ in DOC ORDER due to non-deterministic parallelism but the SET of kept docs should match).
+- **Compose Rusting decision point**: if Phase 0+ multiprocessing-compose passes the drift-≤-2% gate, compose stays Python and Phase 4 is just the per-source-build benchmark. If it failed, Phase 4 includes a `compose.rs` port (additional ~2 days).
 
 **Acceptance**:
 - 5B build wall ≤ 30 min (vs current 2.5 hr). **Stretch: ≤ 15 min**.
@@ -258,51 +298,81 @@ Each phase is a separate landable PR. Each phase has:
 - Memory peak < 100 GB during build (currently ~50 GB).
 - No regression in `pytest -q` suite.
 
-### Phase 5: Algorithmic upgrade — Bloom Filter Fuzzy (BFF) global dedup (5-7 days, OPTIONAL for Stage 2 prep; REQUIRED for Stage 3)
+### Phase 5: Global BFF dedup via Dolma library (v0.2: ~5 days, was 5-7)
 
-**Goal**: replace per-source MinHash with global BFF (Bloom-Filter-Fuzzy) dedup. Both algorithm change AND scale change (per-source → global).
+**Goal**: replace per-source MinHash with global BFF dedup for Stage 3. Uses **Dolma as a Python dependency** — we don't port BFF from scratch.
 
-**Why**: DCLM-Baseline benchmarked MinHash vs SuffixArray vs BFF and picked BFF for everything past ~10 TB. SlimPajama is the standard reference. For 1T tokens, MinHash starts hitting memory ceilings (in-memory LSH index gets huge for cross-source dedup).
+**Why this is a library call, not a port**: `pip install dolma` ships AI2's Rust `bloom_filter.rs` + `deduper.rs` as a PyO3 extension module. Apache-2.0, actively maintained (v1.2.1 July 2025). The `by_ngram` mode is algorithmically equivalent to BFF. We get an industrial-quality, maintained implementation for the cost of an import.
+
+**Backup source**: if Dolma's Python API doesn't expose the params we need, fall back to vendoring `mlfoundations/dclm/dedup/bff` (MIT, active 2025 commits, same author lineage as the dormant revbucket/bff that v0.1 cited).
+
+**RAM math (v0.2 correction)**:
+
+Standard BFF params (`max_ngram=13`, `fp=0.01`) need 9.59 bits per ngram:
+- 1T ngrams → **1.20 TB RAM** for a single global bloom filter
+- 600B ngrams → 719 GB
+- 251 GB local box → fits ~210B ngrams at fp=0.01 globally
+
+**Decision (v0.2 LOCKED)**: **Option C — rent a 1 TB-RAM box for ONE dedup pass**.
+- Cost: ~$30-50 (AWS x2gd.metal or u-3tb1, single pass)
+- Tradeoff: cleanest, matches DCLM-Baseline recipe verbatim, fits "ephemeral workers" pattern
+- Alternatives rejected: (A) per-snapshot 16-shard dedup — no cross-source dedup, matches FineWeb-by-dump model but loses global quality win; (B) hash-partitioned sequential — fits 251 GB but adds 2-4 days I/O and is custom code on top of Dolma.
 
 **Implementation choices**:
-- Port `revbucket/bff` core algorithm to our `crates/myllm_dataprep/core/src/bff.rs` (~600 LoC).
-- Default params from DCLM: `min_ngram=5`, `max_ngram=13`, `filtering_threshold=0.8`, `fp_rate=0.01`.
-- Sharding strategy: hash document by content-hash mod N_SHARDS (default 16); each shard fits in <200 GB RAM.
+- Drive Dolma's by_ngram mode via Python. Configure: `min_ngram=5`, `max_ngram=13`, `filtering_threshold=0.8`, `fp_rate=0.01`.
+- Tune `min_ngram_size` + `expected_ngram_count` on a held-out 5B subset BEFORE the full 1T pass (DCLM issue #71 cautionary tale: default params lost 98% of data for one user).
+- Local 5B/20B tuning runs on the dev box; 1T pass on rented 1 TB-RAM box.
 - Output: per-document keep/drop flag in a sidecar manifest; original packed shards unchanged.
 
 **Files**:
-- `crates/myllm_dataprep/core/src/bff.rs` (~600 LoC)
-- `crates/myllm_dataprep/python/src/lib.rs` — BFF pymodule
-- `scripts/run_global_dedup.py` (new) — post-build pass that reads all per-source shards, runs BFF, emits sidecar drop list
-- `tests/test_native_bff.py` — equivalence with DCLM reference if accessible, otherwise property tests
-- `docs/dedup_strategy.md` (new) — document the algorithm change + the per-source-vs-global tradeoff for the reviewer
+- `scripts/run_global_dedup.py` (new) — Python driver over Dolma's API; reads R2 sources, calls Dolma, emits sidecar drop list
+- `tests/test_global_dedup.py` — equivalence on a small fixture; param-tuning regression test
+- `docs/dedup_strategy.md` (new) — document the Dolma choice + DCLM-recipe params + the rented-box procedure
 
 **Acceptance**:
-- BFF run on a 5B-token build completes in <30 min.
-- Drop rate within 5% of MinHash dedup for the same corpus (sanity check).
+- 5B dedup pass completes locally in <30 min.
+- Drop rate within 5% of per-source MinHash on the same corpus (sanity check).
 - Sidecar manifest format documented + readable from `compose_mixed_corpus.py`.
+- Tuning bench on 5B corpus shows drop-rate plateau within expected range (no DCLM-#71-style data loss).
+- 1T pass procedure scripted end-to-end (R2 source pull → rented-box dedup → R2 sidecar upload → box teardown).
 
-**HOLD if**: Stage 2 doesn't need global dedup (per-source MinHash on Rust may be enough). Decide before starting this phase based on Stage 1 pilot results.
+**HOLD if**: Stage 2 pilot results show per-source MinHash is sufficient quality. Don't pull forward unless Stage 3 actually needs cross-source dedup.
 
-### Phase 6: fastText quality classifier (3-4 days, OPTIONAL but recommended)
+### Phase 6: Quality classifiers — DCLM + FineWeb-Edu (v0.2 SPLIT into 6a / 6b)
 
-**Goal**: add a quality-score column to the filter chain using FineWeb-Edu + DCLM fastText classifiers. Drop docs below configurable threshold.
+v0.1 assumed both classifiers were classic fastText. **They're not** — FineWeb-Edu is a transformer (Snowflake-arctic-embed + linear head served via `transformers`). `fasttext-rs` cannot load it. v0.2 splits the work:
+
+#### Phase 6a — DCLM classifier via fasttext-rs (3 days)
+
+**Status**: unchanged from v0.1.
+
+- Source: `mlfoundations/fasttext-oh-eli5` (classic fastText, MIT license).
+- Rust crate: `messense/fasttext-rs` confirmed working.
+- Per-doc throughput target: ≥2k docs/sec/core.
+- Default threshold: ≥0.033 (DCLM-Baseline value).
+- Files: `crates/myllm_dataprep/core/src/fasttext_dclm.rs` (~100 LoC), `tests/test_native_fasttext_dclm.py`.
+
+#### Phase 6b — FineWeb-Edu classifier via ONNX (5 days)
+
+**Choice (v0.2 LOCKED)**: **ONNX export + `ort` (Rust) or `candle`** for the real transformer. Community fastText port (`kenhktsui/fineweb-edu-fasttext-classifier`) rejected — 68% accuracy / Spearman 0.58 vs original is a material quality regression on labels 3-5 (the educational-value bucket we actually care about).
 
 **Implementation choices**:
-- Use `fasttext` Rust crate (`fasttext-rs`) inside the existing Rust filter pipeline → no Python boundary cost per doc.
-- Load both FineWeb-Edu (`HuggingFaceFW/fineweb-edu-classifier`) and DCLM (`mlfoundations/dclm/quality_classifier`) classifier files.
-- Per-doc: emit score for each classifier; drop if below threshold (configurable in pretrain_mix yaml).
-- Default thresholds from public docs: FineWeb-Edu ≥3.0 (their "high educational value" bucket), DCLM ≥0.033.
+- Export the FineWeb-Edu classifier (Snowflake-arctic-embed encoder + linear head) to ONNX using `transformers.onnx` or `optimum`.
+- Load via `ort` (Rust ONNX runtime) inside the filter pipeline, or use `candle` if `ort` has packaging issues.
+- Throughput: 50-200 docs/sec/core on CPU (GPU preferred for full-corpus passes; fits ephemeral-GPU-worker pattern).
+- Default threshold: ≥3.0 (FineWeb-Edu "high educational value" bucket).
+- Quality target: published numbers (no community-port regression).
 
 **Files**:
-- `crates/myllm_dataprep/core/src/fasttext.rs` (~150 LoC)
-- `scripts/download_quality_classifiers.py` (new) — fetch the two classifier files
-- `configs/data/pretrain_mix_pilot.yaml` — new `quality_classifier:` section
-- `tests/test_native_fasttext.py`
+- `scripts/export_fineweb_edu_to_onnx.py` (new) — one-time export from HF checkpoint to ONNX
+- `crates/myllm_dataprep/core/src/fineweb_edu_classifier.rs` (~150 LoC)
+- `tests/test_native_fineweb_edu_classifier.py` — equivalence to HF reference on small fixture
+- `configs/data/pretrain_mix_pilot.yaml` — `quality_classifier:` section with both 6a + 6b thresholds
 
-**Acceptance**:
-- Per-doc score generation at ≥2k docs/sec/core (matches FineWeb-Edu's published number).
-- Drop rate at default thresholds within 10% of FineWeb-Edu's published rate on a CommonCrawl sample.
+**Acceptance (6a + 6b combined)**:
+- DCLM scoring at ≥2k docs/sec/core; FineWeb-Edu scoring at ≥50 docs/sec/core (CPU) or ≥500 docs/sec (GPU).
+- Drop rate at default thresholds within 10% of published numbers on a CommonCrawl sample.
+- License audit: DCLM is MIT (verified). FineWeb-Edu classifier license needs explicit verification before bundling — Apache-2 likely but confirm in Phase 6b kickoff.
 
 ### Phase 7: Documentation + handoff (1-2 days)
 
@@ -360,10 +430,11 @@ For BFF dedup (Phase 5), output WILL differ from MinHash (different algorithm). 
 |---|---|---|---|---|
 | D1 | **Use PyO3 + maturin** for Python-Rust interop | Standard for HF tokenizers, polars, rensa; abi3 wheel matrix is manageable | ctypes (too much boilerplate); subprocess IPC (too much overhead per call) | High — could swap interop if we hit PyO3-specific issues |
 | D2 | **Keep MinHash algorithm in Phase 1** (just port to Rust) | Bit-for-bit compatible with existing index files; small surface; immediate ~40× win | Jump straight to BFF (algorithm change risk) | High — Phase 5 will deprecate it anyway |
-| D3 | **Use `xxhash-rust` xxh64** in Phase 1, NOT xxh3 or gxhash | Bit-identical to existing Python xxhash output; bridge compatibility | xxh3 (5-10× faster but breaks compat); gxhash (no AES-NI fallback) | Medium — Phase 1b can migrate to xxh3 with a one-time corpus rebuild |
+| D3 | **Use `xxhash-rust` xxh64 + hand-port MinHash** (v0.2: NO rensa) | rensa hardcodes a non-xxh64 multiply-shift hasher → would silently invalidate existing R2 decontam indexes (silent-corruption class bug). Realistic speedup is 20-40× from GIL-escape + native loop, not the 608× rensa README claims. Hand-port keeps bit-compatibility. | rensa (broken for us); xxh3 (5-10× faster but breaks compat); gxhash (no AES-NI fallback) | Medium — Phase 1b can migrate to xxh3 with a one-time corpus rebuild |
 | D4 | **Inline decontam in Rust** (not post-hoc batch) | Preserves audit trail per-doc; avoids separate pipeline; simpler operator model | Post-hoc decontam (faster build but worse traceability) | High — Phase 5 could move to post-hoc if perf becomes a blocker |
 | D5 | **Adopt fastText classifiers from FineWeb-Edu + DCLM**, not train our own | Frontier-lab standard practice; 1B teams don't train quality classifiers; lift is below ablation noise | Train our own (10-20× more engineering work, no clear quality win) | Medium — could train custom later if quality plateaus |
-| D6 | **BFF (Bloom-Filter-Fuzzy) global dedup** in Phase 5, NOT MinHash global | DCLM benchmarked all three and picked BFF; SlimPajama scale validation; memory-efficient; faster | MinHash global (in-memory LSH won't fit for 1T); Suffix-Array (won't fit either) | Low — picking BFF locks the algorithm |
+| D6 | **BFF (Bloom-Filter-Fuzzy) global dedup** in Phase 5, sourced from **`mlfoundations/dclm/dedup/bff`** (MIT, active 2025 commits) AND/OR Dolma's `by_ngram` mode as a Python library | DCLM benchmarked all three and picked BFF; SlimPajama scale validation; memory-efficient; faster. v0.2 corrects v0.1's revbucket/bff (frozen 2024-04). Dolma exposes equivalent algorithm as a PyO3 Python library (`pip install dolma`) — see Phase 5 for which path. | MinHash global (in-memory LSH won't fit for 1T); Suffix-Array (won't fit either) | Low — picking BFF locks the algorithm |
+| D11 | **GIL-build Python + `py.detach()` + rayon inside Rust. Single `abi3-py310` wheel.** Do NOT ship free-threaded (cp313t/cp314t) wheels. (NEW in v0.2) | This is what tokenizers + polars actually do in 2026. Free-threaded 3.13t/3.14t costs 10% single-thread perf + 15-20% memory for zero gain in our pipeline. PyO3 0.28 renamed `Python::allow_threads` → `Python::detach` — 2026 docs only, no 0.27-era posts. | Free-threaded wheels (regression + complexity); subinterpreters (immature in 3.13) | High — could add freethreaded wheels later if PEP 779 Phase 3+ makes them mainstream |
 | D7 | **DO NOT adopt Datatrove as framework** | 97% Python in hot path; designed for Slurm not single-node; we'd inherit our current bottleneck | Adopt Datatrove + Rust extensions (too much rework) | Medium — could revisit if we ever get a real cluster |
 | D8 | **Output equivalence is bit-for-bit for Phases 1-3** | Trust requires it; alternative is silent quality degradation | "Statistically equivalent" (looser; harder to debug regressions) | Low — Phase 5+ explicitly breaks this for algorithm changes |
 | D9 | **Repo layout: `crates/myllm_dataprep/` subdir with separate Cargo workspace + Python wrapper** | Same as huggingface/tokenizers, polars; clean separation | Top-level Rust files (clutter); monorepo with python+rust in same Cargo project (build complexity) | Medium — could restructure but it's load-bearing |
@@ -435,16 +506,18 @@ Session A continues working on the main branch (Stage 1 pilot, Stage 2 prep, rev
 
 ---
 
-## 11. Open questions for reviewer + user (cross-verify before approving)
+## 11. Open questions (v0.2 status)
 
-1. **Phase order**: should Phase 5 (BFF) happen before or after Phase 6 (fastText)? My draft says BFF first (more impactful for Stage 3), but reasonable to argue fastText first (gives better data even if dedup stays per-source).
-2. **Skip Phase 5 entirely?**: if Stage 2 (1B rehearsal, 10-30B tokens) shows per-source MinHash is fine, can we defer BFF until we actually do Stage 3? My draft says yes, but the trigger for "do BFF now" should be explicit.
-3. **Reviewer's preference on framework adoption**: my draft DOES NOT adopt Datatrove. Reviewer should verify this is acceptable (they may push for adopting it for governance / community-validation reasons even at the perf cost).
-4. **Hardware target for `gxhash`**: if our deploy box always has AES-NI, we could use gxhash for an extra 5-10× hash perf. Currently I've vetoed it (D3) for safety. User to confirm hardware.
-5. **License audit for fastText classifiers**: FineWeb-Edu's is on HuggingFace; need to confirm Apache-2 / MIT before bundling.
-6. **Wheel matrix scope**: ship just linux x86_64 (the dev box + RunPod default), or invest in arm64 + macOS for laptop dev workflow? My draft ships x86_64 only in Phase 0 + adds others later.
-7. **What "BFF spec" do we follow exactly?**: DCLM's `revbucket/bff` is one canonical implementation. Different fork variants exist (`ai2-fuzzy-substr` branch). Reviewer to recommend.
-8. **Should Session B's fork merge back into main repo (one ownership) or stay separate (two repos)?** My draft assumes merge-back PR per phase. Reviewer to verify this is operationally OK.
+| # | Question | v0.2 status |
+|---|---|---|
+| 1 | Phase order: BFF (Phase 5) before fastText (Phase 6)? | **Still open** — implementer's call once Phase 0-4 land. BFF more impactful for Stage 3; fastText gives quality wins even at per-source dedup. |
+| 2 | Skip Phase 5 entirely if Stage 2 per-source MinHash is enough? | **Partially resolved** — v0.2 keeps Phase 5 with Option C (rented box) as the path. Trigger to start Phase 5: Stage 2 1B rehearsal evals show dedup-related quality ceiling. |
+| 3 | Adopt Datatrove? | **Still open** — v0.2 keeps "no" per v0.1's D7. Implementer to flag if their hands-on view changes this. |
+| 4 | gxhash + AES-NI hardware target? | **Still open** — v0.2 keeps xxh64 for index compatibility (D3). gxhash could come in Phase 1b after corpus rebuild if useful. User to confirm hardware AES-NI support for future-proofing. |
+| 5 | FineWeb-Edu classifier license? | **Partially resolved** — DCLM is MIT (verified). FineWeb-Edu's HF model page license needs explicit check in Phase 6b kickoff before bundling the ONNX export. |
+| 6 | Wheel matrix scope? | **RESOLVED (v0.2)**: ship single `abi3-py310` wheel for linux x86_64 only. Add other platforms post-Phase-4 if there's actual demand. |
+| 7 | Which BFF spec? | **RESOLVED (v0.2)**: Dolma's `by_ngram` (Python library) primary; `mlfoundations/dclm/dedup/bff` (MIT, active) as backup if Dolma's Python API is too coarse. |
+| 8 | Fork merge model? | **Still open** — v0.2 assumes feature-branches-in-same-repo with PR-per-phase (simpler than v0.1's "separate remote"). Implementer to confirm. |
 
 ---
 
