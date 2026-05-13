@@ -77,18 +77,66 @@ def _load_teacher(teacher_hf_model: str, synthetic: bool):
     pseudo-random logits — used by tests so we don't need a 671B model
     loaded to verify the orchestration plumbing.
 
-    For real teachers, this is where we'd plug vLLM's OfflineInference
-    (not yet implemented — adds the vllm dependency which we shouldn't
-    add until we're ready to run the cache).
+    For real teachers, we use HuggingFace transformers in bf16 with
+    ``device_map="auto"`` (tensor-parallel across all visible GPUs). This
+    is sufficient for the top-K mass audit (~65k positions). For the
+    actual top-K *cache* run (multi-billion-token throughput), swap to
+    vLLM's offline inference here — same callable contract.
+
+    Why transformers (not vLLM) for the audit:
+      - vLLM's ``prompt_logprobs`` API caps at the top-N logprobs and
+        doesn't easily expose the full V=131k softmax denominator.
+        Patching it is more work than just running transformers once.
+      - The audit is one-shot, not throughput-critical; transformers'
+        per-batch forward is fast enough on 2× A100 for a 32B teacher.
+      - vLLM stays the right answer for the LATER cache-generation step
+        where 3-10× throughput on billions of tokens matters.
     """
     if synthetic:
         return _make_synthetic_teacher(teacher_hf_model)
-    raise NotImplementedError(
-        "Real teacher loading via vLLM not yet wired. The synthetic-teacher "
-        "path validates the orchestration plumbing; the real path will land "
-        "in a follow-up PR alongside the vllm dependency. For now, use "
-        "--synthetic-teacher to test."
+    return _make_transformers_teacher(teacher_hf_model)
+
+
+def _make_transformers_teacher(hf_model: str):
+    """Load a HuggingFace causal-LM teacher in bf16; return ``forward``.
+
+    Lazy import — keeps the module import cheap on machines that won't
+    actually run real inference (e.g. CPU dev box doing the synthetic
+    audit).
+    """
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: F401
+    except ImportError as e:  # pragma: no cover — exercised on pod only
+        raise ImportError(
+            "real teacher loading requires `torch` + `transformers`; "
+            "install on the pod with `pip install torch transformers`"
+        ) from e
+    import numpy as np
+
+    log.info("loading_teacher_transformers", model=hf_model)
+    model = AutoModelForCausalLM.from_pretrained(
+        hf_model,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",  # spreads weights across all visible GPUs
+        low_cpu_mem_usage=True,
     )
+    model.eval()
+    log.info("teacher_loaded", model=hf_model)
+
+    @torch.inference_mode()
+    def forward(token_ids):
+        # token_ids: np.ndarray [B, S] (int)
+        # Return: float32 logits [B, S, V] on host (numpy).
+        ids = torch.as_tensor(token_ids, dtype=torch.long)
+        # device_map="auto" places the embedding on the first device.
+        first_device = next(model.parameters()).device
+        ids = ids.to(first_device, non_blocking=True)
+        out = model(ids, use_cache=False)
+        # out.logits: bf16/f16 on the last shard; cast and move to CPU.
+        return out.logits.float().cpu().numpy()
+
+    return forward
 
 
 def _make_synthetic_teacher(seed_name: str):
