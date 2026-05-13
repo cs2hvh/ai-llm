@@ -246,9 +246,11 @@ else
         > "$G5_FSDP_LOG" 2>&1
 
     # run_pretrain.py doesn't emit a tokens_per_sec field — only a "step"
-    # event with {step, timestamp, loss}. So we compute throughput from
-    # consecutive step timestamp deltas. Skip the first few steps (JIT
-    # compile + warmup) and take the median across the remaining deltas.
+    # event with {step, timestamp, loss}. Compute throughput from
+    # consecutive step timestamp deltas. The first delta has JIT compile
+    # cost baked in, so we drop it. With default --log-every=10 and
+    # --total-steps=50 we get ~5 step events; dropping the first leaves
+    # 4 → 3 deltas, enough for a stable median.
     extract_med_tps() {
         local logfile="$1"
         local micro_batch="$2"
@@ -267,13 +269,12 @@ for line in open("$logfile"):
         ts = datetime.datetime.fromisoformat(e["timestamp"].rstrip("Z"))
         events.append((int(e["step"]), ts))
 events.sort()
-# Drop first 5 steps to skip JIT compile + warmup noise.
-events = events[5:]
-if len(events) < 2:
+if len(events) < 3:
     print(""); raise SystemExit
-tokens_per_step = $micro_batch * $seq_len
+# Drop the first event — its delta to event[1] includes JIT compile.
 deltas = []
-for (s1, t1), (s2, t2) in zip(events[:-1], events[1:]):
+tokens_per_step = $micro_batch * $seq_len
+for (s1, t1), (s2, t2) in zip(events[1:-1], events[2:]):
     dt = (t2 - t1).total_seconds()
     if dt > 0:
         deltas.append((s2 - s1) * tokens_per_step / dt)
