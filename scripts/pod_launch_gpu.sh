@@ -121,18 +121,38 @@ source .venv/bin/activate
 pip install --quiet --upgrade pip wheel setuptools
 
 # ----------------------------------------------------------------------
-# 6. CPU baseline deps + GPU deps
+# 6. Install all deps in ONE pip transaction.
+#
+# Why one transaction and never --force-reinstall:
+# All nvidia-*-cu12 wheels share the `nvidia/` PEP 420 namespace
+# (no nvidia/__init__.py). pip's per-package uninstall removes files
+# from RECORD but leaves empty `nvidia/<subpkg>/` directories behind.
+# When --force-reinstall or split installs interleave uninstall+reinstall
+# across ~15 nvidia-*-cu12 wheels (e.g. torch/transformers pinning a
+# different cudnn version than jax), you can end up with an empty
+# `nvidia/cuda_nvcc/` dir → Python imports it as a namespace package
+# with __file__=None → JAX 0.4.35's _try_cuda_nvcc_import crashes on
+# `pathlib.Path(None)`. (Hit this on the A100 pod 2026-05-13;
+# JAX issue family pypa/pip #10110, jax-ml/jax #24139.)
+#
+# Solution: single `pip install` so pip resolves everything first then
+# runs all uninstalls then all installs, no interleaving. Plus
+# --no-cache-dir to bypass any cached corrupted wheel.
 # ----------------------------------------------------------------------
-log "installing CPU baseline deps (requirements.txt)"
-pip install --quiet -r requirements.txt
+log "installing all deps in a single pip transaction (no --force-reinstall)"
 
-log "installing GPU deps (requirements-gpu.txt — jax[cuda12])"
-# Important: don't let LD_LIBRARY_PATH from a pre-installed PyTorch CUDA
-# interfere with jax's bundled libs. Unset for the pip resolution step.
-LD_LIBRARY_PATH_BAK="${LD_LIBRARY_PATH:-}"
+# Unset LD_LIBRARY_PATH for the install AND keep it unset for the
+# JAX-uses-GPU sanity check below. Per JAX docs:
+#   "Make sure that LD_LIBRARY_PATH is not set, since LD_LIBRARY_PATH
+#    can override the NVIDIA CUDA libraries."
+# RunPod images often pre-set this to /usr/local/cuda/lib64, which
+# shadows jax's bundled cuDNN with the (mismatched) system one and
+# produces CUDNN_STATUS_NOT_INITIALIZED at first kernel launch.
 unset LD_LIBRARY_PATH || true
-pip install --quiet -r requirements-gpu.txt
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH_BAK"
+
+pip install --no-cache-dir \
+    -r requirements.txt \
+    -r requirements-gpu.txt
 
 # ----------------------------------------------------------------------
 # 7. Optional: vLLM for the teacher audit
@@ -167,19 +187,70 @@ for KEY_LOCAL in \
 done
 
 # ----------------------------------------------------------------------
-# 9. JAX-sees-GPUs sanity check
+# 9. Defensive checks BEFORE the JAX-uses-GPU smoke.
+# Detects the "nvidia/<subpkg>/ empty namespace dir" failure mode that
+# would otherwise crash JAX's _try_cuda_nvcc_import with a confusing
+# pathlib.Path(None) error. Done as a separate step so a corrupt install
+# fails fast with a clear message instead of cascading into JAX init.
 # ----------------------------------------------------------------------
-log "JAX GPU sanity check"
+log "checking nvidia/* namespace integrity"
 python - <<'PY'
-import jax, sys
+import importlib, sys
+fail = []
+for sub in (
+    "cuda_nvcc", "cudnn", "cublas", "cuda_runtime", "cuda_cupti",
+    "cuda_nvrtc", "cufft", "curand", "cusolver", "cusparse",
+    "nccl", "nvjitlink", "nvtx",
+):
+    name = f"nvidia.{sub}"
+    try:
+        m = importlib.import_module(name)
+    except ImportError:
+        continue  # ok — wheel not in dependency tree (e.g. nvtx is optional)
+    if getattr(m, "__file__", None) is None:
+        fail.append(f"  - {name} is a namespace-only package (__file__=None); "
+                    f"wheel install was corrupted")
+if fail:
+    print("CORRUPT NVIDIA NAMESPACE — JAX will crash on import:")
+    for line in fail: print(line)
+    print()
+    print("Recovery: rm -rf .venv && bash scripts/pod_launch_gpu.sh")
+    print("(do NOT use --force-reinstall, see script header)")
+    sys.exit(1)
+print("nvidia/* namespace OK")
+PY
+
+# Also pip check — surfaces dep version conflicts pip may have left
+# half-resolved. Non-fatal (some Keras/TF conflicts are pre-existing).
+pip check || log "WARN: pip check found dependency conflicts (non-fatal)"
+
+# ----------------------------------------------------------------------
+# 10. JAX-sees-GPUs + cuDNN handshake smoke. This is the actual gate
+# that catches the "Could not create cudnn handle" failure mode.
+# ----------------------------------------------------------------------
+log "JAX GPU + cuDNN sanity"
+python - <<'PY'
+import jax, jax.numpy as jnp, sys
+from jax import jit
+print(f"jax: {jax.__version__}  backend: {jax.default_backend()}")
 devs = jax.devices()
-print(f"jax.default_backend(): {jax.default_backend()}")
-print(f"jax.devices(): {devs}")
+print(f"devices: {devs}")
 gpu_devs = [d for d in devs if d.platform == "gpu"]
 if not gpu_devs:
     print("FATAL: jax sees no GPUs. Check driver + CUDA installation.")
     sys.exit(2)
 print(f"GPUs visible to JAX: {len(gpu_devs)}")
+
+# Force a real GPU compute through the cuDNN backend.
+try:
+    y = jit(lambda x: (x @ x).sum())(jnp.ones((512, 512), dtype=jnp.bfloat16))
+    y.block_until_ready()
+    print(f"cuDNN handshake: OK (result={float(y)})")
+except Exception as e:
+    print(f"FATAL cuDNN init: {e}")
+    print("Common cause: LD_LIBRARY_PATH points at system CUDA libs that")
+    print("shadow jax's bundled cuDNN. Run: unset LD_LIBRARY_PATH")
+    sys.exit(3)
 PY
 
 # ----------------------------------------------------------------------
