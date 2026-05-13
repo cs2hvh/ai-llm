@@ -1,0 +1,54 @@
+# Code-source supplement for the 1B v2 corpus.
+#
+# Context: the original pretrain_mix.yaml allocates 18% of the 1B budget to
+# bigcode/starcoderdata. That source is GATED (HF account agreement). The
+# current infra-validation corpus skipped it via --skip-sources, leaving a
+# code-less ~820M corpus.
+#
+# This supplement uses the public, non-gated fallback codeparrot/github-code-clean
+# at the same 18% allocation (~180M tokens for a 1B target). The resulting
+# packed shards will be COMPOSED with the other 12 sources (from the
+# pretrain_mix.yaml build) via scripts/compose_mixed_corpus.py to produce
+# the final 1B "infra-validation corpus v2" or, with budget bump, the
+# Phase 3 base corpus.
+#
+# Filter chain and decontamination block are kept identical to the main
+# pretrain_mix.yaml so the supplement is genuinely interchangeable with
+# starcoderdata at compose time.
+name: code_supplement_v1
+total_share_must_equal: 1.0
+
+sources:
+  - dataset: codeparrot/github-code-clean
+    share: 1.0
+    text_field: code
+    category: code
+    trust_remote_code: true
+
+filters:
+  length:
+    min_chars: 200
+    max_chars: 1_000_000
+  repetition:
+    max_top_word_share: 0.20
+    max_top_ngram_share: 0.10
+    ngram_n: 5
+  symbol_ratio:
+    max_symbol_ratio: 0.30
+  pii:
+    redact_email: true
+    redact_phone: true
+    redact_ipv4: false
+
+decontamination:
+  enabled: true
+  hash_seed: 0xDECAF
+  index_path_primary:   artifacts/decontamination_index_8gram.json
+  index_path_secondary: artifacts/decontamination_index_13gram.json
+  ngram_size: 13
+
+batch:
+  micro_batch_per_device: 8
+  grad_accum_steps: 1
+
+data_seed: 1234
