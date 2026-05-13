@@ -349,11 +349,19 @@ PROMPT_LOADERS: dict[str, Callable[..., Iterator[str]]] = {
 def load_prompts(
     benchmark_id: str,
     *,
-    split: str = "test",
+    split: str | None = None,
     sample_size: int | None = None,
     examples_provider: ExamplesProvider | None = None,
 ) -> Iterator[str]:
     """Dispatch helper: yield prompt strings for ``benchmark_id``.
+
+    ``split=None`` (default) means: use the per-loader default split
+    (e.g. ifeval defaults to "train" because it has no test split;
+    gsm8k defaults to "test"). Pass an explicit ``split`` to override.
+
+    2026-05-13 fix: previously this had ``split="test"`` as its OWN
+    default which silently overrode each loader's per-benchmark
+    default, breaking ifeval (train-only) and BBH (train-only).
 
     Raises ValueError for unknown ids so build_decontamination_index.py
     fails fast at sweep-launch instead of silently producing an
@@ -365,8 +373,10 @@ def load_prompts(
             f"Known: {sorted(PROMPT_LOADERS)}"
         )
     loader = PROMPT_LOADERS[benchmark_id]
-    return loader(
-        split=split,
-        sample_size=sample_size,
-        examples_provider=examples_provider,
-    )
+    kwargs: dict[str, Any] = {
+        "sample_size": sample_size,
+        "examples_provider": examples_provider,
+    }
+    if split is not None:
+        kwargs["split"] = split
+    return loader(**kwargs)
