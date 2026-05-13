@@ -46,6 +46,26 @@ _VALID_ANSWERS = set("ABCDEFGHIJ")
 # Default language coverage for our gate eval. The user can override.
 DEFAULT_LANGUAGES = ("en", "hi", "es", "fr", "de", "zh", "ar")
 
+
+def _extract_choices(row: dict) -> list[str]:
+    """Return the row's choices as a list, handling both schemas.
+
+    HF ``li-lab/MMLU-ProX`` stores choices as ten separate columns
+    ``option_0..option_9`` (None for unused slots when a question has <10
+    options). Our older test fixtures used a single ``options`` list. We
+    accept either — real-data rows take the column-wise path; tests still
+    work with the legacy list shape.
+    """
+    if "options" in row and row["options"] is not None:
+        return list(row["options"])
+    out: list[str] = []
+    for j in range(10):
+        v = row.get(f"option_{j}")
+        if v in (None, "", "N/A"):
+            continue
+        out.append(v)
+    return out
+
 # Strip common prefixes the model may emit before the answer letter.
 _PREFIX_RE = re.compile(
     r"^\s*(?:THE\s+)?(?:CORRECT\s+|FINAL\s+|RIGHT\s+)?"
@@ -105,7 +125,7 @@ class MMLUProXBenchmark:
     def _format_one_question(row: dict, include_answer: bool) -> str:
         """Render a question + choices block. Optionally append the answer."""
         question = row["question"]
-        choices = row["options"]  # list[str], variable length 4-10
+        choices = _extract_choices(row)  # variable length 4-10
         lines = [f"Q: {question}"]
         for i, choice in enumerate(choices):
             lines.append(f"{_LETTERS[i]}. {choice}")

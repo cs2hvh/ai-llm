@@ -226,3 +226,77 @@ class TestEndToEndWithRunner:
         # as our pre-load call, so order matches.
         assert result.accuracy == 1.0
         assert result.n_correct == result.n_total > 0
+
+
+class TestRealHFColumnSchema:
+    """The real ``li-lab/MMLU-ProX`` dataset stores choices as ten separate
+    columns ``option_0`` … ``option_9`` (None for unused slots), not as a
+    single ``options`` list. Regression test for that schema."""
+
+    def _row_columnwise(
+        self, question: str, choices: list[str], answer_index: int, n_slots: int = 10
+    ) -> dict:
+        # Pad to n_slots with None to mimic real HF row.
+        padded = list(choices) + [None] * (n_slots - len(choices))
+        row: dict = {
+            "question": question,
+            "answer_index": answer_index,
+            "subject": "math",
+        }
+        for j, v in enumerate(padded):
+            row[f"option_{j}"] = v
+        return row
+
+    def test_loads_column_shaped_rows(self):
+        rows = [
+            self._row_columnwise(f"q{i}", [f"A{i}", f"B{i}", f"C{i}", f"D{i}"], i % 4)
+            for i in range(6)
+        ]
+        bench = MMLUProXBenchmark(
+            languages=("en",),
+            n_shots=2,
+            examples_provider=_fake_provider({"en": rows}),
+        )
+        exs = list(bench.load_examples(split="test"))
+        assert len(exs) == 4
+        # Each prompt should contain the 4-letter choice block.
+        for ex in exs:
+            assert "A. A" in ex.prompt
+            assert "D. D" in ex.prompt
+            assert ex.prompt.rstrip().endswith("Answer:")
+
+    def test_variable_choice_count_drops_none_slots(self):
+        # 9 real choices + 1 None slot → block should have A..I only.
+        row = self._row_columnwise(
+            "q", [f"opt{j}" for j in range(9)], answer_index=8, n_slots=10
+        )
+        # Two shots required for n_shots=2; reuse the same row pattern.
+        rows = [
+            self._row_columnwise("q-shot", [f"opt{j}" for j in range(9)], 0)
+            for _ in range(2)
+        ] + [row]
+        bench = MMLUProXBenchmark(
+            languages=("en",),
+            n_shots=2,
+            examples_provider=_fake_provider({"en": rows}),
+        )
+        ex = list(bench.load_examples(split="test"))[0]
+        # Letter "I" line must be present, "J" line must NOT.
+        target_block = ex.prompt.split("\n\n")[-1]  # last Q (the target)
+        assert "I. opt8" in target_block
+        assert "J. " not in target_block
+        # Target letter for answer_index=8 is "I".
+        assert ex.target_answer == "I"
+
+    def test_list_shape_still_works(self):
+        # Back-compat: tests historically used {"options": [...]} rows.
+        rows = _make_n_rows(5)
+        bench = MMLUProXBenchmark(
+            languages=("en",),
+            n_shots=2,
+            examples_provider=_fake_provider({"en": rows}),
+        )
+        exs = list(bench.load_examples(split="test"))
+        assert len(exs) == 3
+        for ex in exs:
+            assert "A. opt-A-" in ex.prompt
