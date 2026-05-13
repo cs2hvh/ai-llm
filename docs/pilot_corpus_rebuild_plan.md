@@ -1,9 +1,26 @@
 # Stage 1 Pilot — Corpus Rebuild Plan (2026-05-13)
 
-**Status**: drafted, awaiting execution on next CPU pod session.
-**Target**: ~5B-token pretrain corpus so a 30B-token pilot is 6 epochs (acceptable repetition).
-**Wall estimate**: ~6 hours on a 64-core CPU pod with `--max-parallel 8`.
-**Cost estimate**: $6-18 depending on pod hourly rate.
+**Status**: 🟢 **EXECUTING NOW on the 128-core dev box** (PID 918051+children, started 17:39 UTC).
+**Target**: ~5B-token pretrain corpus at **seq_len=8193** so the SAME corpus serves pilot + Stage 2/3 base v1.
+**Wall estimate**: ~5-6 hours on 128 cores with `--max-parallel 8` (fineweb-edu @ 2.2B dominates).
+**Cost**: $0 (running on this machine), aside from R2 egress/storage (~5 GB total).
+
+## Why seq_len=8193 (Decision D2)
+
+Existing pre-2026-05-13 corpora on R2 were built at seq_len=8192 — wrong
+by the P0 fix that requires seq_len = context_length + 1. So all 13
+sources need rebuild regardless. Two choices for the new seq_len:
+
+| Build at | Works for pilot? | Works for base v1? |
+|---|---|---|
+| seq_len=4097 (pilot's old ctx=4096) | ✅ | ❌ — Stage 2/3 ctx=8192 |
+| **seq_len=8193 (pilot bumped to ctx=8192)** | ✅ | ✅ |
+
+D2 chosen: build at 8193 + update `configs/pilot_250m.yaml`'s
+`context_length: 4096 → 8192`. muP transfer is across width, not
+context, so no LR retuning is needed. Pilot at ctx=8192 costs slightly
+more wall time per step but the corpus is reused for the actual v1
+base build (saves a future rebuild).
 
 ---
 

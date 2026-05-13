@@ -29,8 +29,14 @@ head_dim: 64
 vocab_size: 131072
 tie_embeddings: true
 
-context_length: 4096
-context_extension_target: 8192  # extend at end-of-pretrain
+# 2026-05-13: bumped from 4096 to 8192 so the pilot reuses the SAME
+# corpus (seq_len=8193) that Stage 2 / Stage 3 base v1 will use. The
+# original 4096 was a "keep sweep fast" wind-tunnel-era choice; for a
+# single pilot run the extra compute is worth not having to maintain a
+# parallel pilot-only corpus build. muP transfer is across width, not
+# context, so no LR retuning is needed.
+context_length: 8192
+context_extension_target: 8192  # already at native target; no YaRN extension needed for pilot
 
 # Position
 position: rope
@@ -87,8 +93,15 @@ lr_schedule:
   decay_fraction: 0.15     # last 15% of total_steps is the decay phase
 
 batch:
-  global_tokens: 4194304     # ~4M tokens / step
-  sequence_length: 4096
+  # 2026-05-13: bumped sequence_length 4096->8192 to match the new corpus
+  # build (seq_len=8193). global_tokens is informational/aspirational —
+  # the actual per-device micro_batch is set in the data yaml (currently
+  # 8 in pretrain_mix_pilot.yaml). At ctx=8192 + micro_batch=8 + 2 GPUs
+  # DP = 131K tokens/step. step count = target_tokens / 131K.
+  # Use --micro-batch-override at launch to dial it up if H200 memory
+  # permits (a 250M model at ctx=8192 fits ~50+ micro_batch comfortably).
+  global_tokens: 4194304     # informational; not enforced
+  sequence_length: 8192
 
 grad_clip_global_norm: 1.0
 mixed_precision: bfloat16
