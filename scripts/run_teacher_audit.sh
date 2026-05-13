@@ -32,7 +32,17 @@ N_POS="${AUDIT_N_POS:-65536}"
 KS="${AUDIT_KS:-4,8,16,32}"
 SEQ_LEN="${AUDIT_SEQ_LEN:-2048}"
 BATCH="${AUDIT_BATCH:-2}"
-TEACHERS="${AUDIT_TEACHERS:-deepseek-v4-pro-base:deepseek-ai/DeepSeek-V4-Pro-Base,olmo-3-32b-base:allenai/Olmo-3-32B-Base}"
+# NOTE: the planned production teachers (DeepSeek-V4-Pro-Base + Olmo-3-32B-Base
+# per project_teacher_strategy) are HYPOTHETICAL / future. They aren't yet on
+# HuggingFace, so the audit can't load them. Until they ship, use real
+# currently-available teachers as methodology placeholders. Override at
+# run-time with AUDIT_TEACHERS=<id>:<hf_id>,<id>:<hf_id>.
+#
+# Sensible currently-shipping options that fit on 3× A100-80GB in bf16:
+#   olmo-2-13b       : allenai/OLMo-2-1124-13B           (~26 GB bf16)
+#   deepseek-v2-lite : deepseek-ai/DeepSeek-V2-Lite-Base (~32 GB MoE bf16)
+#   qwen-2.5-32b     : Qwen/Qwen2.5-32B                  (~64 GB bf16, tight)
+TEACHERS="${AUDIT_TEACHERS:-olmo-2-13b:allenai/OLMo-2-1124-13B,deepseek-v2-lite:deepseek-ai/DeepSeek-V2-Lite-Base}"
 UTC_DATE="$(date -u +%Y-%m-%d)"
 R2_PREFIX="${AUDIT_R2_PREFIX:-teacher_audit/${UTC_DATE}}"
 

@@ -321,34 +321,46 @@ log "  G6: ${GATE_STATUS[g6]:-?}  (${GATE_DETAIL[g6]:-})"
 # ========================================================================
 SUMMARY="$RESULTS_DIR/gauntlet_results.json"
 
-# Emit each gate as a tab-separated line on stdin; python builds the JSON.
+# Dump tab-separated state to a temp file (NOT piped to python — heredoc
+# stdin would clobber the pipe, leaving gates={}). Then python reads the
+# temp file. Both the data and the script are well-defined this way.
+PAIRS_FILE="$(mktemp)"
 {
     printf 'META\t%s\t%s\t%s\n' "$GPU_COUNT" "$MODEL_CFG" "$STEPS"
     for g in g1 g2 g3 g4 g5 g6; do
         printf 'GATE\t%s\t%s\t%s\n' \
             "$g" "${GATE_STATUS[$g]:-UNKNOWN}" "${GATE_DETAIL[$g]:-}"
     done
-} | python - > "$SUMMARY" <<'PY'
-import json, sys, datetime
-gates = {}
-meta = {}
-for line in sys.stdin:
-    parts = line.rstrip("\n").split("\t")
-    if parts[0] == "META":
-        _, gpu_count, model_cfg, steps = parts
-        meta = {"gpu_count": int(gpu_count), "model_config": model_cfg,
-                "steps": int(steps)}
-    elif parts[0] == "GATE":
-        _, g, status, detail = parts
-        gates[g] = {"status": status, "detail": detail}
+} > "$PAIRS_FILE"
+
+PAIRS_FILE="$PAIRS_FILE" SUMMARY_OUT="$SUMMARY" python - <<'PY'
+import json, os, datetime
+gates: dict = {}
+meta: dict = {}
+with open(os.environ["PAIRS_FILE"]) as f:
+    for line in f:
+        parts = line.rstrip("\n").split("\t")
+        if not parts:
+            continue
+        if parts[0] == "META" and len(parts) >= 4:
+            _, gpu_count, model_cfg, steps = parts[:4]
+            meta = {"gpu_count": int(gpu_count), "model_config": model_cfg,
+                    "steps": int(steps)}
+        elif parts[0] == "GATE" and len(parts) >= 4:
+            _, g, status, detail = parts[:4]
+            gates[g] = {"status": status, "detail": detail}
 out = {
     "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
     **meta,
     "gates": gates,
-    "overall_pass": all(g["status"] in ("PASS","SKIP") for g in gates.values()),
+    "overall_pass": bool(gates) and all(
+        g["status"] in ("PASS", "SKIP") for g in gates.values()
+    ),
 }
-print(json.dumps(out, indent=2))
+with open(os.environ["SUMMARY_OUT"], "w") as f:
+    json.dump(out, f, indent=2)
 PY
+rm -f "$PAIRS_FILE"
 
 log ""
 log "==============================================================="
