@@ -622,6 +622,18 @@ def main() -> int:
         help="Skip JAX mesh sharding (single-device debug runs only).",
     )
     p.add_argument(
+        "--fsdp",
+        action="store_true",
+        help="Enable FSDP/ZeRO-3 sharded state. Params, gradients, and "
+             "optimizer state are split across all visible devices along "
+             "the data axis instead of replicated. Cuts per-device memory "
+             "~5x at 1B/seq=8192 vs DP-replicated state. Requires N>=2 "
+             "devices; on N=1, FSDP collapses to replicated behavior. "
+             "2026-05-13 (FSDP plan Commit D). See "
+             "docs/review/QUERIES_FOR_REVIEWER_2026-05-12-evening.md and "
+             "myllm.training.mesh.make_param_shardings for the design.",
+    )
+    p.add_argument(
         "--checkpoint-r2-prefix",
         default=None,
         help="If set, each checkpoint mirrors to s3://$S3_BUCKET/<prefix>/step-NNNN/",
@@ -888,18 +900,132 @@ def main() -> int:
     )
     state = initial_train_state(model, optimizer)
 
-    # JAX mesh + sharding (data-parallel; FSDP lands later)
+    # JAX mesh + sharding
+    #
+    # Three modes (in order of preference for production training):
+    #   1. --fsdp + N>=2 devices: full FSDP/ZeRO-3 sharded state. Params,
+    #      grads, and opt-state are split across the data axis. Per-device
+    #      memory ~5x lower than DP-replicated at 1B/seq=8192. The
+    #      train_step compiles with in_shardings + donate_argnums + grad
+    #      with_sharding_constraint to force reduce-scatter.
+    #   2. No --fsdp (default), N>=1 devices: DP-replicated state (the
+    #      pre-FSDP behavior). Batch is sharded along axis 0; params are
+    #      replicated on every device. Works on any device count.
+    #   3. --no-shard: skip sharding entirely (single-device debug only).
+    #
+    # state_shardings + batch_sharding are passed to make_train_step
+    # later. They're None for the DP-replicated and --no-shard modes.
+    state_shardings = None
+    batch_sharding_for_train_step = None
+
     if not args.no_shard:
         import jax
 
         n_devices = len(jax.devices())
         sharding_cfg = ShardingConfig(data_parallel=n_devices, model_parallel=1)
-        log.info(
-            "sharding_init", data_parallel=n_devices, model_parallel=1, devices=n_devices
-        )
-        _, data_sharding, replicate_sharding = build_mesh_and_shardings(sharding_cfg)
-        state = shard_state(state, replicate_sharding)
+        mesh, data_sharding, replicate_sharding = build_mesh_and_shardings(sharding_cfg)
 
+        if args.fsdp and n_devices > 1:
+            # ----- FSDP path (Commit D) -----
+            from jax.sharding import NamedSharding
+            from jax.sharding import PartitionSpec as P
+
+            from myllm.training.mesh import make_param_shardings
+            from myllm.training.optimizer import (
+                make_optimizer_state_sharding,
+            )
+
+            log.info(
+                "sharding_init",
+                mode="fsdp",
+                data_parallel=n_devices,
+                model_parallel=1,
+            )
+
+            # Build per-leaf shardings from the materialised (CPU-init'd)
+            # trainables. The model was already constructed on host; here
+            # we just compute "what sharding SHOULD each leaf have" based
+            # on its shape (longest-divisible-axis rule, see mesh.py).
+            trainable_raw = state["trainable_variables"]
+            param_shardings = make_param_shardings(trainable_raw, mesh)
+
+            # Move trainables onto the sharded layout (real placement
+            # happens here).
+            trainable_sharded = jax.tree.map(
+                lambda x, s: jax.device_put(x, s),
+                trainable_raw, param_shardings,
+            )
+            # Non-trainables (RoPE tables) are small and read-only; replicate.
+            non_trainable_replicated = jax.tree.map(
+                lambda x: jax.device_put(x, replicate_sharding),
+                state["non_trainable_variables"],
+            )
+
+            # Init opt-state UNDER jit with out_shardings = sharded layout.
+            # This is the key trick: we never materialise unsharded opt
+            # state on host. eval_shape derives the structure; out_shardings
+            # tells XLA where to put each leaf.
+            opt_state_shardings = make_optimizer_state_sharding(
+                optimizer, trainable_sharded, mesh,
+            )
+            opt_init_jit = jax.jit(
+                optimizer.init, out_shardings=opt_state_shardings
+            )
+            opt_state_sharded = opt_init_jit(trainable_sharded)
+
+            # Scalars are replicated. device_put their initial values too
+            # so the state dict is sharded-coherent.
+            step_repl = jax.device_put(state["step"], replicate_sharding)
+            lrmult_repl = jax.device_put(
+                state["lr_recovery_multiplier"], replicate_sharding
+            )
+            dpos_repl = jax.device_put(
+                state["data_position"], replicate_sharding
+            )
+
+            state = {
+                "trainable_variables": trainable_sharded,
+                "non_trainable_variables": non_trainable_replicated,
+                "opt_state": opt_state_sharded,
+                "step": step_repl,
+                "lr_recovery_multiplier": lrmult_repl,
+                "data_position": dpos_repl,
+            }
+
+            # Build the parallel sharding pytree for make_train_step's
+            # in_shardings contract.
+            state_shardings = {
+                "trainable_variables": param_shardings,
+                "non_trainable_variables": jax.tree.map(
+                    lambda _: replicate_sharding,
+                    state["non_trainable_variables"],
+                ),
+                "opt_state": opt_state_shardings,
+                "step": replicate_sharding,
+                "lr_recovery_multiplier": replicate_sharding,
+                "data_position": replicate_sharding,
+            }
+            batch_sharding_for_train_step = data_sharding
+
+        else:
+            # ----- DP-replicated path (pre-FSDP, still the default) -----
+            if args.fsdp and n_devices <= 1:
+                log.warning(
+                    "fsdp_falling_back_to_dp_replicated",
+                    reason="--fsdp requested but only 1 device visible",
+                )
+            log.info(
+                "sharding_init",
+                mode="dp_replicated",
+                data_parallel=n_devices,
+                model_parallel=1,
+                devices=n_devices,
+            )
+            state = shard_state(state, replicate_sharding)
+            # state_shardings stays None — train_step uses the pre-FSDP
+            # path (no donate, no grad constraint, no out_sharding contract).
+
+        # Both sharded modes shard the batch along the data axis.
         def _shard_each(it):
             for b in it:
                 yield shard_batch(b, data_sharding)
@@ -975,6 +1101,14 @@ def main() -> int:
         teacher_weights=teacher_weights,
         use_chunked_ce=args.use_chunked_ce,
         chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+        # FSDP contract (2026-05-13 Commit D). When the sharding block
+        # above set --fsdp mode, these are populated; the train_step's
+        # JIT will declare in_shardings + donate_argnums=(0,) and
+        # constrain grads via with_sharding_constraint to force
+        # reduce-scatter. In DP-replicated / --no-shard modes these
+        # stay None and the train_step compiles pre-FSDP style.
+        state_shardings=state_shardings,
+        batch_sharding=batch_sharding_for_train_step,
     )
     if args.use_chunked_ce:
         log.info(
