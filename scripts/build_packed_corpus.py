@@ -12,8 +12,10 @@ Output layout per source::
         shard-000000/{tokens.bin, seq_meta.arrow, doc_meta.parquet, manifest.json}
         shard-000001/...
 
-After all sources finish, the mixed-training corpus is composed by a
-separate pass (TODO: scripts/compose_mixed_corpus.py).
+After all sources finish, the mixed-training corpus is composed by
+``scripts/compose_mixed_corpus.py`` (which reads each per-source
+manifest, validates tokenizer + sequence_length, applies the planned
+mixture shares, and writes a single unified shard set).
 
 Usage::
 
