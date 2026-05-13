@@ -48,6 +48,15 @@ def make_train_step(
     teacher_weights: tuple[float, ...] | None = None,
     use_chunked_ce: bool = False,
     chunked_ce_num_chunks: int = 8,
+    # FSDP sharding contract (2026-05-13). Optional; when None, the
+    # train_step compiles as before (DP-replicated state). When set, the
+    # JIT specifies in_shardings, donate_argnums=(0,) for in-place state
+    # update, and constrains grads + output state via
+    # with_sharding_constraint to force reduce-scatter on grads (not
+    # all-reduce). See `myllm.training.mesh.make_param_shardings` and
+    # `myllm.training.optimizer.make_optimizer_state_sharding`.
+    state_shardings: Any = None,
+    batch_sharding: Any = None,
 ) -> Callable[[dict[str, Any], dict[str, Any]], tuple[dict[str, Any], dict[str, Any]]]:
     """Return a JIT-compiled ``(state, batch) -> (state, metrics)`` function.
 
@@ -76,6 +85,40 @@ def make_train_step(
             tracked as a separate follow-up.
         chunked_ce_num_chunks: ``vocab_size`` must be divisible.
             Production V=131072 with num_chunks=8 -> chunk_size=16384.
+
+    FSDP sharding (2026-05-13, Commit C of FSDP plan):
+        state_shardings: optional pytree of ``NamedSharding`` matching
+            the ``state`` structure (trainable_variables,
+            non_trainable_variables, opt_state, step, lr_recovery_multiplier,
+            data_position). Build via
+            ``mesh.make_param_shardings(...)`` for trainables and
+            ``optimizer.make_optimizer_state_sharding(...)`` for opt_state.
+            When provided, the compiled train_step:
+              1. Declares ``in_shardings=(state_shardings, batch_sharding)``
+                 so XLA knows the input contract.
+              2. Sets ``donate_argnums=(0,)`` so XLA can reuse the input
+                 state buffers in-place (saves doubled peak memory at
+                 every step — the agent flagged this as the single
+                 biggest correctness/cost knob).
+              3. Constrains the post-``value_and_grad`` ``grads`` via
+                 ``jax.lax.with_sharding_constraint`` to match the param
+                 sharding. THIS IS THE CRITICAL PIECE: without it, XLA
+                 emits all-reduce on grads (DDP-shaped collective with
+                 FSDP-shaped memory — looks like FSDP, costs like DDP).
+                 With it, XLA emits reduce-scatter, which is what makes
+                 FSDP a memory + compute win.
+              4. Constrains the post-NaN-revert ``new_state`` so the
+                 output sharding matches the input — needed for the
+                 donation to be valid step-over-step.
+        batch_sharding: optional sharding for the batch (typically
+            ``NamedSharding(mesh, PartitionSpec("data"))`` to split
+            along the batch dim across the data axis). When
+            ``state_shardings`` is set but ``batch_sharding`` is None,
+            JAX picks a default — usually fine, but explicit is better.
+
+        When ``state_shardings`` is None (default), the JIT compiles as
+        before: no in_shardings, no out_shardings, no donate. This keeps
+        existing CPU tests and the smoke L1 path working unchanged.
     """
     try:
         import jax
@@ -160,8 +203,11 @@ def make_train_step(
 
     grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
 
-    @jax.jit
-    def train_step(
+    # Capture the FSDP sharding contract (or None) for the JIT body.
+    # When None, the train_step is the pre-FSDP behavior.
+    _STATE_SHARDINGS = state_shardings
+
+    def _train_step_body(
         state: dict[str, Any], batch: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         import jax.numpy as jnp
@@ -171,6 +217,27 @@ def make_train_step(
             state["non_trainable_variables"],
             batch,
         )
+
+        # FSDP P0: force reduce-scatter on grads.
+        #
+        # By default, XLA picks the collective for grad-reduction based on
+        # how the inputs are sharded. If grads end up REPLICATED after
+        # value_and_grad (the typical default), XLA emits all-reduce —
+        # which gives you DDP-shaped bandwidth even though params/opt
+        # state are FSDP-sharded. This is the silent-but-slow failure
+        # mode the agent flagged as Risk #1.
+        #
+        # The fix is to explicitly constrain grads to match the param
+        # sharding pytree. XLA then sees that grads need to be
+        # sharded-like-params, and the only collective that satisfies
+        # "all-devices contribute to a sharded output" is reduce-scatter.
+        if _STATE_SHARDINGS is not None:
+            import jax.lax as lax
+            param_shardings = _STATE_SHARDINGS["trainable_variables"]
+            grads = jax.tree.map(
+                lambda g, s: lax.with_sharding_constraint(g, s),
+                grads, param_shardings,
+            )
 
         # Atomic NaN-skip (2026-05-12 audit P0-1 fix).
         #
@@ -257,6 +324,37 @@ def make_train_step(
             "nan_skipped": jnp.where(step_ok, jnp.float32(0.0), jnp.float32(1.0)),
             **metrics,
         }
+
+        # FSDP: lock the output sharding to match the input. This makes
+        # the step-over-step donation work — donate_argnums=(0,) is only
+        # legal when the input and output of arg 0 have compatible
+        # layouts. Without this constraint, XLA might produce an output
+        # with a slightly different sharding pattern and silently disable
+        # donation, doubling peak memory step over step.
+        if _STATE_SHARDINGS is not None:
+            import jax.lax as lax
+            new_state = jax.tree.map(
+                lambda x, s: lax.with_sharding_constraint(x, s),
+                new_state, _STATE_SHARDINGS,
+            )
+
         return new_state, metrics_out
+
+    # Build the JIT wrapper. Two flavors:
+    #   - No FSDP (state_shardings is None): plain @jax.jit, default
+    #     in/out shardings, no donation. Matches pre-FSDP behavior.
+    #   - FSDP (state_shardings provided): in_shardings declared on the
+    #     state pytree + batch; donate_argnums=(0,) so the state buffer
+    #     is reused in-place; out_shardings left unspecified so JAX picks
+    #     compatible layouts (we already constrained new_state inside
+    #     the body via with_sharding_constraint).
+    if state_shardings is None:
+        train_step = jax.jit(_train_step_body)
+    else:
+        train_step = jax.jit(
+            _train_step_body,
+            in_shardings=(state_shardings, batch_sharding),
+            donate_argnums=(0,),
+        )
 
     return train_step
