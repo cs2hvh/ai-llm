@@ -125,16 +125,24 @@ done
 # 4. Aggregated summary + decision
 # ----------------------------------------------------------------------
 SUMMARY="$RESULTS_DIR/audit_summary.json"
-{
-    for s in "${SUMMARIES[@]}"; do
-        printf '%s\n' "$s"
-    done
-} | python - > "$SUMMARY" <<'PY'
-import json, sys, datetime, os, glob
-rows = [l.strip().split(":", 3) for l in sys.stdin if l.strip()]
+# Write SUMMARIES to a temp file (NOT piped to python — heredoc would
+# clobber the pipe stdin, leaving teachers={}).
+ROWS_FILE="$(mktemp)"
+for s in "${SUMMARIES[@]}"; do
+    printf '%s\n' "$s"
+done > "$ROWS_FILE"
+
+ROWS_FILE="$ROWS_FILE" SUMMARY_OUT="$SUMMARY" python - <<'PY'
+import json, os, datetime
+rows = []
+with open(os.environ["ROWS_FILE"]) as f:
+    rows = [l.strip().split(":", 3) for l in f if l.strip()]
 results = {}
 need_k16 = False
-for tid, status, rec_k, k8_frac in rows:
+for parts in rows:
+    if len(parts) != 4:
+        continue
+    tid, status, rec_k, k8_frac = parts
     results[tid] = {"status": status, "recommended_k": rec_k, "k8_frac_below_0.95": k8_frac}
     if status == "OK":
         try:
@@ -142,7 +150,7 @@ for tid, status, rec_k, k8_frac in rows:
                 need_k16 = True
         except ValueError:
             pass
-all_ok = all(r["status"] == "OK" for r in results.values())
+all_ok = bool(results) and all(r["status"] == "OK" for r in results.values())
 final_k = 16 if need_k16 else 8
 out = {
     "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
@@ -151,8 +159,10 @@ out = {
     "final_recommended_k": final_k if all_ok else None,
     "rule": "K=16 if any teacher's K=8 frac_below_0.95 > 0.10; else K=8",
 }
-print(json.dumps(out, indent=2))
+with open(os.environ["SUMMARY_OUT"], "w") as f:
+    json.dump(out, f, indent=2)
 PY
+rm -f "$ROWS_FILE"
 
 log ""
 log "==============================================================="
