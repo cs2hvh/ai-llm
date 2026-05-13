@@ -39,10 +39,10 @@ BATCH="${AUDIT_BATCH:-2}"
 # run-time with AUDIT_TEACHERS=<id>:<hf_id>,<id>:<hf_id>.
 #
 # Sensible currently-shipping options that fit on 3× A100-80GB in bf16:
-#   olmo-2-13b       : allenai/OLMo-2-1124-13B           (~26 GB bf16)
-#   deepseek-v2-lite : deepseek-ai/DeepSeek-V2-Lite-Base (~32 GB MoE bf16)
-#   qwen-2.5-32b     : Qwen/Qwen2.5-32B                  (~64 GB bf16, tight)
-TEACHERS="${AUDIT_TEACHERS:-olmo-2-13b:allenai/OLMo-2-1124-13B,deepseek-v2-lite:deepseek-ai/DeepSeek-V2-Lite-Base}"
+#   olmo-2-13b       : allenai/OLMo-2-1124-13B      (~26 GB bf16)
+#   deepseek-v2-lite : deepseek-ai/DeepSeek-V2-Lite (~32 GB MoE bf16, 16B/2.4B active)
+#   qwen-2.5-32b     : Qwen/Qwen2.5-32B             (~64 GB bf16, tight)
+TEACHERS="${AUDIT_TEACHERS:-olmo-2-13b:allenai/OLMo-2-1124-13B,deepseek-v2-lite:deepseek-ai/DeepSeek-V2-Lite}"
 UTC_DATE="$(date -u +%Y-%m-%d)"
 R2_PREFIX="${AUDIT_R2_PREFIX:-teacher_audit/${UTC_DATE}}"
 
@@ -75,11 +75,14 @@ CORPUS_SIZE=$(stat -c%s "$AUDIT_CORPUS")
 log "audit corpus: $AUDIT_CORPUS ($CORPUS_SIZE bytes, $((CORPUS_SIZE/4)) tokens)"
 
 # ----------------------------------------------------------------------
-# 2. Check transformers is installed (lazy)
+# 2. Check transformers + torch + accelerate are installed (lazy).
+# accelerate is required by transformers' device_map="auto" tensor-parallel
+# scatter (raised "ValueError: Using a `device_map`, `tp_plan`, ... requires
+# `accelerate`" on the first pod run).
 # ----------------------------------------------------------------------
-python -c "import transformers, torch" 2>/dev/null || {
-    log "installing transformers + torch (one-time)"
-    pip install --quiet "torch>=2.4" "transformers>=4.45"
+python -c "import transformers, torch, accelerate" 2>/dev/null || {
+    log "installing transformers + torch + accelerate (one-time)"
+    pip install --quiet "torch>=2.4" "transformers>=4.45" "accelerate>=0.30"
 }
 
 # ----------------------------------------------------------------------
