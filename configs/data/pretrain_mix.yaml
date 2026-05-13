@@ -181,19 +181,33 @@ filters:
 
 # R6 benchmark decontamination (B4 2026-05-12 audit: enabled by default).
 #
-# Default: enabled with a live-built index (slow at run-start, ~5 min, but
-# zero-setup). For production runs prefer a pre-built index at index_path
-# — generated offline by scripts/build_decontamination_index.py. The
-# pre-built path is ~50ms to load vs ~5 min for live build.
+# 2026-05-13 (reviewer Q7): default is now DUAL-MODE. Two pre-built indexes,
+# unioned at scan time:
+#   - 8-gram (recall) : flags any 8-word span overlap with a benchmark.
+#   - 13-gram (precision) : near-zero false positives at the cost of recall.
+# DualModeDecontaminationIndex returns the UNION of matches and reports the
+# secondary mode's per-benchmark counts separately so eval-deck signal-to-
+# noise can be audited per-source.
 #
-# To disable for a quick smoke run: set `enabled: false` here, or set
-# decontamination.skip=true in the launch command (NEW Phase B work).
+# Three operator modes (in yaml-priority order — first hit wins):
+#   (1) index_path_primary + index_path_secondary -> DualModeDecontaminationIndex
+#   (2) index_path                                -> single-mode (back-compat)
+#   (3) (none of the above)                       -> live-build (slow, ~5–15 min)
+#       — or fail-closed under --production.
+#
+# Pre-built indexes ship in R2 at decontamination/decontamination_index_{8,13}gram.json.
+# pod_launch_cpu.sh stages both into artifacts/ for offline reads.
 decontamination:
   enabled: true
-  ngram_size: 13
   hash_seed: 0xDECAF
-  # Set this to a pre-built index for fast pilot/base startup:
+  # Dual-mode (RECOMMENDED default for production / pilot / base):
+  index_path_primary:   artifacts/decontamination_index_8gram.json
+  index_path_secondary: artifacts/decontamination_index_13gram.json
+  # Single-mode (legacy back-compat — kept commented for reference):
   # index_path: artifacts/decontamination_index.json
+  # ngram_size is only consulted for the live-build fallback. The pre-built
+  # indexes carry their own ngram_size on load.
+  ngram_size: 13
   benchmarks:
     # Multilingual MCQ adapters (used via the heavyweight Benchmark adapter path)
     - id: mmlu-prox

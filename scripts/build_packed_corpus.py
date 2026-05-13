@@ -323,11 +323,49 @@ def main() -> int:
     if not args.no_decontam:
         decon_cfg = pretrain_mix.get("decontamination", {})
         if decon_cfg.get("enabled", False):
-            from myllm.data.decontamination import DecontaminationIndex
-            index_path = decon_cfg.get("index_path")
-            if index_path:
-                decontaminator = DecontaminationIndex.load_json(index_path)
-                log.info("decontamination_index_loaded", path=index_path)
+            from myllm.data.decontamination import (
+                DecontaminationIndex,
+                DualModeDecontaminationIndex,
+            )
+            # Three yaml configurations, in priority order:
+            #   1. index_path_primary + index_path_secondary  -> dual-mode
+            #   2. index_path                                 -> single-mode (back-compat)
+            #   3. (none of the above)                        -> warn / fail
+            #
+            # Dual-mode = 8-gram (high recall) + 13-gram (high precision)
+            # per reviewer Q7 (2026-05-12). Operators can run production
+            # with just one mode if cache size is a concern, but the
+            # recommended default is dual.
+            primary_path = decon_cfg.get("index_path_primary")
+            secondary_path = decon_cfg.get("index_path_secondary")
+            legacy_path = decon_cfg.get("index_path")
+
+            if primary_path and secondary_path:
+                primary = DecontaminationIndex.load_json(primary_path)
+                secondary = DecontaminationIndex.load_json(secondary_path)
+                decontaminator = DualModeDecontaminationIndex(
+                    primary=primary, secondary=secondary,
+                )
+                log.info(
+                    "decontamination_dual_mode_loaded",
+                    primary=primary_path,
+                    primary_ngram=primary.config.ngram_size,
+                    secondary=secondary_path,
+                    secondary_ngram=secondary.config.ngram_size,
+                )
+            elif primary_path or secondary_path:
+                # Only one of the dual paths set — load it as a single-mode index.
+                only = primary_path or secondary_path
+                decontaminator = DecontaminationIndex.load_json(only)
+                log.info(
+                    "decontamination_single_mode_loaded",
+                    path=only,
+                    ngram=decontaminator.config.ngram_size,
+                    note="dual-mode requested but only one path set",
+                )
+            elif legacy_path:
+                decontaminator = DecontaminationIndex.load_json(legacy_path)
+                log.info("decontamination_index_loaded", path=legacy_path)
             else:
                 # Same fail-closed gate as above, for the "enabled=true but
                 # no index" path. The default smoke/infra warning is

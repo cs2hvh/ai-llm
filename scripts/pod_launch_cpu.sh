@@ -155,14 +155,28 @@ fi
 log "tokenizer size: $(stat -c%s artifacts/tokenizer_v1.json) bytes"
 
 # ----------------------------------------------------------------------
-# 5. Optional: pre-built decontamination index
+# 5. Pre-built decontamination indexes (dual-mode default per reviewer Q7,
+#    2026-05-13). Tries dual-mode first; falls back to single-mode legacy
+#    key; finally allows live-build / --no-decontam.
 # ----------------------------------------------------------------------
-DECON_KEY="${MYLLM_DECON_INDEX_KEY:-decontamination/index_v1.json}"
-if aws --endpoint-url "$S3_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET/$DECON_KEY" \
+DECON_KEY_PRIMARY="${MYLLM_DECON_INDEX_KEY_PRIMARY:-decontamination/decontamination_index_8gram.json}"
+DECON_KEY_SECONDARY="${MYLLM_DECON_INDEX_KEY_SECONDARY:-decontamination/decontamination_index_13gram.json}"
+DECON_KEY_LEGACY="${MYLLM_DECON_INDEX_KEY:-decontamination/index_v1.json}"
+
+if aws --endpoint-url "$S3_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET/$DECON_KEY_PRIMARY" \
+        >/dev/null 2>&1 && \
+   aws --endpoint-url "$S3_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET/$DECON_KEY_SECONDARY" \
         >/dev/null 2>&1; then
-    log "pulling pre-built decontamination index"
+    log "pulling dual-mode decontamination indexes (8-gram + 13-gram)"
     aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
-        "s3://$S3_BUCKET/$DECON_KEY" artifacts/decontamination_index.json
+        "s3://$S3_BUCKET/$DECON_KEY_PRIMARY" artifacts/decontamination_index_8gram.json
+    aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
+        "s3://$S3_BUCKET/$DECON_KEY_SECONDARY" artifacts/decontamination_index_13gram.json
+elif aws --endpoint-url "$S3_ENDPOINT_URL" s3 ls "s3://$S3_BUCKET/$DECON_KEY_LEGACY" \
+        >/dev/null 2>&1; then
+    log "pulling legacy single-mode decontamination index"
+    aws --endpoint-url "$S3_ENDPOINT_URL" s3 cp \
+        "s3://$S3_BUCKET/$DECON_KEY_LEGACY" artifacts/decontamination_index.json
 else
     log "no pre-built decon index found; build will skip per-source decontamination "
     log "(or live-build is possible but slow; pass --no-decontam to be explicit)"
