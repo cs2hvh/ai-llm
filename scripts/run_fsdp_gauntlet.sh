@@ -73,9 +73,18 @@ if [[ -z "$MICRO_BATCH" ]]; then
 fi
 log "micro_batch (global, divisible by $GPU_COUNT): $MICRO_BATCH"
 
-# Common run_pretrain args used by every gate. --micro-batch-override
-# forces a value compatible with FSDP's data-axis sharding for this
-# GPU count. --synthetic-data avoids needing a real corpus on disk.
+# Common run_pretrain args used by every gate.
+#   --micro-batch-override : compatible with FSDP data-axis sharding
+#   --synthetic-data       : no real corpus required
+#   --checkpoint-root <fresh> + --checkpoint-every 999999:
+#       force EVERY gate to start fresh, never resume. Without this,
+#       a previous gauntlet run's step-50 checkpoint in
+#       artifacts/checkpoints/ causes the next G5 to "resume" at
+#       step 50 of 50 = training_complete with zero step events.
+#       (Bug observed 2026-05-13 on 2xH200 pod.)
+GAUNTLET_CKPT_ROOT="$RESULTS_DIR/run_pretrain_scratch"
+rm -rf "$GAUNTLET_CKPT_ROOT"
+
 COMMON_ARGS=(
     --model-config "$MODEL_CFG"
     --data-config "$DATA_CFG"
@@ -83,6 +92,8 @@ COMMON_ARGS=(
     --no-wandb
     --synthetic-data
     --micro-batch-override "$MICRO_BATCH"
+    --checkpoint-root "$GAUNTLET_CKPT_ROOT"
+    --checkpoint-every 999999
 )
 
 # Helper: gate-skipped check
