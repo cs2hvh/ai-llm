@@ -150,21 +150,32 @@ log "installing all deps in a single pip transaction (no --force-reinstall)"
 # produces CUDNN_STATUS_NOT_INITIALIZED at first kernel launch.
 unset LD_LIBRARY_PATH || true
 
+# Step 1: install everything EXCEPT torch via the normal index. This
+# brings in jax[cuda12]==0.4.38 + nvidia-cudnn-cu12==9.5.0.50 (pinned
+# in requirements-gpu.txt).
 pip install --no-cache-dir \
     -r requirements.txt \
     -r requirements-gpu.txt \
-    "torch>=2.4" "transformers>=4.45" "accelerate>=0.30"
+    "transformers>=4.45" "accelerate>=0.30"
 
-# Why torch+transformers+accelerate are installed HERE (not lazily in
-# run_teacher_audit.sh): when those packages install separately AFTER
-# jax, pip's resolver picks an older `nvidia-cudnn-cu12` that torch is
-# happy with (e.g. 9.1.0.70). That silently downgrades the cuDNN that
-# JAX bundled (9.5+), and any subsequent jax.jit call hits
-# CUDNN_STATUS_NOT_INITIALIZED. Installing in one transaction lets pip
-# resolve a single cuDNN version that satisfies both (typically 9.5+),
-# preventing the post-install downgrade. (Hit on the 2xH200 pod
-# 2026-05-13: gauntlet G1-G4 PASSed, then audit installed torch, then
-# G5 retry crashed on cuDNN init.)
+# Step 2: install torch from the CUDA 12.4 wheel index.
+# PyPI's default torch wheel is built against CUDA 12.9+, requiring
+# driver 12.9+. Most RunPod pods (incl. H200 SXM 2026-05-13 incident)
+# ship driver 12.8.x which CANNOT run a 12.9-built torch — torch.cuda
+# .is_available() returns False with the misleading message
+# "The NVIDIA driver on your system is too old (found version 12080)".
+# The cu124 wheel is forward-compat with any driver 12.4+, so it works
+# on driver 12.8 AND any newer pod. --no-deps avoids re-touching jax's
+# carefully-pinned cuDNN.
+pip install --no-cache-dir --no-deps \
+    "torch>=2.4,<2.7" \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Step 3: install torch's required nvidia-* libraries that --no-deps
+# skipped. cusparselt is the key one — torch 2.5+ links against it
+# but it's not in the default cuda12 set jax pulls. Without this,
+# `import torch` raises `ImportError: libcusparseLt.so.0`.
+pip install --no-cache-dir nvidia-cusparselt-cu12
 
 # ----------------------------------------------------------------------
 # 7. Optional: vLLM for the teacher audit

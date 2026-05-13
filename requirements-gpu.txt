@@ -18,6 +18,23 @@
 # namespace import issue. If 0.4.38 ever regresses, try 0.4.34 next.
 jax[cuda12]==0.4.38
 
+# Pin cuDNN to a version JAX 0.4.38 was built against. The latest
+# nvidia-cudnn-cu12 9.22.x is too new and trips a CUDNN_STATUS_NOT_INITIALIZED
+# at jax.jit time even though the symbol layout looks compatible.
+# (2xH200 incident 2026-05-13.)
+nvidia-cudnn-cu12==9.5.0.50
+
+# torch from PyPI default ships built for CUDA 12.9+ which requires
+# driver >= 12.9. RunPod pods commonly have driver 12.8.x, so install
+# torch from the cu124 index instead (forward-compatible with any
+# 12.4+ driver). The teacher audit needs torch + transformers +
+# accelerate; without this pin, the audit silently falls back to
+# CPU forward passes which take ~40 min per teacher. Specify the
+# index-url at install time, NOT in requirements-gpu.txt (pip flags
+# in requirements files are per-line and clutter):
+#   pip install --upgrade "torch>=2.4,<2.7" \
+#       --index-url https://download.pytorch.org/whl/cu124
+
 # FlashAttention via JAX-Pallas is built in; no separate dep needed.
 
 # Optional: TensorFlow GPU only if running TF-backed inference on the pod.
