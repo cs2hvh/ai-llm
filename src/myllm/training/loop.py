@@ -48,6 +48,11 @@ class LoopConfig:
     recovery_skip_batches: int = 100
     recovery_lr_decay: float = 0.5
     max_recoveries: int = 3
+    # Stage 1.5 decay-only pass support (2026-05-14): force the restored
+    # data_position cursor back to 0. Used when re-iterating an exhausted
+    # corpus for a decay-only continuation. Model weights + step counter
+    # still restore normally; only the data stream offset is rewound.
+    reset_data_position_on_resume: bool = False
 
 
 # State keys we persist + restore. Updated to match the post-mesh state schema.
@@ -138,6 +143,19 @@ def run(
                 msg="restored checkpoint predates P0-4 fix; data stream "
                     "will restart from offset 0. Distillation corpus-position "
                     "alignment may be off until next checkpoint cycle."
+            )
+            state["data_position"] = 0
+        if loop_config.reset_data_position_on_resume:
+            # Stage 1.5 decay-only pass: explicit data-position rewind
+            # requested. Logged loudly because this DOES affect the
+            # corpus alignment — the operator is doing it intentionally.
+            log.warning(
+                "data_position_reset_on_resume",
+                step=resume_step,
+                original=int(state["data_position"]),
+                msg="LoopConfig.reset_data_position_on_resume=True; "
+                    "data stream rewound to offset 0 with restored weights. "
+                    "Step counter and W&B continuation untouched.",
             )
             state["data_position"] = 0
     else:

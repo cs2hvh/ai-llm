@@ -1,0 +1,101 @@
+# Pilot 250M — Stage 1.5 DECAY-ONLY config (2026-05-14)
+#
+# Purpose: after the original pilot exhausted the corpus at step 151,990
+# (instead of the planned 229,000), it never reached the WSD decay phase.
+# Train loss was at ~2.4 smoothed, val_loss 2.878. This config does a
+# decay-only continuation pass: load the step-151,990 checkpoint, rewind
+# the data cursor (--reset-data-position-on-resume), and run with an LR
+# schedule that's pure decay from peak_lr to end_lr.
+#
+# Architecture IDENTICAL to pilot_250m.yaml — only lr_schedule differs.
+# Decay-only schedule math:
+#   total_steps = 171,990 (chosen so decay window = 20K steps)
+#   decay_fraction = 20000 / 171990 ≈ 0.1163
+#   warmup_steps = 0 (we're past it)
+#   stable phase spans 0 → 151,990 (we already trained through this in original pilot)
+#   decay phase spans 151,990 → 171,990 (20K new steps, LR decays from 3e-4 to 3e-5)
+#
+# Cost: ~$50, ~4-5 hours on 4×H200 SXM.
+# Expected outcome: val_loss drops 2.878 → ~2.5-2.6 (~0.3-0.4 nat improvement).
+
+name: myllm-pilot-250m-v1-decay
+arch: llama_decoder
+
+# Tokenizer — same as pilot_250m.yaml
+tokenizer:
+  r2_key: tokenizer/myllm-spm-unigram-131k-v2.json
+  vocab_size: 131072
+  byte_fallback: true
+
+# Architecture — IDENTICAL to pilot_250m.yaml (must match for checkpoint resume)
+layers: 16
+hidden_dim: 768
+ffn_dim: 3072
+num_heads: 12
+num_kv_heads: 4
+head_dim: 64
+vocab_size: 131072
+tie_embeddings: true
+
+context_length: 8192
+context_extension_target: 8192
+
+position: rope
+rope_base: 130000.0
+
+norm: rmsnorm
+norm_eps: 1.0e-5
+activation: swiglu
+
+init_std: 0.02
+scaled_init_for_residuals: true
+
+z_loss_coef: 1.0e-4
+qk_norm: true
+
+mup:
+  base_width: 256
+  apply_attn_output_mult: true
+  apply_ffn_output_mult: true
+  apply_lm_head_output_mult: true
+
+optimizer:
+  type: adamw
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 0.1
+  eps: 1.0e-8
+
+# DECAY-ONLY SCHEDULE — the only meaningful difference from pilot_250m.yaml
+#
+# At step 151990 (where we resume), decay phase begins. LR ramps DOWN
+# from peak_lr=3e-4 to end_lr = 3e-4 × 0.1 = 3e-5 over the next 20K steps.
+# No warmup (we're past it). The "stable" portion of the schedule is just
+# a historical artifact — the loop is already past step 2000 at resume.
+lr_schedule:
+  type: wsd
+  peak_lr: 3.0e-4
+  end_lr_ratio: 0.1
+  warmup_steps: 0            # was 2000 in pilot_250m.yaml; we're past warmup
+  decay_fraction: 0.1163     # = 20000 / 171990; decay begins at step 151990
+
+batch:
+  global_tokens: 4194304
+  sequence_length: 8192
+
+grad_clip_global_norm: 1.0
+mixed_precision: bfloat16
+
+# Token budget — not directly used (--total-steps controls)
+target_tokens_min: 600_000_000
+target_tokens_baseline: 650_000_000
+target_tokens_stretch: 700_000_000
+
+checkpoint_every_steps: 2000   # more frequent than original (1000) since the
+                               # run is much shorter (20K vs 229K steps)
+keep_last_n: 5
+keep_every_n_steps: 5000
+
+expected_pod: 4x_H200_SXM
+expected_hours_baseline: 4
+expected_cost_usd_baseline: 50

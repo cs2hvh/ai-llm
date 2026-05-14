@@ -73,9 +73,17 @@ def make_validation_loss_eval(
         raise ValueError("held_out_batches must contain at least one batch")
 
     def eval_fn(step: int, state: dict[str, Any]) -> dict[str, float] | None:
+        # 2026-05-14: same int32-overflow fix as the train loop (commit
+        # 9f442f7). train_step_fn JITs over state leaves and JAX
+        # defaults Python ints to int32, which overflows for
+        # data_position > 2^31 (~65K steps at mb=4, seq=8192). Eval
+        # was silently failing on every call post-step-65500 in the
+        # 2026-05-13 pilot. Shallow-copy state without data_position;
+        # the original in the loop is untouched.
+        eval_state = {k: v for k, v in state.items() if k != "data_position"}
         losses: list[float] = []
         for batch in held_out_batches:
-            _new_state, metrics = train_step_fn(state, batch)
+            _new_state, metrics = train_step_fn(eval_state, batch)
             loss = float(metrics.get("loss", float("nan")))
             if math.isfinite(loss):
                 losses.append(loss)

@@ -709,6 +709,17 @@ def main() -> int:
              "Default 8 = small enough that eval is <5%% of train cost, "
              "large enough for a stable mean estimate.",
     )
+    p.add_argument(
+        "--reset-data-position-on-resume",
+        action="store_true",
+        help="On checkpoint resume, force the data_position cursor back to "
+             "0 (start of corpus). Use for Stage 1.5 decay-only passes "
+             "after corpus exhaustion: load the final checkpoint's "
+             "weights but re-iterate the corpus from the start. The model "
+             "step counter still increments normally; only the data "
+             "iterator is rewound. Without this, an exhausted-corpus "
+             "resume immediately ends (iter has 0 remaining batches).",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -851,6 +862,19 @@ def main() -> int:
         # correct 128 / 32 = 4) so every resume re-consumed the last
         # already-trained-on sequence, silently corrupting training.
         resumed_data_position = peek_data_position_from_checkpoint(args.checkpoint_root)
+        if args.reset_data_position_on_resume:
+            # 2026-05-14: Stage 1.5 decay-only pass after corpus exhaustion.
+            # Load weights from the final checkpoint but re-iterate the
+            # corpus from the start. Step counter (state["step"]) is
+            # untouched — the WSD schedule's "where am I in training"
+            # logic stays consistent with the original run.
+            log.warning(
+                "data_position_reset_on_resume",
+                original=resumed_data_position,
+                msg="--reset-data-position-on-resume set; re-iterating "
+                    "corpus from sequence 0 with restored weights",
+            )
+            resumed_data_position = 0
         start_sid = sequence_id_from_data_position(
             resumed_data_position, model_input_len,
         )
@@ -1252,6 +1276,7 @@ def main() -> int:
         log_every=args.log_every,
         checkpoint_every=args.checkpoint_every,
         eval_every=args.eval_every,
+        reset_data_position_on_resume=args.reset_data_position_on_resume,
     )
     ckpt_cfg = CheckpointConfig(
         root=args.checkpoint_root,
