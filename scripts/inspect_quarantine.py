@@ -171,15 +171,35 @@ def _print_source_attribution(events: list[dict], corpus_root: Path) -> None:
                 else:
                     with _ipc.open_file(p) as reader:
                         tbl = reader.read_all()
-                        # source_id column may be a list-of-string for multi-doc packs;
-                        # take the first source per row as the dominant source.
-                        col = tbl.column("source_id") if "source_id" in tbl.column_names else None
-                        if col is None:
+                        # Composed corpus schema: each packed sequence is a MIX
+                        # of one or more sources (a packer fills 8193 tokens
+                        # from whichever doc fits next, then crosses doc
+                        # boundaries marked by EOS). source_mix_keys[i] +
+                        # source_mix_values[i] give per-source token counts
+                        # for sequence i. We take the source with the most
+                        # tokens as the dominant source.
+                        keys_col = tbl.column("source_mix_keys") if "source_mix_keys" in tbl.column_names else None
+                        vals_col = tbl.column("source_mix_values") if "source_mix_values" in tbl.column_names else None
+                        if keys_col is None or vals_col is None:
                             shard_cache[shard_id] = []
                         else:
-                            shard_cache[shard_id] = [
-                                (lst[0] if lst else "?") for lst in col.to_pylist()
-                            ]
+                            keys_list = keys_col.to_pylist()
+                            vals_list = vals_col.to_pylist()
+                            attribution = []
+                            for keys, vals in zip(keys_list, vals_list):
+                                if not keys:
+                                    attribution.append("<empty>")
+                                else:
+                                    # dominant = argmax(vals)
+                                    best_i = max(range(len(keys)), key=lambda i: (vals[i] if i < len(vals) else 0))
+                                    dom = keys[best_i]
+                                    if len(keys) == 1:
+                                        attribution.append(dom)
+                                    else:
+                                        # multi-source pack — annotate with the mix
+                                        mix_str = ",".join(f"{k}={v}" for k, v in zip(keys, vals))
+                                        attribution.append(f"{dom} [mix: {mix_str}]")
+                            shard_cache[shard_id] = attribution
             except Exception as e:  # noqa: BLE001
                 print(f"[shard-{shard_id:06d} seq_meta read failed: {e}]", file=sys.stderr)
                 shard_cache[shard_id] = []
@@ -190,6 +210,8 @@ def _print_source_attribution(events: list[dict], corpus_root: Path) -> None:
     print(f"sequence_length={seq_len}, sequences_per_shard={seqs_per_shard}, n_shards={n_shards}\n")
 
     counts: Counter = Counter()
+    dom_counts: Counter = Counter()  # dominant-source only, strips [mix: ...] annotation
+    multi_src_count = 0
     for e in events:
         dp = e.get("data_position")
         step = e.get("step", "?")
@@ -198,11 +220,18 @@ def _print_source_attribution(events: list[dict], corpus_root: Path) -> None:
         seq_id = int(dp) // seq_len
         shard_id, in_shard, src = get_source(seq_id)
         counts[src or "<unmapped>"] += 1
-        print(f"  step {step:>6} | seq_id {seq_id:>7} | shard-{shard_id:06d}[{in_shard:>5}] | source: {src}")
+        # Extract just the dominant source name (strip "[mix: ...]" suffix)
+        dom = (src or "<unmapped>").split(" [mix:")[0]
+        dom_counts[dom] += 1
+        if src and "[mix:" in src:
+            multi_src_count += 1
+        print(f"  step {step:>6} | seq_id {seq_id:>7} | shard-{shard_id:06d}[{in_shard:>5}] | {src}")
 
-    print(f"\nSource attribution summary:")
-    for src, n in counts.most_common():
+    print(f"\nDominant-source attribution summary:")
+    for src, n in dom_counts.most_common():
         print(f"  {str(src):40s}: {n}")
+    if multi_src_count:
+        print(f"\n({multi_src_count}/{len(events)} events were multi-source packs — the dominant source above is the one with the most tokens in the packed sequence)")
 
 
 def _print_token_decodes(events: list[dict], tokenizer_path: Path, n: int) -> None:
