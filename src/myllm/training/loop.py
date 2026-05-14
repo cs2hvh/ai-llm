@@ -190,7 +190,20 @@ def run(
                 except ImportError:
                     pass  # decay_phase tests without jax — let static alpha stand
 
+        # 2026-05-14 fix: `data_position` (cumulative tokens consumed) grows
+        # unbounded and exceeds JAX's default int32 capacity (2^31 = ~2.1B
+        # tokens) for any real training run. The pilot-250m-v1-2026-05-13
+        # run crashed at step ~65500 with "Python int 2147483648 too large
+        # to convert to int32" because train_step_fn JITs over state leaves
+        # and JAX forced int32 typing on the Python int.
+        #
+        # data_position isn't used INSIDE train_step — it's carried through
+        # state purely for checkpointing + decay-phase teacher-cache lookup.
+        # So we pop it before the JIT'd call and restore after. Stays a
+        # Python int (unbounded) the whole time; never touches JAX.
+        data_pos = state.pop("data_position", 0)
         state, metrics = train_step_fn(state, batch)
+        state["data_position"] = int(data_pos)
         loss = float(metrics["loss"])
         nan_skipped = float(metrics.get("nan_skipped", 0.0))
 
