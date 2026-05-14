@@ -2,23 +2,27 @@
 
 **For the next session (you or another Claude) picking this up.** Read this first; it's the canonical resume pointer for whatever state the project is in.
 
-**Last update:** 2026-05-14 13:00 UTC, mid Stage 1 pilot.
-**Author:** Session that's running the live pilot. Replaces `docs/SESSION_STATE_2026-05-13.md`.
+**Last update:** 2026-05-14 22:00 UTC, **post-pilot**. Pilot completed at step 151,990 due to corpus exhaustion. Stage 1.5 decay-only continuation pass is **scaffolded but not yet launched** — pending user decision.
+**Author:** Session that ran the pilot end-to-end. Replaces `docs/SESSION_STATE_2026-05-13.md`. Sections §0–§12 are the original handoff (still valid for orientation); see §13 below for "what happened next."
 
 ---
 
-## 0. TL;DR — read this if nothing else
+## 0. TL;DR — read this if nothing else (UPDATED 22:00 UTC)
 
 - **Project**: MyLLM — solo-lead enterprise effort to train a 1B-param decoder-only LLM from scratch. Llama-style, JAX/Keras 3, 131k vocab, ctx=8192.
-- **Right now**: Stage 1 pilot (250M model) is **RUNNING on 4×H200 SXM** at step ~82K / 229K (~36% done, loss ~2.66). W&B run: [`roydqofb`](https://wandb.ai/harshit-hvpals-ahurasense/myllm/runs/roydqofb). ETA finish ~04:20 UTC 2026-05-15.
-- **All artifacts on R2** at `s3://llm-data/`. Checkpoints mirrored every 5000 steps (16 so far at step-80K).
-- **Critical bug fixed today**: int32 overflow of `data_position` (commit `9f442f7`). Pilot resumed cleanly from step-65000 checkpoint after the crash.
-- **Hold pilot launch decisions** until friend's review of `docs/review/STATUS_2026-05-13.md` lands. Already running anyway — user chose to override the hold last night.
+- **Pilot is DONE.** Stage 1 (250M model) trained to step **151,990 of planned 229,000** — corpus exhausted before reaching the planned step count.
+- **Final loss**: train smoothed ~2.4, **val_loss 2.878, val_ppl 17.77** (post-hoc eval via `scripts/eval_checkpoint.py` at commit `70b9009`).
+- **WSD decay phase never reached** — corpus exhausted in the stable phase. Model trained at peak LR throughout, never got the "settle into local minimum" benefit.
+- **Stage 1.5 decay-only continuation pass is scaffolded** (commit `dd7b202`) — `configs/pilot_250m_decay.yaml` + `--reset-data-position-on-resume` CLI flag + eval-hook int32 fix. **NOT YET LAUNCHED.** Decision: ship-as-is vs run-decay-pass is open.
+- **All artifacts on R2** at `s3://llm-data/`. Final checkpoint at `s3://llm-data/checkpoints/pilot-250m-v1/step-000151990/`. eval-final.json at `/workspace/eval-final.json` on the pod (NOT yet uploaded to R2).
+- **Two W&B runs** for the pilot due to the int32 crash + resume: `roydqofb` (pre-crash, steps 0–65,500) and `u5xsxm0l` (post-resume, steps 65,000–151,990). Both finalized.
+- **Three production bugs fixed during the run**: int32 data_position overflow in train loop (`9f442f7`), int32 in eval-hook path (`dd7b202`), the eval-on-resume silent failure (same `dd7b202`).
+- **Critical Stage 2/3 finding**: pilot corpus is single-epoch only at this batch size. For runs > 152K steps at mb=4, we need multi-epoch iteration or a bigger corpus.
 
 If you're picking this up cold, you only need:
-1. Read this doc (~10 min)
+1. Read this doc (~15 min — §0, §1, §13 in particular)
 2. Glance at `docs/PROJECT_OVERVIEW.md` for project canon (~10 min)
-3. Glance at W&B run for current state (~1 min)
+3. Glance at W&B runs (`roydqofb` + `u5xsxm0l`) for the curves
 
 ---
 
@@ -433,3 +437,219 @@ tmux attach -t pilot
 - **Friend reviewer**: external, async via the `docs/review/` packets
 
 When the next session opens, your first action should be reading this doc + `docs/PROJECT_OVERVIEW.md`, then glancing at the W&B run. If you have questions a doc doesn't answer, the user's auto-memory at `/root/.claude/projects/-root/memory/` will likely have the call-pattern history.
+
+---
+
+## 13. POST-PILOT UPDATE (2026-05-14 ~22:00 UTC)
+
+This section captures what happened AFTER §1–§12 were written. Read this for the current state of the project.
+
+### 13.1 Pilot completion — corpus exhausted early
+
+The pilot completed at **step 151,990** instead of the planned 229,000. Cause:
+
+```
+Corpus: 608,088 sequences × 8192 tokens = 4.98 B tokens
+mb_global = 4 (--micro-batch-override 4) → 4 sequences per step
+Steps to exhaust corpus = 608,088 / 4 = 152,022
+```
+
+The data iterator hit end-of-corpus at step 151,990 (32 steps before the calculated exhaustion point — minor accounting for the eval hook's held-out batches), and `training_complete` fired cleanly with `final_step: 151990`. No crash, just an early-stop on data exhaustion.
+
+**Implications:**
+- **WSD decay phase never reached.** Decay was scheduled at `total_steps × (1 - decay_fraction) = 229000 × 0.85 = 194,650`. The model trained at full peak LR (3e-4) for the entire stable phase, never getting the "model settles into local minimum" benefit.
+- **Final train loss**: smoothed ~2.4 (last 100 steps showed 2.11–2.73 oscillation).
+- **NaN events**: 288 total, 1.9/1000 rate — healthy. Watchdog never triggered hard rollback; `lr_recovery_multiplier=1.0` throughout.
+- **W&B run split**: the int32 crash + resume at step ~65K created a SECOND W&B run (`u5xsxm0l`) instead of continuing `roydqofb`. Both are finalized; the curves are split across them.
+
+### 13.2 Post-hoc eval results (commit `70b9009`)
+
+Built `scripts/eval_checkpoint.py` to compute val_loss/val_ppl on any saved checkpoint without re-launching training. Loads weights from Orbax checkpoint, iterates the first N batches of the corpus (the original held-out set), computes mean CE + perplexity.
+
+Ran against the final checkpoint (step 151,990):
+
+```
+==============================================
+checkpoint   : step-000151990
+n_batches    : 32 (matches the in-training hook's held-out set)
+micro_batch  : 4
+val_loss     : 2.877632
+val_ppl      : 17.7721
+==============================================
+```
+
+**Comparison to in-training eval points** (pre-crash, last 3):
+- step 55,000: val_loss=2.951, val_ppl=19.13
+- step 60,000: val_loss=2.992, val_ppl=19.93
+- step 65,000: val_loss=2.975, val_ppl=19.59
+- **step 151,990: val_loss=2.878, val_ppl=17.77** ← post-hoc
+
+So between step 65K (last in-training eval) and step 152K, val_loss improved by **0.10 nats / val_ppl reduced 9%**. Train-val gap is 0.48 nats (smoothed train 2.4 vs val 2.88) — borderline acceptable for a pilot. The eval result has been written to `/workspace/eval-final.json` on the pod but **NOT yet uploaded to R2** (todo).
+
+### 13.3 Bugs discovered + fixed during the run
+
+**Bug 1: int32 overflow of `data_position` in train_step** (fixed in commit `9f442f7`)
+- `state["data_position"]` exceeds `2^31 = 2,147,483,648` at step ~65,536 (mb=4 × seq=8192 = 32,768 tokens/step). JAX default-types Python ints as int32 when tracing inputs to JIT'd functions. Crash:
+  ```
+  OverflowError: Python int 2147483648 too large to convert to int32
+  ```
+- Fix at `src/myllm/training/loop.py:193`: pop `data_position` from a shallow state copy before each `train_step_fn` call, restore as Python int after. data_position is not used INSIDE train_step (just carried through state for checkpointing).
+
+**Bug 2: same int32 issue in the eval hook** (fixed in commit `dd7b202`)
+- `src/myllm/training/eval_hook.py:make_validation_loss_eval` re-uses `train_step_fn` for eval but didn't apply the same pop. Result: post-resume evals silently failed (`eval_failed_non_fatal` warnings; no `eval` events).
+- Fix at `src/myllm/training/eval_hook.py:75-85`: same shallow-copy-without-data_position pattern.
+
+**Bug 3: silent eval failure post-resume**
+- Compound effect of Bug 2: the in-training eval hook fired at the expected intervals but always raised, caught by the loop's try/except, logged as `eval_failed_non_fatal` warnings. No `eval` events appeared in the log past step 65,000.
+- That's why `tail -3` of the `eval` events shows only steps 55K/60K/65K — every post-resume eval was silently broken.
+
+### 13.4 Stage 1.5 decay-only pass — SCAFFOLDED (commit `dd7b202`), launch pending
+
+The pilot result is borderline under-converged because WSD decay never ran. A Stage 1.5 continuation pass loads the step-151,990 checkpoint, rewinds the data cursor, and runs ~20K more steps at a decaying LR (3e-4 → 3e-5).
+
+**Files added/changed in commit `dd7b202`:**
+- `src/myllm/training/loop.py` — `LoopConfig.reset_data_position_on_resume: bool = False`. When `True`, the restore code in `run()` rewinds `state["data_position"]` to 0 after loading the checkpoint. Logs `data_position_reset_on_resume` warning.
+- `scripts/run_pretrain.py` — new CLI flag `--reset-data-position-on-resume`. Wired both to LoopConfig AND to the packed-corpus iterator's `start_sequence_id` resolution (both need to reset; otherwise iterator and state disagree on next checkpoint).
+- `src/myllm/training/eval_hook.py` — int32 bug fix (Bug 2 above).
+- `configs/pilot_250m_decay.yaml` — same architecture as pilot_250m.yaml but with `lr_schedule.warmup_steps: 0` and `lr_schedule.decay_fraction: 0.1163`. With `--total-steps 171990`, decay phase covers steps 151,990 → 171,990.
+
+**Schedule math** (so the next session can verify):
+- total_steps = 171,990
+- decay_fraction = 20000 / 171990 = 0.1163
+- decay starts at: total_steps × (1 − decay_fraction) = 171,990 × 0.8837 = 151,990 ✓
+- decay window: 20,000 steps from step 151,990 to 171,990
+- LR walks linearly from peak_lr=3e-4 down to peak_lr × end_lr_ratio = 3e-5
+
+**Launch command (NOT YET RUN):**
+```bash
+# Pre-stage the checkpoint into a fresh dir so we don't overwrite the original
+mkdir -p /workspace/ckpt/pilot-250m-v1-decay
+cp -r /workspace/ckpt/pilot-250m-v1/step-000151990 /workspace/ckpt/pilot-250m-v1-decay/
+
+# Launch in tmux
+tmux new -s decay
+python scripts/run_pretrain.py \
+    --model-config configs/pilot_250m_decay.yaml \
+    --data-config configs/data/pretrain_mix_pilot.yaml \
+    --tokenizer-path artifacts/tokenizer_v1.json \
+    --packed-corpus-root /workspace/corpus_pilot_train \
+    --run-name pilot-250m-v1-decay-2026-05-14 \
+    --total-steps 171990 \
+    --micro-batch-override 4 \
+    --log-every 100 \
+    --eval-every 1000 \
+    --eval-n-batches 32 \
+    --checkpoint-every 2000 \
+    --checkpoint-root /workspace/ckpt/pilot-250m-v1-decay \
+    --checkpoint-r2-prefix checkpoints/pilot-250m-v1-decay \
+    --reset-data-position-on-resume \
+    2>&1 | tee /workspace/pilot-decay.log
+```
+
+**Cost / wall**: ~2 hours, ~$30 on 4×H200 SXM.
+
+**Expected outcome** (calibrated honestly after literature recheck):
+- val_loss after decay: realistically **2.65–2.75** (NOT 2.4–2.5 — I was optimistic in my first projection to the user)
+- val_ppl after decay: ~14–16
+- Improvement: 0.13–0.23 nats vs current 2.878
+
+The primary motivation for running Stage 1.5 is NOT the loss number (small gain). The real reasons:
+1. **Validates the WSD decay code path** — currently zero production runtime confirmation. Stage 3's $13K base run depends on this code working.
+2. **Validates the eval-hook int32 fix** — committed as a code change but never executed in production.
+3. **Validates the `--reset-data-position-on-resume` flag** — same.
+
+User has been informed of the honest expected outcome. **Decision is open** — either run Stage 1.5 (~$30) or ship-as-is.
+
+### 13.5 Stage 2/3 corpus capacity finding — CRITICAL FOR PLANNING
+
+The pilot's "training stopped early" surprise revealed a real planning issue:
+
+```
+Pilot corpus: 4.98 B tokens, 608K sequences at seq_len=8192
+mb_global = 4 → 1 sequence per device per step (DP=4)
+Max steps before corpus exhaustion = 152K
+Stage 3 target: 600 B tokens / 30 days base run = ~18M steps at this batch size
+```
+
+**The current `PackedCorpusReader` is single-epoch.** When it hits end-of-corpus, the loop exits with `training_complete`. There's no looping back to start.
+
+For Stage 2 (1B model rehearsal at 10–30B tokens):
+- 30B tokens / 32,768 tokens-per-step = 916K steps. **6× the pilot corpus.** Need either a much bigger Stage 2 corpus OR multi-epoch iteration.
+
+For Stage 3 (1B base at 600B tokens):
+- 600B tokens / 32,768 = 18.3M steps. **120× the pilot corpus.** Need a much larger v2 corpus build (not the pilot corpus).
+
+**Action required before Stage 2 launch:**
+- Option A: build a larger Stage 2 corpus (~30B+ tokens). Substantial — would re-build all 13 sources at higher per-source targets.
+- Option B: add multi-epoch support to `PackedCorpusReader`. Easier (a couple of hours engineering) but model sees each doc multiple times.
+- Option C: Stage 2 rehearsal accepts single-epoch and is sized to the available corpus (~5B tokens for 250M, or proportionally larger for 1B).
+
+Recommendation: Option B is the right path. Multi-epoch is standard practice and pre-Chinchilla wasn't an issue. With our small corpus, we'd typically see each doc 2-4 times anyway.
+
+**This belongs in the Stage 2 prep todos**, joining P0-1, P0-2, P0-3, G6 reshard, FSDP eval.
+
+### 13.6 Recent commits (between the previous handoff and now)
+
+| Hash | Subject |
+|---|---|
+| `dd7b202` | **Stage 1.5: decay-only continuation pass scaffolding** |
+| `70b9009` | scripts/eval_checkpoint.py — post-hoc val_loss/val_ppl from any checkpoint |
+| `9f442f7` | loop: fix int32 overflow of data_position at ~2.1B tokens |
+
+All on `main`, all pushed to `origin/main`.
+
+### 13.7 Updated open todos (as of 22:00 UTC)
+
+Critical path:
+1. **Decide: run Stage 1.5 or ship pilot as-is** (USER) — affects model card writeup
+2. **If Stage 1.5**: launch via the command in §13.4, wait ~2 hr, run `eval_checkpoint.py` against the post-decay checkpoint
+3. **Upload `/workspace/eval-final.json` to R2** (small, ~1 KB; add to `s3://llm-data/checkpoints/pilot-250m-v1/step-000151990/`)
+
+Stage 2 prep (in addition to existing items):
+4. **Multi-epoch support in PackedCorpusReader** (Option B above) — Stage 2 blocking unless we accept Option C
+5. Original Stage 2 prep items: P0-1 (per-source val loss), P0-2 (production flag), P0-3 (packed-resume safety), G6 reshard, forward-only eval_step (Bug 2 from §13.3 superseded part of this)
+
+Polish:
+6. Bump R2 `max_pool_connections=50+` (still pending; cosmetic checkpoint-upload spam)
+7. Update `docs/PROJECT_OVERVIEW.md` to reflect pilot completion + val_loss number
+8. Update `docs/governance/model_card_v1.md` with real numbers (pending Stage 1.5 decision)
+9. Write release scorecard `predict_fn` (currently NotImplementedError stub)
+10. `tests/test_docs_config_sync.py` + RoPE drift fix
+11. `S3 streaming for PackedCorpusReader`
+
+### 13.8 Where the pod state stands
+
+The 4×H200 SXM pod from the pilot is still up as of writing. Has:
+- `/workspace/llm-build/` with code at commit `dd7b202` (after `git pull`)
+- `/workspace/corpus_pilot_train/` with the 20 GB corpus (verified 10/10 shards)
+- `/workspace/ckpt/pilot-250m-v1/` with all checkpoints (5K → 151,990, ~42 GB)
+- `/workspace/eval-final.json` with the post-hoc eval result
+- `/workspace/pilot.log` with the full pilot training log (with both pre-crash and post-resume sections)
+
+If the user runs Stage 1.5, the pod will continue to be used. If they ship-as-is, the pod can be torn down (everything important is on R2 + GitHub).
+
+### 13.9 One thing the next session should NOT do
+
+**Do not re-trigger the pilot training run on the same `--checkpoint-root` without `--reset-data-position-on-resume`.** The pilot already exhausted the corpus at step 151,990. Resuming without resetting will immediately fire `training_complete` (zero new steps consumed; iterator empty).
+
+If you want to continue the pilot's TRAINING (vs decay-only), you'd need a multi-epoch corpus reader (todo #4 in §13.7) or a fresh corpus.
+
+### 13.10 Summary for the next session
+
+- **Pilot done.** val_loss 2.878 / val_ppl 17.77.
+- **Stage 1.5 ready to launch** but not started. User decision pending.
+- **Three bugs fixed**, code at `dd7b202` on `main`.
+- **Multi-epoch corpus** is the big Stage 2-blocking finding.
+- All artifacts safe on R2.
+
+If you're resuming with no context, your first command is:
+
+```bash
+ssh <pod>
+tmux ls   # see what's running
+tail -50 /workspace/pilot.log   # see where the pilot ended
+cat /workspace/eval-final.json   # see the val_loss number
+git -C /workspace/llm-build log --oneline -5   # see recent commits
+```
+
+That gets you oriented in 2 minutes.
