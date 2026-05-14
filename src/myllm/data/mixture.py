@@ -44,7 +44,7 @@ KNOWN LIMITATION (2026-05-12 review 3):
 
     True token-share enforcement requires measuring on PRE-TOKENIZED shards.
     This is handled in the B2 offline packed-corpus path (see
-    ``docs/plan_v3_after_review3.md`` §4): once tokens are materialized to
+    ``src/myllm/data/packed_corpus.py`` §4): once tokens are materialized to
     disk, the mixture sampler can read shard manifests and emit exact
     token-share by sampling pre-tokenized sequences. The live HF-stream path
     above stays as the wind-tunnel/smoke-test path with the char-proxy.

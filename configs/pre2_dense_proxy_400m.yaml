@@ -1,0 +1,73 @@
+# Planning config for pre-2 proxy studies.
+# Target use: tokenizer, data mix, LR, and stability ablations before the 1.5B run.
+
+schema_version: 0.1
+status: planning
+name: myllm-pre2-dense-proxy-400m
+stack: torchtitan
+
+model:
+  architecture: decoder_only_transformer
+  parameter_target: 380_000_000
+  layers: 16
+  hidden_dim: 1024
+  ffn_dim: 4096
+  activation: swiglu
+  norm: rmsnorm
+  norm_eps: 1.0e-5
+  qk_norm: true
+  attention:
+    type: gqa
+    num_heads: 16
+    num_kv_heads: 4
+    head_dim: 64
+  position:
+    type: rope
+    rope_base: 1_000_000
+  embeddings:
+    tied: true
+  tokenizer:
+    candidates: [64_000, 96_000, 131_075]
+    current_reference_vocab_size: 131_075
+  context:
+    foundation_length: 8192
+
+training:
+  dtype: bf16
+  objective:
+    next_token_ce: true
+    z_loss_coef_ablations: [1.0e-5, 1.0e-4, 1.0e-3]
+  optimizer:
+    type: adamw
+    beta1: 0.9
+    beta2: 0.95
+    weight_decay: 0.1
+    grad_clip_global_norm: 1.0
+  scheduler:
+    type: wsd
+    peak_lr_ablations: [2.0e-4, 3.0e-4, 5.0e-4]
+    warmup_steps_range: [1000, 3000]
+    decay_fraction: 0.10
+  batch:
+    global_batch_tokens: 1_048_576
+    sequence_length: 8192
+    example_4gpu:
+      micro_batch_sequences_per_gpu: 1
+      grad_accum_steps: 32
+  token_budget:
+    smoke: 1_000_000_000
+    study_minimum: 10_000_000_000
+    study_target: 30_000_000_000
+    study_stretch: 50_000_000_000
+
+parallelism:
+  strategy: single_gpu_or_fsdp2
+  checkpointing: pytorch_distributed_checkpointing
+  purpose: proxy studies before the 1.5B run
+
+study_outputs:
+  - tokenizer_fertility_report
+  - validation_loss_by_source_bucket
+  - eval_scorecard_proxy
+  - throughput_report
+  - data_mix_recommendation

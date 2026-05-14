@@ -1,87 +1,86 @@
-# MyLLM — sovereign 1B decoder-only LLM
+# MyLLM
 
-Build pipeline for a from-scratch 1B-parameter decoder-only transformer.
-Master plan: [`/root/PLAN.md`](../PLAN.md).
+Research and training stack for a sovereign small foundation model.
 
-## Quickstart (orchestration VM)
+Current repository posture:
+
+- `pre-1`: existing Keras/JAX pilot and validation stack.
+- `pre-2`: planned production-grade redesign around a dense 1.5B-class model trained on 1.5T+ tokens.
+
+## Current Plans
+
+- [Project overview](docs/PROJECT_OVERVIEW.md)
+- [Pre-2 final architecture and training plan](docs/PRE2_FINAL_PLAN_2026-05-14.md)
+- [Pre-2 architecture decision record](docs/PRE2_ARCHITECTURE_DECISION.md)
+- [Pre-2 stack migration plan](docs/PRE2_STACK_MIGRATION_PLAN.md)
+- [Pre-2 module TODO backlog](docs/PRE2_MODULE_TODO_2026-05-14.md)
+- [Pre-2 release and launch plan](docs/PRE2_RELEASE_PLAN.md)
+- [Stage 3 data-prep Rust migration plan](docs/stage3_rust_migration_plan.md)
+- [Governance docs](docs/governance/README.md)
+- [Safety policy](docs/safety_policy.md)
+
+## Current Pre-2 Decision
+
+- Mainline architecture: dense decoder-only Transformer, approximately 1.49B parameters.
+- Training target: 1.5T tokens, with 1.0T internal minimum and 3.0T stretch.
+- Training stack: PyTorch 2.12+, TorchTitan, FSDP2, DTensor, Distributed Checkpointing.
+- Data: staged portfolio built from high-quality educational web, curated web, multilingual/Indic, code, math/STEM, books/reference, Q&A/documentation, and bounded tagged synthetic data.
+- Precision: train canonical base in BF16 first; evaluate FP8 training later; release BF16 plus quantized FP8/INT8/4-bit variants after calibration and eval.
+- Distillation: heterogeneous-tokenizer top-K logit distillation is disabled. Use teacher-generated text/reasoning traces or same-tokenizer logit KD only.
+- MoE: not the default. Treat 1B-active / 6B-8B-total MoE as a separate research branch.
+
+Pre-2 config artifacts are present as planning contracts:
+
+- `configs/pre2_dense_1_5b.yaml`
+- `configs/pre2_dense_canary_110m.yaml`
+- `configs/pre2_dense_poc_250m.yaml`
+- `configs/pre2_dense_proxy_400m.yaml`
+- `configs/pre2_moe_1b_active_research.yaml`
+- `configs/data/pre2_mix_stage1.yaml`
+- `configs/data/pre2_mix_stage2.yaml`
+- `configs/data/pre2_mix_anneal.yaml`
+
+These pre-2 configs are not consumed by the existing pre-1 JAX/Keras entrypoints.
+
+## Repository Layout
+
+```text
+configs/          pre-1 runnable YAML plus pre-2 planning contracts
+docs/             current planning, governance, safety, and migration docs
+scripts/          training, corpus build, eval, audit, and utility CLIs
+src/myllm/        tokenizer, data, model, training, eval, and orchestration code
+tests/            unit and integration tests
+```
+
+## Quickstart
 
 ```bash
-# Python 3.11+ recommended. Create venv and install runtime deps.
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -r requirements.txt
-
-# Smoke-test the environment (no GPU needed):
+pip install -e ".[dev,pre2]"
 python scripts/smoke_test_env.py
-
-# Run the unit + integration test suite (~7s, 370 tests):
 python -m pytest
 ```
 
-GPU pods on RunPod use a different lockfile — see `requirements-gpu.txt`. Pod bootstrap is automated via `scripts/bootstrap_pod.sh` (invoked by `pod_launch.sh` on first SSH).
+For Windows PowerShell, activate with `.\.venv\Scripts\Activate.ps1` and run the same `python -m pip` commands.
 
-## Layout
+`requirements.txt` mirrors the pre-1 CPU/orchestration dependencies. `requirements-gpu.txt` is the existing pre-1 GPU pod profile for the JAX/Keras stack plus teacher-audit PyTorch. It is not the final pre-2 TorchTitan/PyTorch 2.12+ training image lock; that lock is a P0/P1 pre-2 deliverable.
 
-```
-src/myllm/
-  tokenizer/      SPM-Unigram training + validation
-  data/           streaming loaders, filters, dedupe, mixing, packing,
-                  decontamination, prompt loaders, teacher cache
-  model/          Keras 3 layers (RoPE, RMSNorm, GQA, SwiGLU, decoder)
-  training/       JAX mesh, train loop, optimizer (muP), Orbax checkpoint,
-                  WSM merge, decay-phase distillation, quarantine writer
-  eval/           lm-eval-harness wrapper + multilingual benchmark adapters
-  post_train/     SFT / DPO / reasoning / safety / tools / RAG (Phase 4)
-  quantize/       GGUF export (Phase 6)
-  runpod_orch/    RunPod SDK orchestration
-configs/          YAML configs per phase (wind_tunnel, pilot_250m, base_1b,
-                  decay_phase_distillation, data/pretrain_mix)
-scripts/          one-shot CLIs (run_pretrain, wind_tunnel_sweep,
-                  build_decontamination_index, render_governance_cards, ...)
-tests/            unit + integration tests (370 passing)
-docs/             phase runbooks + governance + external reviews
-docs/governance/  EU AI Act / ISO 42001 / NIST AI RMF / DPDP artifacts
-artifacts/        local artifacts (gitignored — push to R2 instead)
+After installing dependencies, validate the pre-2 planning configs with:
+
+```bash
+python scripts/pre2_config_check.py
+python scripts/pre2_config_check.py --include-poc-ladder
+python scripts/pre2_source_registry_check.py
 ```
 
-## Stack
+Run the isolated pre-2 PyTorch smoke without touching the old JAX trainer:
 
-- **Modeling**: Keras 3 with **JAX backend** (`KERAS_BACKEND=jax`). JAX is the only realistic path to FSDP-style sharding at 1B without months of custom DTensor work — see PLAN.md §3.
-- **Optimizer**: AdamW via Optax, muP per-parameter LR scaling through `optax.multi_transform`.
-- **Checkpointing**: Orbax sharded, manifest-as-completion-marker for atomic R2 mirror.
-- **Distillation**: top-K=8 cached teacher logits (bf16 packed in uint16) in Arrow shards; decay-phase activation at 0.85 × total_steps with α annealing 0.7 → 0.3.
-- **Decontamination**: 13-gram xxhash64 index over 11 v1-gate benchmarks (MMLU-ProX/Pro, Belebele, MILU, HumanEval+, MBPP+, GSM8K, MATH, MGSM, BBH, IFEval).
-- **Tokenizer**: SentencePiece Unigram, 131k vocab, NFKC + Metaspace + byte_fallback.
-
-## Current status (2026-05-12)
-
-| Phase | Status |
-|---|---|
-| 0 — bootstrap, RunPod orchestration smoke | ✅ done |
-| 1 — production tokenizer (131k SPM-Unigram) | ✅ shipped |
-| 2 — wind-tunnel sweep (Proxy A 67M + Proxy B 300M) | 🟡 sweep terminated; muP transfer validation pending Proxy B |
-| 3 — pilot 250M | ⏳ pending B2 (offline packed corpus) |
-| 4 — base 1B "internal v1" at 1T tokens | ⏳ pending Phase 3 |
-| 5 — post-training (SFT/DPO/safety) | ⏳ |
-| 6 — serving + quantization (GGUF) | ⏳ |
-
-### Recent work (latest first)
-
-- **2026-05-12** — Reviewer Q&A locked B2 design (uint32 tokens, 512M-token shards, simple seek index, sharded CPU workers w/ Rust tokenizers). See [`docs/reviewer_qa_2026-05-12.md`](docs/reviewer_qa_2026-05-12.md).
-- **2026-05-12** — Red tests for the 4 "full-scale-only bug" coverage gaps + quarantine graceful-degradation fix. See [`docs/full_scale_bug_coverage_2026-05-12.md`](docs/full_scale_bug_coverage_2026-05-12.md). 370 tests passing.
-- **2026-05-12** — P2 governance: decontamination extended to 11 benchmarks; auto-render of model_card/data_card from live configs (`scripts/render_governance_cards.py`).
-- **2026-05-12** — Phase B re-audit fixes: state-dict preservation in `train_step`, data_position advancement in stable phase, micro_batch resolver, WSM merge template.
-- **2026-05-12** — Teacher plan v2 locked: DeepSeek-V4-Pro-Base (MIT) + Olmo-3-32B (Apache-2.0). Mistral + Qwen3.6 dropped after license/modality verification. See [`docs/teacher_distillation_strategy.md`](docs/teacher_distillation_strategy.md).
-- **2026-05-12** — Phase B batch 1: Orbax template-aware restore (B1), decay-phase activation + α-annealing (B7/B8), quarantine writer (B6), governance scaffolding (B9).
-- **2026-05-12** — Phase A: 6 P0 integration bugs fixed (atomic NaN-skip, segment_ids end-to-end, sequence-length resolver, alpha-from-batch, token-weighted mixture sampling, bf16 teacher-cache dtype fix).
-
-See [`docs/project_handoff_2026-05-11.md`](docs/project_handoff_2026-05-11.md) for the full context dump (handoff brief).
-
-## External reviews (audit trail)
-
-- [`docs/MyLLM_Repo_Technical_Review_2026-05-12.docx`](docs/MyLLM_Repo_Technical_Review_2026-05-12.docx) — first colleague's code review
-- [`docs/external_review_2026-05-12_enterprise.md`](docs/external_review_2026-05-12_enterprise.md) — enterprise strategy review
-- [`docs/reviewer_qa_2026-05-12.md`](docs/reviewer_qa_2026-05-12.md) — follow-up Q&A locking B2 design choices
-
-Per the "verify-before-locking" rule, every external claim that influenced a code or config change has been WebFetch-verified before the lock.
+```bash
+python scripts/pre2_train.py --steps 1 --device cpu
+python scripts/pre2_train.py --steps 1 --device cpu --precision config
+python scripts/pre2_train.py --steps 1 --device cpu --checkpoint-dir artifacts/pre2-smoke-ckpt
+python scripts/pre2_train.py --steps 1 --device cpu --resume-from-checkpoint artifacts/pre2-smoke-ckpt
+python scripts/pre2_eval_toy.py --checkpoint-dir artifacts/pre2-smoke-ckpt --device cpu
+```

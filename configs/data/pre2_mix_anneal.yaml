@@ -1,0 +1,45 @@
+# Pre-2 Stage 3 anneal data planning mix.
+# Highest-quality late distribution. Planning only.
+
+schema_version: 0.1
+status: planning
+name: pre2_mix_stage3_anneal
+target_tokens: 150_000_000_000
+synthetic_cap: 0.10
+
+source_buckets:
+  - bucket: highest_quality_educational_web
+    target_share: 0.38
+    allowed_range: [0.35, 0.45]
+  - bucket: code_documentation
+    target_share: 0.21
+    allowed_range: [0.20, 0.25]
+  - bucket: math_stem_reasoning
+    target_share: 0.16
+    allowed_range: [0.15, 0.20]
+  - bucket: books_reference_long_documents
+    target_share: 0.11
+    allowed_range: [0.10, 0.15]
+  - bucket: multilingual_indic
+    target_share: 0.07
+    allowed_range: [0.05, 0.10]
+  - bucket: synthetic_reasoning_textbook_traces
+    target_share: 0.07
+    allowed_range: [0.05, 0.10]
+
+anneal_rules:
+  lr_phase: final_decay
+  exclude_low_quality_tail: true
+  require_eval_decontam: true
+  require_source_manifest_hashes: true
+  preserve_language_mix_floor: true
+
+optional_context_continuation:
+  target_tokens_range: [50_000_000_000, 100_000_000_000]
+  sequence_lengths: [16_384, 32_768]
+  buckets:
+    - books_reference_long_documents
+    - code_repositories
+    - long_web_documents
+    - papers
+    - long_document_qa

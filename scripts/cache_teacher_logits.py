@@ -3,7 +3,7 @@
 
 Runs one teacher model (loaded from HuggingFace) over a corpus shard,
 computes top-K logits per token, and writes Arrow shards according to
-``docs/teacher_logit_cache_format.md``.
+``src/myllm/data/teacher_cache.py``.
 
 This is the heavy lifter: each invocation can run for days and consume
 $5-15K on an 8× B200 pod. Resumability is built in — interrupted runs

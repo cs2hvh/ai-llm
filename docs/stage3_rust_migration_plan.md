@@ -459,7 +459,7 @@ For BFF dedup (Phase 5), output WILL differ from MinHash (different algorithm). 
 | D7 | **DO NOT adopt Datatrove as framework** | 97% Python in hot path; designed for Slurm not single-node; we'd inherit our current bottleneck | Adopt Datatrove + Rust extensions (too much rework) | Medium — could revisit if we ever get a real cluster |
 | D8 | **Output equivalence is bit-for-bit for Phases 1-3** | Trust requires it; alternative is silent quality degradation | "Statistically equivalent" (looser; harder to debug regressions) | Low — Phase 5+ explicitly breaks this for algorithm changes |
 | D9 | **Repo layout: `crates/myllm_dataprep/` subdir with separate Cargo workspace + Python wrapper** | Same as huggingface/tokenizers, polars; clean separation | Top-level Rust files (clutter); monorepo with python+rust in same Cargo project (build complexity) | Medium — could restructure but it's load-bearing |
-| D10 | **Implementer works in this same repo on feature branches, one PR per phase** | Simpler than v0.1's separate-remote idea; CLAUDE_COLLAB doc handles claim coordination; PR-per-phase keeps merges small; `_USE_NATIVE` shim means every phase landing is non-breaking | Separate-remote fork (v0.1) — added remote complexity without coordination benefit; mono-PR at end (too big to review) | High — could fork later if conflict frequency demands |
+| D10 | **Implementer works in this same repo on feature branches, one PR per phase** | Simpler than v0.1's separate-remote idea; PR descriptions and issue comments handle claim coordination; PR-per-phase keeps merges small; `_USE_NATIVE` shim means every phase landing is non-breaking | Separate-remote fork (v0.1) — added remote complexity without coordination benefit; mono-PR at end (too big to review) | High — could fork later if conflict frequency demands |
 | D11 | **GIL-build Python + `py.detach()` + rayon inside Rust. Single `abi3-py310` wheel.** Do NOT ship free-threaded (cp313t/cp314t) wheels. (NEW in v0.2) | This is what tokenizers + polars actually do in 2026. Free-threaded 3.13t/3.14t costs 10% single-thread perf + 15-20% memory for zero gain in our pipeline. PyO3 0.28 renamed `Python::allow_threads` → `Python::detach` — 2026 docs only, no 0.27-era posts. | Free-threaded wheels (regression + complexity); subinterpreters (immature in 3.13) | High — could add freethreaded wheels later if PEP 779 Phase 3+ makes them mainstream |
 
 ---
@@ -473,7 +473,7 @@ For BFF dedup (Phase 5), output WILL differ from MinHash (different algorithm). 
 | R3 | Bit-equivalence harder than expected (Python's float / int / hash quirks) | Medium | Medium | Build small "golden" test corpus committed to repo; run before each PR; if quirk found, document + decide whether to match or document deviation |
 | R4 | xxh64 vs xxh3 confusion — accidentally using the wrong one breaks index file compatibility | Medium | High | Explicit tests asserting hash output matches known Python value; CI guard |
 | R5 | Compile time (1k LoC Rust + PyO3 + regex + hashbrown = ~150 crates, 3-5 min cold compile) | High | Low | sccache in CI; iterate on small testable units; keep binding crate small |
-| R6 | Implementer's feature branch diverges too far from main, painful to merge | Medium | Medium | Tight PR-per-phase discipline (don't accrete >1 phase before merge); rebase against main daily during active development; coordinate in CLAUDE_COLLAB.md |
+| R6 | Implementer's feature branch diverges too far from main, painful to merge | Medium | Medium | Tight PR-per-phase discipline (don't accrete >1 phase before merge); rebase against main daily during active development; coordinate in PR descriptions or issue comments |
 | R7 | BFF bloom filter RAM at 1T scale (1.20 TB needed for global at fp=0.01; our 251 GB box fits ~210B ngrams) | High | High | Phase 5 Option C — rent 1 TB-RAM box ($30-50, AWS x2gd.metal or u-3tb1) for ONE dedup pass. Tune params on local 5-20B subset FIRST to avoid DCLM-#71 failure mode (98% data loss with mis-tuned defaults). |
 | R8 | fastText classifier dependencies (binaries from HF) may not be redistributable | Low | Medium | Check FineWeb-Edu + DCLM classifier licenses before Phase 6 (likely Apache-2 / similar but verify) |
 | R9 | User direction changes mid-migration (already saw scope shifts on 2026-05-13) | High | Medium | Plan in phases so partial work is still useful; align with reviewer before starting each phase |
@@ -523,11 +523,11 @@ A successful migration is one where, by the end of Phase 7:
 Session A continues working on the main branch (Stage 1 pilot, Stage 2 prep, reviewer's P0 items). Implementer works in feature branches in the same repo (D10). Coordination protocol:
 
 - **Branching**: per-phase feature branch `rust/phase-N-<topic>` off `main`. Open the PR early as a draft so Session A can see what's coming.
-- **Sync point**: rebase against `main` daily during active development; whenever Session A reports a touched file in CLAUDE_COLLAB that overlaps the implementer's branch, rebase immediately.
-- **Conflict-likely files** Session A may touch: `src/myllm/data/build.py`, `dedupe.py`, `decontamination.py`, `filters.py`, `scripts/build_packed_corpus.py`. Session A should AVOID changing these on main during the migration unless absolutely necessary; if they must, document the change in `docs/CLAUDE_COLLAB.md` so the implementer sees it on the next sync.
+- **Sync point**: rebase against `main` daily during active development; if a PR or issue comment reports a touched file that overlaps the implementer's branch, rebase immediately.
+- **Conflict-likely files** Session A may touch: `src/myllm/data/build.py`, `dedupe.py`, `decontamination.py`, `filters.py`, `scripts/build_packed_corpus.py`. Session A should AVOID changing these on main during the migration unless absolutely necessary; if they must, document the change in the active PR or tracking issue so the implementer sees it on the next sync.
 - **Conflict-unlikely files** Session A is likely to touch: `src/myllm/training/*`, `scripts/run_pretrain.py`, `configs/*`. Implementer should AVOID these.
 - **Merge**: at the end of each phase. Session A or user reviews + merges. The `_USE_NATIVE` shim means each phase landing is non-breaking (Python fallback still works).
-- **Live doc**: `docs/CLAUDE_COLLAB.md` "Rust migration" subsection should reflect current phase + ETA + blockers.
+- **Live coordination**: the active PR or tracking issue should reflect current phase, ETA, touched files, and blockers.
 
 ---
 
@@ -600,4 +600,4 @@ Sourced from 3 parallel research agents on 2026-05-13 + 5-agent v0.2 cross-verif
 
 ## END
 
-Reviewer + user: §6 (Locked decisions) and §11 (Open questions) are the ack-required surface. Once Q1 / Q3 / Q4 / Q5 are answered, implementer claims Phase 0+ in `docs/CLAUDE_COLLAB.md` and begins.
+Reviewer + user: §6 (Locked decisions) and §11 (Open questions) are the ack-required surface. Once Q1 / Q3 / Q4 / Q5 are answered, implementer claims Phase 0+ in the active PR or tracking issue and begins.

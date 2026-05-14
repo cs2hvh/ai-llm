@@ -3,13 +3,12 @@
 
 Wires:
     1. data: HF stream → filter chain → tokenize → pack → batch
-       (live path; for the B2 packed-corpus path see docs/plan_v3_after_review3.md §4)
+       (live path; packed-corpus support lives in src/myllm/data/packed_corpus.py)
     2. model: Keras 3 + JAX backend (KERAS_BACKEND=jax)
     3. optimizer: Optax AdamW with WSD schedule (Warmup-Stable-Decay)
        — see resolve_wsd_schedule_params() for the resolver
     4. JAX mesh: data-parallel sharding across visible GPUs
-       (full FSDP weight partitioning is overkill at 1B per 2026-05-12 review;
-       see docs/plan_v3_after_review3.md §2.4 for the size-vs-strategy threshold)
+       (the pre-2 production path moves distributed training to TorchTitan/FSDP2)
     5. W&B: experiment tracking
     6. checkpoint manager: Orbax + R2 mirror
     7. training loop: with watchdog + resume
@@ -630,7 +629,6 @@ def main() -> int:
              "~5x at 1B/seq=8192 vs DP-replicated state. Requires N>=2 "
              "devices; on N=1, FSDP collapses to replicated behavior. "
              "2026-05-13 (FSDP plan Commit D). See "
-             "docs/review/QUERIES_FOR_REVIEWER_2026-05-12-evening.md and "
              "myllm.training.mesh.make_param_shardings for the design.",
     )
     p.add_argument(

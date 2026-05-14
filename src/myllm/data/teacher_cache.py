@@ -1,6 +1,6 @@
 """Teacher logit cache — Arrow shard I/O.
 
-Binary format spec lives in ``docs/teacher_logit_cache_format.md``. This
+Binary format spec lives in ``docs/teacher_cache.py``. This
 module is the implementation:
 
   - ``CacheShard``           — typed wrapper around one shard's payload.
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# All format constants come from teacher_logit_cache_format.md spec.
+# All format constants come from teacher_cache.py spec.
 FORMAT_VERSION = 1
 LOGIT_DTYPE = "bfloat16"   # 2 bytes per logit value
 INDEX_DTYPE = "uint32"     # 4 bytes per vocab index
@@ -92,7 +92,7 @@ def compute_shard_key(
 ) -> str:
     """Deterministic R2 key under which a shard is stored.
 
-    See ``docs/teacher_logit_cache_format.md`` §"Naming".
+    See ``docs/teacher_cache.py`` §"Naming".
     """
     corpus_short = corpus_sha256[:16]
     return (
@@ -345,7 +345,7 @@ def _sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
 # Runtime cache reader — `TeacherCacheReader.get_topk(positions)`
 #
 # R0 follow-up (2026-05-11 audit): the format spec at
-# `docs/teacher_logit_cache_format.md` §"Reader contract" promised a
+# `docs/teacher_cache.py` §"Reader contract" promised a
 # random-access ``get_topk`` interface. Implemented here. mmap-backed so
 # 21.6 TB of cached logits across three teachers can be queried without
 # loading any shard into RAM beyond the rows touched by the current batch.

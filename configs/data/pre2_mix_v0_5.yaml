@@ -1,0 +1,55 @@
+# Pre-2 v0.5 data mix.
+# Scope: gated internet-preview POC, not v1 foundation corpus.
+
+schema_version: 0.1
+status: planning
+name: pre2_mix_v0_5_poc_10b
+target_tokens: 10_000_000_000
+synthetic_cap: 0.0
+
+source_buckets:
+  - bucket: high_quality_educational_web
+    target_share: 0.85
+    allowed_range: [0.80, 0.90]
+    source_ids:
+      - fineweb_edu_v0_5
+    target_tokens: 8_500_000_000
+    gates: [license, revision_pin, quality_score, dedup, decontam, pii, manifest]
+  - bucket: math_stem
+    target_share: 0.15
+    allowed_range: [0.10, 0.20]
+    source_ids:
+      - open_web_math_v0_5
+    target_tokens: 1_500_000_000
+    gates: [license, revision_pin, provenance, dedup, decontam, manifest]
+
+required_metadata:
+  - source
+  - source_id
+  - source_version
+  - license
+  - terms_url
+  - domain
+  - quality_score
+  - synthetic_flag
+  - dedup_cluster
+  - decontam_status
+  - eval_overlap
+  - tokenizer_hash
+  - document_hash
+
+entry_gates:
+  - tokenizer_artifact_present_or_fallback_recorded
+  - source_registry_poc_gate_passes
+  - source_revision_pins_recorded
+  - corpus_builder_has_provenance
+  - dedup_and_decontam_plan_recorded
+
+exit_artifacts:
+  - packed_corpus_manifest
+  - source_manifest
+  - source_share_report
+  - dedup_report
+  - decontamination_report
+  - pii_filter_report
+  - tokenizer_hash_manifest

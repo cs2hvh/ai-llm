@@ -1,0 +1,74 @@
+# Build-time Hugging Face streaming config for the pre-2 v0.5 POC corpus.
+# This is intentionally small and practical: it feeds scripts/build_packed_corpus.py
+# while the higher-level contract lives in pre2_mix_v0_5.yaml.
+
+name: pre2_v0_5_build_mix
+total_share_must_equal: 1.0
+
+sources:
+  - source_id: fineweb_edu_v0_5
+    dataset: HuggingFaceFW/fineweb-edu
+    share: 0.85
+    text_field: text
+    category: web
+    config_name: sample-10BT
+    split: train
+    revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+    target_tokens: 8_500_000_000
+
+  - source_id: open_web_math_v0_5
+    dataset: open-web-math/open-web-math
+    share: 0.15
+    text_field: text
+    category: math
+    split: train
+    revision: fde8ef8de2300f5e778f56261843dab89f230815
+    target_tokens: 1_500_000_000
+
+filters:
+  length:
+    min_chars: 200
+    max_chars: 1_000_000
+  repetition:
+    max_top_word_share: 0.20
+    max_top_ngram_share: 0.10
+    ngram_n: 5
+  symbol_ratio:
+    max_symbol_ratio: 0.30
+  pii:
+    redact_email: true
+    redact_phone: true
+    redact_ipv4: false
+
+decontamination:
+  enabled: true
+  hash_seed: 0xDECAF
+  index_path_primary: artifacts/decontamination_index_8gram.json
+  index_path_secondary: artifacts/decontamination_index_13gram.json
+  ngram_size: 13
+  benchmarks:
+    - id: mmlu-pro
+      sample_size: 200
+    - id: mmlu-prox
+      sample_size: 200
+    - id: belebele
+      sample_size: 200
+    - id: milu
+      sample_size: 200
+    - id: gsm8k
+      sample_size: 200
+    - id: math
+      sample_size: 200
+    - id: humaneval-plus
+      sample_size: 200
+    - id: mbpp-plus
+      sample_size: 200
+    - id: ifeval
+      sample_size: 200
+  report_csv_path: artifacts/pre2_v0_5_decontamination_report.csv
+
+batch:
+  micro_batch_per_device: 1
+  grad_accum_steps: 16
+
+data_seed: 1234

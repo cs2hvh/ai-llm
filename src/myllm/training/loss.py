@@ -4,12 +4,11 @@ Cross-entropy is the primary loss. We add a small ``z-loss`` term that
 penalises the log-partition function. This stabilises late-training dynamics
 by preventing logit norms from drifting (PaLM 2022, Chowdhery et al.).
 
-R0 (2026-05-11): added top-K logit distillation loss for the decay-phase
-multi-teacher recipe locked in
-``docs/governance/teacher_distillation_strategy.md``. The teacher logits are
-pre-cached offline (top-K per token per teacher; production K=64 per the
-locked teacher plan). During training we mix cross-entropy and per-teacher
-KL divergence at the caller-specified ``alpha`` ratio.
+R0 (2026-05-11): added the legacy pre-1 top-K logit distillation loss for
+decay-phase experiments. Pre-2 disables heterogeneous-tokenizer top-K KD;
+see ``docs/PRE2_ARCHITECTURE_DECISION.md``. During legacy pre-1 training we
+mix cross-entropy and per-teacher KL divergence at the caller-specified
+``alpha`` ratio.
 
 2026-05-12 (reviewer pushback): replaced ``one_hot(labels) * log_softmax``
 in CE with ``take_along_axis`` (gather). The one-hot materialised a
@@ -372,7 +371,7 @@ def distillation_mixed_loss(
             ``[T, B, S, K]`` or ``None`` for "no teacher this batch".
         alpha:           CE weight. ``1.0`` → pure CE (no distillation).
                          ``0.3`` is our locked decay-phase value
-                         (``docs/teacher_distillation_strategy.md``).
+                         (``docs/PRE2_ARCHITECTURE_DECISION.md``).
         teacher_weights: per-teacher weights; defaults to uniform.
         temperature:     teacher softmax temperature.
         ignore_index:    pad-token id.

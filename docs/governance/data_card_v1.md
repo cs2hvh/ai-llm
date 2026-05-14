@@ -1,87 +1,91 @@
-# MyLLM v1 — Data Card
-*Status: TEMPLATE / SCAFFOLDING (B9, 2026-05-12 audit). Filled in per actual run state at v1 release.*
+# MyLLM 1B-Class Data Card
 
-This data card documents the pretraining corpus per EU AI Act GPAI
-obligation (effective Aug 2, 2025): "**a publicly available, sufficiently
-detailed summary of the content used for training**."
+Status: live draft, refreshed for the pre-2 plan on 2026-05-14.
 
-## Pretraining corpus summary
+This data card is a release scaffold for the training-corpus disclosure. It
+must be regenerated from the final data manifest before any checkpoint is
+published.
 
-**Total tokens trained on (v1 target)**: ~1 trillion
-**Tokenizer**: SentencePiece Unigram, 131k vocab (`artifacts/tokenizer_v1.json`)
-**Decontamination**: 13-gram n-gram overlap against MMLU-ProX + Belebele + MILU benchmark prompts (per OLMo-2 convention)
-**License manifest**: see [license_register.md](license_register.md)
+## Corpus Target
 
-### Sources
+- Training target: at least 1T tokens, with a pre-2 planning target of 1.5T tokens.
+- Tokenizer: TBD for pre-2; do not reuse pre-1 tokenizer assumptions without a fresh tokenizer study.
+- Corpus shape: deduplicated, decontaminated, source-accounted, license-reviewed, and version-pinned.
+- Manifest requirement: every emitted shard must carry source id, source revision, filter version, dedup version, tokenizer version, token count, and content hash.
 
-<!-- AUTO:start name="sources" -->
-| # | HF dataset | Configured share | License | Revision pinned? | Notes |
-|---|---|---|---|---|---|
-| 1 | HuggingFaceFW/fineweb-edu | 44.0% | ODC-By 1.0 | ⏳ B2 work | High-quality educational subset; absorbs Nemotron-CC share pending NVIDIA approval |
-| 2 | bigcode/the-stack-v2 | 18.0% | BigCode Open RAIL-M (T&Cs accepted 2026-05-11) | ⏳ B2 work | Code |
-| 3 | wikimedia/wikipedia (20231101.en) | 6.0% | CC-BY-SA 4.0 | ⏳ B2 work | English Wikipedia snapshot |
-| 4 | pg19 | 5.0% | Public domain (Project Gutenberg pre-1919) | ⏳ B2 work | Books |
-| 5 | allenai/peS2o | 6.0% | ODC-By 1.0 | ⏳ B2 work | Academic |
-| 6 | open-web-math/open-web-math | 7.0% | ODC-By 1.0 | ⏳ B2 work | Math; absorbs proof-pile-2 share (dropped due to loader fragility) |
-| 7 | HuggingFaceH4/stack-exchange-preferences | 2.0% | CC-BY-SA 4.0 | ⏳ B2 work | Q&A (question field only) |
-| 8 | ai4bharat/sangraha (verified, split=hin) | 4.0% | CC-BY-4.0 | ⏳ B2 work | Hindi sovereign hedge |
-| 9 | mc4 (es) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
-| 10 | mc4 (zh) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
-| 11 | mc4 (ar) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
-| 12 | mc4 (fr) | 1.5% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
-| 13 | mc4 (de) | 2.0% | ODC-By 1.0 | ⏳ B2 work | Secondary language |
+## Candidate Source Families
 
-**Total**: 100.0% (validated at run-start; mixture sampler is token-weighted per P0-6 fix)
-<!-- AUTO:end -->
+| Family | Purpose | Current status | Required controls |
+|---|---|---|---|
+| Educational / high-quality web | Broad language modeling and factual coverage | Candidate core source | Quality classifier, exact source license, dedup, PII filters |
+| Curated general web | Breadth and robustness | Candidate, capped | Strong filtering, domain/source accounting, contamination checks |
+| Code | Programming capability | Candidate, license-sensitive | Repository license review, benchmark decontam, generated-code contamination checks |
+| Math and STEM | Reasoning and symbolic competence | Candidate | Stable loaders, source attribution, benchmark decontam |
+| Books and reference | Long-form prose and knowledge | Candidate, capped | Public-domain or licensed-only material |
+| Q&A / documentation | Explanatory style and factual density | Candidate, capped | Attribution/share-alike review and duplication checks |
+| Indic / multilingual data | Hindi and broader multilingual coverage | Candidate strategic source | Language-id, script checks, source-level license review |
+| Synthetic data | Targeted repair only | Bounded, tagged, post-core | Keep separate from organic corpus; require eval-backed inclusion |
 
-### Permanently excluded from training
+## Excluded Data
 
-| Source | Why excluded |
+| Data type | Reason |
 |---|---|
-| nvidia/Nemotron-CC | Gated; NVIDIA approval pending. Was originally 13.5% of v1 plan; FineWeb-Edu absorbed the share. Re-include when access lands. |
-| EleutherAI/proof-pile-2 | Loader-script fragility (4 separate failure modes in pre-launch smoke). Math share absorbed by open-web-math. |
-| Any Llama/Gemma model output | License clauses make derivative use legally fraught for our distillation pipeline. |
-| Any OpenAI/Anthropic/Google API output | ToS forbid using outputs to develop competing models. |
+| Private or non-public data | Fails privacy, governance, and reproducibility standards. |
+| Leaked, pirated, or unclear-copyright corpora | Not acceptable for a release-quality foundation model. |
+| Closed-model API outputs | Typical provider terms prohibit use for training competing models. |
+| Unreviewed gated datasets | No use until access, terms, and redistribution constraints are approved. |
+| Benchmark answer sets in training data | Contamination risk; benchmark text may be used only for decontamination/eval. |
 
-### Filters applied per document
+## Processing Requirements
 
-- **Length**: 200 ≤ chars ≤ 1,000,000
-- **Repetition**: top-word share ≤ 20%; top-5gram share ≤ 10%
-- **Symbol ratio**: ≤ 30% non-alphanumeric
-- **PII redaction**: email + phone (IPv4 NOT redacted)
-- **Decontamination**: drop any document containing a 13-gram present in MMLU-ProX, Belebele, or MILU prompts
+Every source must pass:
 
-### Filters NOT applied (gaps to document)
+1. License and terms review recorded in `license_register.md`.
+2. Source revision pinning.
+3. Language identification where multilingual.
+4. Document-level quality filtering.
+5. PII filtering/redaction appropriate to the source.
+6. Exact and near-duplicate removal.
+7. Benchmark decontamination.
+8. Token-count accounting by source family and language.
+9. Holdout split creation before training.
 
-- ⏳ No NSFW classifier on pretrain corpus (v1 deferred to post-training safety pass)
-- ⏳ No copyright-flag screen beyond source license inheritance
-- ⏳ No verifiable-author screen on code data (the-stack-v2 already has opt-out via GitHub but not author authentication)
-- ⏳ Minimal duplicate detection: per-doc MinHash only; no cross-document near-dedup yet (Phase B2 work)
+## Minimum Release Tables
 
-## Per-source token counts (filled at run time)
+The final release data card must include:
 
-(Run-time aggregated counts from the loop's `emitted_per_source` field on `MixtureSampler`. Phase B work to persist into the data card automatically.)
+| Required table | Filled from |
+|---|---|
+| Source family token counts | Final packed-corpus manifest |
+| Dataset-level token counts and licenses | Source registry + manifest |
+| Language distribution | Language-id pass over accepted documents |
+| Filter rejection rates | Data build logs |
+| Dedup removal rates | Dedup reports |
+| Contamination removal rates | Decontamination reports |
+| PII filter statistics | Privacy filter reports |
+| Known gaps | Manual release review |
 
-| Source | Tokens emitted | % of total trained on |
-|---|---|---|
-| FineWeb-Edu | TBD | |
-| the-stack-v2 | TBD | |
-| ... | | |
+## Personal Data Handling
 
-## Personal data handling (DPDP / GDPR / EU AI Act)
+The corpus must not intentionally include private data. Public web sources may
+still contain personal information, so release review must document:
 
-The training corpus may contain personal data published openly (e.g., names in Wikipedia articles, Stack Exchange usernames). We do NOT:
-- Use any private / non-public data sources
-- Cross-reference public mentions of individuals
-- Re-publish PII verbatim — the model may regurgitate training examples in some cases; this is documented as a limitation (memorization probe gate at v1 release)
+- PII filter versions and measured hit rates.
+- Known residual-risk categories.
+- Contact path for removal or objection requests.
+- Whether removal requires retraining, continued pretraining, or data exclusion in future runs.
 
-For DPDP / GDPR Article 21 (right to object) requests, contact harshit.hv@samatva.com. Removal from training data requires re-training; we maintain the manifest + revision pins to make this auditable.
-
-## Audit trail
+## Audit Trail
 
 This data card pairs with:
-- `configs/data/pretrain_mix.yaml` — the live mix configuration
-- `license_register.md` — full license text + accepted T&Cs per source
-- `quarantine.jsonl` (per-run, in `<checkpoint_root>/`) — every bad batch that the NaN-skip patch dropped, for forensic
-- `decontamination_report.csv` — per-source contamination overlap stats
-- The data manifest (`scripts/build_data_manifest.py`, B2 work) — per-shard SHA256 + source revision per packed sequence
+
+- `license_register.md`
+- `model_card_v1.md`
+- final data manifest
+- decontamination reports
+- dedup reports
+- source registry
+- tokenizer training report
+
+Planning percentages are not release evidence. Use emitted token counts from
+the final manifest for any public claim.

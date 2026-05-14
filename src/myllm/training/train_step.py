@@ -64,7 +64,7 @@ def make_train_step(
         distill_alpha:     CE weight in the mixed loss. ``1.0`` (default)
                            collapses to pure CE — matches pre-R0 behavior.
                            ``0.3`` is our locked decay-phase value per
-                           ``docs/teacher_distillation_strategy.md``.
+                           ``docs/PRE2_ARCHITECTURE_DECISION.md``.
         distill_temperature: teacher softmax temperature.
         teacher_weights:   optional per-teacher weights for the ensemble.
 

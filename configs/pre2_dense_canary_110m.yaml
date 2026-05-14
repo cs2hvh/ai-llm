@@ -1,0 +1,82 @@
+# Compute-limited pre-2 canary config.
+# Purpose: catch architecture, trainer, packed-data, checkpoint, and eval-bridge
+# bugs quickly before spending proxy/mainline compute.
+
+schema_version: 0.1
+status: planning
+name: myllm-pre2-dense-canary-110m
+stack: torchtitan
+
+model:
+  architecture: decoder_only_transformer
+  parameter_target: 113_000_000
+  layers: 12
+  hidden_dim: 512
+  ffn_dim: 2048
+  activation: swiglu
+  norm: rmsnorm
+  norm_eps: 1.0e-5
+  qk_norm: true
+  attention:
+    type: gqa
+    num_heads: 8
+    num_kv_heads: 2
+    head_dim: 64
+  position:
+    type: rope
+    rope_base: 1_000_000
+  embeddings:
+    tied: true
+  tokenizer:
+    decision: provisional_reference_vocab_for_canary
+    candidates: [64_000, 96_000, 131_075]
+    current_reference_vocab_size: 131_075
+  context:
+    foundation_length: 4096
+    continuation_lengths: [8192]
+
+training:
+  dtype: bf16
+  objective:
+    next_token_ce: true
+    z_loss_coef: 1.0e-4
+    disabled_paths:
+      - heterogeneous_tokenizer_topk_logit_kd
+  optimizer:
+    type: adamw
+    beta1: 0.9
+    beta2: 0.95
+    weight_decay: 0.1
+    eps: 1.0e-8
+    grad_clip_global_norm: 1.0
+  scheduler:
+    type: wsd
+    peak_lr: 4.0e-4
+    lr_ablations: [3.0e-4, 4.0e-4, 6.0e-4]
+    warmup_steps_range: [100, 300]
+    stable_fraction: 0.90
+    decay_fraction: 0.10
+    end_lr_ratio: 0.0
+  batch:
+    global_batch_tokens: 262_144
+    sequence_length: 4096
+    example_1gpu:
+      micro_batch_sequences_per_gpu: 1
+      grad_accum_steps: 64
+  token_budget:
+    smoke: 100_000_000
+    study_minimum: 500_000_000
+    study_target: 1_000_000_000
+    study_stretch: 2_000_000_000
+
+parallelism:
+  strategy: single_gpu_or_fsdp2
+  checkpointing: pytorch_distributed_checkpointing
+  purpose: fast architecture and data-path canary
+
+study_outputs:
+  - loss_curve_sanity
+  - packed_dataloader_resume_report
+  - real_eval_bridge_smoke
+  - tokenizer_fertility_smoke
+  - throughput_report

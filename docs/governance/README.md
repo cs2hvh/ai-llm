@@ -1,63 +1,39 @@
-# Governance artifacts
+# Governance Artifacts
 
-This directory holds the enterprise governance documents required for
-external release per:
-
-- **EU AI Act GPAI obligations** (effective 2025-08-02): technical
-  documentation, copyright policy, public summary of training content
-- **ISO/IEC 42001** AI management-system structure
-- **NIST AI RMF GenAI Profile**
-- **OWASP GenAI Security Project** + Agentic Top 10
-- **India MeitY AI Governance Guidelines** (Nov 2025) + DPDP framework
+This directory keeps the compliance and release metadata that should survive
+planning churn. It is now scoped to the current pre-2 direction, not the old
+2026-05-12 review packet.
 
 ## Files
 
 | File | Purpose | Status |
 |---|---|---|
-| `model_card_v1_template.md` | Per-release model card scaffold (capabilities, limitations, eval, citation). Contains `<!-- AUTO:start -->` blocks rendered by `scripts/render_governance_cards.py`. | TEMPLATE — fill at v1 release |
-| `model_card_v1.md` | Rendered model card with live config values stamped in | AUTO-RENDERED — regen via `scripts/render_governance_cards.py` |
-| `data_card_v1_template.md` | Training corpus disclosure (EU AI Act transparency requirement) | TEMPLATE — auto-populate from `MixtureSampler.emitted_per_source` at release |
-| `data_card_v1.md` | Rendered data card with live source table stamped in | AUTO-RENDERED — regen via `scripts/render_governance_cards.py` |
-| `license_register.md` | Authoritative log of every dataset and teacher license + clauses + T&C acceptance dates | LIVE — update on every change |
+| `model_card_v1.md` | Draft model card for the current 1B-class base-model program. | LIVE DRAFT; update per release |
+| `data_card_v1.md` | Draft training-data disclosure and source table. | LIVE DRAFT; update when the data mix changes |
+| `license_register.md` | License and terms register for datasets, excluded sources, eval sets, and model-release posture. | LIVE; update on every source change |
 
-### Regenerating the auto-blocks
+## Current Planning Basis
 
-```bash
-python scripts/render_governance_cards.py            # regenerate the rendered files
-python scripts/render_governance_cards.py --check    # CI: fail if rendered cards are stale
-```
+- [`../PRE2_FINAL_PLAN_2026-05-14.md`](../PRE2_FINAL_PLAN_2026-05-14.md) is the current architecture, data, precision, hardware, and timeline decision document.
+- [`../PRE2_ARCHITECTURE_DECISION.md`](../PRE2_ARCHITECTURE_DECISION.md) is the accepted pre-2 architecture decision record.
+- [`../PRE2_STACK_MIGRATION_PLAN.md`](../PRE2_STACK_MIGRATION_PLAN.md) is the implementation backlog for the PyTorch/TorchTitan migration.
+- [`../PROJECT_OVERVIEW.md`](../PROJECT_OVERVIEW.md) is the current pre-1 implementation overview.
+- [`../safety_policy.md`](../safety_policy.md) is the project safety policy.
+- [`../stage3_rust_migration_plan.md`](../stage3_rust_migration_plan.md) remains the data-pipeline acceleration plan, pending alignment with pre-2.
 
-The templates carry static prose (intended use, limitations, etc.) plus
-`<!-- AUTO:start name="..." -->...<!-- AUTO:end -->` markers around regions
-that must stay in sync with `configs/base_1b.yaml` (architecture) and
-`configs/data/pretrain_mix.yaml` (sources table).
+## Release Artifacts Still Needed
 
-The `--check` mode is meant to run in CI: it detects "edited configs
-but forgot to re-render" before merge.
+Before publishing any checkpoint, add or regenerate:
 
-## Filing cadence
+1. `eval_card_v1.md`: benchmark results, versions, prompts, harness commit, and contamination policy.
+2. `risk_card_v1.md`: known failure modes, mitigations, residual risks, and release gates.
+3. `model_supply_chain.md`: training run provenance, artifact hashes, signing keys, dependency pins, and checkpoint lineage.
+4. `incident_response.md`: regression and safety-failure handling process.
+5. EU AI Act technical-documentation packet compiled from the model card, data card, license register, eval card, and risk card.
+6. India DPDP workflow note for PII handling, retention, and deletion.
 
-| Artifact | When updated |
-|---|---|
-| `license_register.md` | Every time a dataset or teacher is added / removed / re-licensed. Update synchronously with the relevant yaml change. |
-| `model_card_v1_template.md` → versioned `model_card_v1.md` | At each released checkpoint (v1, v1.5, v2). Fork the template, fill in actual run state. |
-| `data_card_v1_template.md` → versioned `data_card_v1.md` | At each release. Pull token counts from `emitted_per_source`. |
+## Update Rule
 
-## Phase 5 (governance) work that still needs to happen
-
-The templates here are SCAFFOLDING — they capture the structure but most numbers/details get filled in per-release. The Phase 5 workstream covers:
-
-1. ⏳ `eval_card_v1.md` — every benchmark result with provenance + version pin
-2. ⏳ `risk_card_v1.md` — known failure modes + mitigations + remaining gaps
-3. ⏳ `model_supply_chain.md` — signing keys + provenance per training run
-4. ⏳ `incident_response.md` — what to do when a regression / safety failure surfaces post-release
-5. ⏳ EU AI Act "technical documentation" packet (formal compilation of the above for regulators)
-6. ⏳ India DPDP workflow doc (PII handling + deletion / retention policy)
-7. ⏳ NIST AI RMF self-assessment mapping (which controls apply, where)
-8. ⏳ OWASP Agentic Top 10 mitigation matrix (for the eventual tool-use SFT phase)
-9. ✅ `scripts/render_governance_cards.py` — auto-renders model/data card AUTO-blocks from live configs (2026-05-12, P2 work)
-
-## External reviews driving this scaffolding
-
-- `docs/MyLLM_Repo_Technical_Review_2026-05-12.docx` — colleague's code review (P0 bug list)
-- `docs/external_review_2026-05-12_enterprise.md` — colleague's friend's enterprise strategy review (governance + serving + frontier comparison)
+Do not add one-off review memos back into this folder. If a review produces a
+lasting decision, fold it into the current plan, model card, data card, or
+license register and cite the decision directly.

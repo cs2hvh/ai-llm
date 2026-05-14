@@ -43,6 +43,11 @@ dev = [
     "mypy>=1.11,<2.0",
     "ipython>=8.27,<9.0",
 ]
+pre2 = [
+    # Local pre-2 smoke/model/data development. The production TorchTitan,
+    # CUDA, NCCL, and torchao pins belong in the pre-2 training container lock.
+    "torch>=2.12,<2.13",
+]
 tf = [
     "tensorflow>=2.18,<3.0",
 ]
@@ -56,7 +61,7 @@ cuda = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/myllm"]
+packages = ["src/myllm", "src/myllm_pre2"]
 
 [tool.ruff]
 line-length = 100

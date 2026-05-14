@@ -1,0 +1,42 @@
+# Research-only MoE planning config.
+# This is not part of the pre-2 mainline. Do not launch until the dense
+# baseline is stable and the serving/checkpoint complexity is justified.
+
+schema_version: 0.1
+status: research_only
+name: myllm-pre2-moe-1b-active-7b-total-research
+stack: torchtitan_or_megatron_core
+
+model:
+  architecture: decoder_only_sparse_moe
+  active_parameter_target: 1_000_000_000
+  total_parameter_target: 7_000_000_000
+  layers: 24
+  hidden_dim: 2048
+  shared_ffn_dim: 2048
+  expert_ffn_dim: 8192
+  activation: swiglu
+  norm: rmsnorm
+  qk_norm: true
+  attention:
+    type: gqa
+    num_heads: 32
+    num_kv_heads: 8
+    head_dim: 64
+  moe:
+    experts_per_layer: 16
+    top_k: 2
+    router: learned_topk
+    load_balancing_loss: required
+    z_loss_router: required
+    grouped_gemm: required
+    expert_parallelism: required
+  context:
+    foundation_length: 8192
+
+research_gates:
+  - dense_1_5b_baseline_running
+  - expert_parallelism_available
+  - moe_checkpoint_roundtrip_passes
+  - moe_serving_path_identified
+  - dense_proxy_quality_baseline_available

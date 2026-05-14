@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Render the governance template cards from live configs.
+"""Render governance AUTO blocks from live configs when present.
 
-The model_card and data_card templates carry static prose (intended use,
-limitations, environmental impact, etc.) plus a handful of architecture /
-sources blocks that MUST stay in sync with the live yaml configs. This
-script replaces every ``<!-- AUTO:start name="X" -->...<!-- AUTO:end -->``
-block in the template with content rendered from the appropriate config.
+Older governance cards used ``*_template.md`` files with AUTO blocks. The
+current pre-2 governance cards are live drafts, but this script is kept so
+AUTO blocks can be reintroduced without rewriting the renderer. If template
+files are absent, the script falls back to the current rendered card files.
 
 Auto-rendered blocks:
   - model_card  → ``architecture`` (from configs/base_1b.yaml)
@@ -255,8 +254,8 @@ def main() -> int:
     p.add_argument(
         "--templates-dir",
         default=str(_GOVERNANCE),
-        help="Directory containing model_card_v1_template.md + "
-        "data_card_v1_template.md.",
+        help="Directory containing governance templates. Falls back to "
+        "model_card_v1.md and data_card_v1.md if templates are absent.",
     )
     p.add_argument(
         "--output-dir",
@@ -289,13 +288,15 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     targets = [
-        ("model_card_v1_template.md", f"model_card_v1{args.output_suffix}.md"),
-        ("data_card_v1_template.md", f"data_card_v1{args.output_suffix}.md"),
+        ("model_card_v1_template.md", "model_card_v1.md", f"model_card_v1{args.output_suffix}.md"),
+        ("data_card_v1_template.md", "data_card_v1.md", f"data_card_v1{args.output_suffix}.md"),
     ]
 
     diffs: list[str] = []
-    for template_name, output_name in targets:
+    for template_name, fallback_name, output_name in targets:
         template_path = templates_dir / template_name
+        if not template_path.exists():
+            template_path = templates_dir / fallback_name
         if not template_path.exists():
             print(f"missing template: {template_path}", file=sys.stderr)
             return 2

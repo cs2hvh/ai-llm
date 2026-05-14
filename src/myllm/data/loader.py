@@ -4,7 +4,7 @@ Wraps ``datasets.load_dataset(..., streaming=True)`` with:
     - retry on transient network errors (tenacity)
     - optional ``skip_first`` counter for coarse resume / smoke-test offsets
       (NOT token-exact byte-offset checkpointing — that lives in the offline
-      packed-corpus path; see ``docs/plan_v3_after_review3.md`` §4 / B2)
+      packed-corpus path; see ``src/myllm/data/packed_corpus.py`` §4 / B2)
     - normalisation into our ``Document`` type
     - optional sample limit for smoke tests
 

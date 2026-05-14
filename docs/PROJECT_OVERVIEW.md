@@ -66,7 +66,7 @@ A **1B-parameter decoder-only foundation model**, trained from scratch with a mu
 | **Backend framework** | Keras 3 (JAX backend) | Pythonic, multi-backend, native sharding via `jax.sharding`. Avoids being locked into either PyTorch or pure Flax. |
 | **Compute graph / autodiff** | JAX 0.4.x | XLA compilation, native multi-device, deterministic re-runs |
 | **Optimizer** | Optax (`adamw` + `multi_transform` for muP groups) | Composable, fp32-moments-pinned (P0-2 fix), supports per-group LR scaling |
-| **Tokenizer** | **SentencePiece-Unigram**, 131,072 vocab, byte fallback | Trained natively via SentencePiece (HF tokenizers' Python BPE hits a ~15GB corpus ceiling). Wide vocab supports Indic + code without exploding fragmentation. |
+| **Tokenizer** | **SentencePiece-Unigram**, 131,075 runtime vocab, byte fallback | Trained natively via SentencePiece (HF tokenizers' Python BPE hits a ~15GB corpus ceiling). Wide vocab supports Indic + code without exploding fragmentation. |
 | **Data storage** | **Cloudflare R2** (S3-compatible) | Cheap egress, fast (32-way parallel multipart upload → 954 Mbps measured). Per-source corpora + composed mixed corpus + tokenizer + checkpoints all live there. |
 | **Data pipeline** | HuggingFace `datasets` streaming | One stream per source, filter chain → tokenize → pack → write to R2 |
 | **Checkpoint** | **Orbax** (sharded, templated restore) | Atomic shard writes, per-step manifest.json for partial-write detection, templated restore preserves namedtuples (muP `MultiTransformState`) |
@@ -255,7 +255,7 @@ TransformerLM (1B)
        │
        ▼
    ┌─────────────────────┐
-   │ Token Embedding     │  [V, H] = [131072, 2048] → 0.27B params (40% of total)
+   │ Token Embedding     │  [V, H] = [131075, 2048] → 0.27B params (40% of total)
    │ tied with LM head   │
    └──────┬──────────────┘
           │ x: [B, S, H]
@@ -622,71 +622,71 @@ WHY DECAY-PHASE ONLY:
 
 ```
 llm-build/
-├── configs/
-│   ├── base_1b.yaml                 ← 1B model spec, training target, cost model
-│   ├── pilot_250m.yaml              ← 250M pilot config (matches base for muP transfer)
-│   ├── wind_tunnel.yaml             ← muP HP-sweep config
-│   ├── proxy_a.yaml / proxy_b.yaml  ← HP-transfer validation models
-│   └── data/
-│       └── pretrain_mix.yaml        ← 12-source mix, decontam, filter chain
-├── docs/
-│   ├── PROJECT_OVERVIEW.md          ← THIS FILE
-│   ├── governance/
-│   │   ├── model_card_v1.md         ← Canonical model spec
-│   │   ├── data_card_v1.md          ← Per-source dossier
-│   │   ├── license_register.md      ← License review per source + teacher
-│   │   └── README.md
-│   ├── review/
-│   │   ├── PROJECT_REVIEW_2026-05-12.md             ← Packet sent to reviewer
-│   │   └── QUERIES_FOR_REVIEWER_2026-05-12-evening.md ← Eve queries + agent findings
-│   ├── plan_v3_after_review3.md     ← Locked plan from earlier review round
-│   ├── mup_design.md                ← muP recipe + scaling rules
-│   ├── teacher_distillation_strategy.md
-│   ├── teacher_logit_cache_format.md
-│   ├── math_strategy.md
-│   ├── playbook_alignment.md
-│   ├── safety_policy.md
-│   └── indiaai_compute_brief.md     ← Compute-subsidy application draft
-├── scripts/
-│   ├── run_pretrain.py              ← Main training entry point
-│   ├── build_packed_corpus.py       ← Per-source corpus builder
-│   ├── compose_mixed_corpus.py      ← Multi-source mixer
-│   ├── run_parallel_builds.py       ← Fan-out runner for the 12 sources
-│   ├── benchmark_throughput.py      ← Throughput + MFU bench
-│   ├── canary_ladder.py             ← L0 + L5 ladder runner
-│   ├── canary_l3_resume.py          ← Synthetic-data L3 (bitwise resume)
-│   ├── canary_l3_resume_packed.py   ← Real packed-corpus L3 (caught off-by-one!)
-│   ├── train_tokenizer_spm.py       ← Native SentencePiece tokenizer trainer
-│   └── build_decontamination_index.py  ← Pre-build 11-benchmark index
-└── src/myllm/
-    ├── model/
-    │   ├── config.py                ← Pydantic ModelConfig + MupConfig
-    │   ├── transformer.py           ← TransformerLM + jax.checkpoint wrap
-    │   └── layers.py                ← DecoderBlock, GQA, RMSNorm, SwiGLU, RoPE
-    ├── training/
-    │   ├── train_step.py            ← JIT'd (state, batch) → (state, metrics)
-    │   ├── loop.py                  ← Outer loop + watchdog + recovery
-    │   ├── optimizer.py             ← AdamW + muP multi_transform + fp32 pins
-    │   ├── mesh.py                  ← Sharding (currently DP-replicated)
-    │   ├── checkpoint.py            ← Orbax wrapper + retention + WSM merge
-    │   ├── loss.py                  ← gather-CE + chunked-CE + multi-teacher KL
-    │   ├── decay_phase.py           ← Decay-phase distillation activation
-    │   ├── watchdog.py              ← Loss-spike detection
-    │   ├── quarantine.py            ← NaN-batch provenance log
-    │   └── schedule.py              ← WSD LR schedule
-    ├── data/
-    │   ├── packed_corpus.py         ← Writer + Reader + seek
-    │   ├── compose.py               ← Mix N corpora at target shares
-    │   ├── build.py                 ← Per-source build orchestrator
-    │   ├── loader.py                ← HFStreamLoader
-    │   ├── tokenize.py              ← Tokenizer load + special tokens
-    │   ├── synthetic.py             ← Synthetic data iter (resume-safe)
-    │   ├── filters.py               ← Length/repetition/symbol/PII
-    │   ├── decontamination.py       ← 13-gram MinHash+LSH
-    │   └── special_tokens.py        ← BOS/EOS/PAD/UNK/IM_START/IM_END
-    ├── utils/
-    │   └── storage.py               ← R2 client (32-way multipart)
-    └── canary.py                    ← L0/L5 check primitives + state hashing
+|-- configs/
+|   |-- base_1b.yaml                 <- pre-1 1B model spec and training target
+|   |-- pilot_250m.yaml              <- 250M pilot config
+|   |-- wind_tunnel.yaml             <- muP HP-sweep config
+|   |-- pre2_dense_1_5b.yaml         <- pre-2 dense target planning config
+|   |-- pre2_dense_proxy_400m.yaml   <- pre-2 proxy-study planning config
+|   |-- pre2_moe_1b_active_research.yaml <- MoE research-only planning config
+|   `-- data/
+|       |-- pre2_mix_stage1.yaml     <- pre-2 foundation mix planning config
+|       |-- pre2_mix_stage2.yaml     <- pre-2 capability mix planning config
+|       |-- pre2_mix_anneal.yaml     <- pre-2 anneal/context mix planning config
+|       `-- pretrain_mix.yaml        <- pre-1 pretrain mix, decontam, filter chain
+|-- docs/
+|   |-- PROJECT_OVERVIEW.md          <- this file
+|   |-- PRE2_FINAL_PLAN_2026-05-14.md <- current pre-2 architecture, data, training, and hardware plan
+|   |-- PRE2_ARCHITECTURE_DECISION.md <- accepted pre-2 architecture decision
+|   |-- PRE2_STACK_MIGRATION_PLAN.md <- PyTorch/TorchTitan migration backlog
+|   |-- mup_design.md                <- muP recipe and scaling rules
+|   |-- safety_policy.md
+|   |-- stage3_rust_migration_plan.md <- data-pipeline acceleration plan
+|   `-- governance/
+|       |-- README.md
+|       |-- model_card_v1.md
+|       |-- data_card_v1.md
+|       `-- license_register.md
+|-- scripts/
+|   |-- run_pretrain.py              <- main training entry point
+|   |-- build_packed_corpus.py       <- per-source corpus builder
+|   |-- compose_mixed_corpus.py      <- multi-source mixer
+|   |-- run_parallel_builds.py       <- fan-out runner for sources
+|   |-- benchmark_throughput.py      <- throughput and MFU bench
+|   |-- canary_ladder.py             <- L0/L5 ladder runner
+|   |-- canary_l3_resume.py          <- synthetic-data L3 resume test
+|   |-- canary_l3_resume_packed.py   <- real packed-corpus L3 resume test
+|   |-- train_tokenizer_spm.py       <- SentencePiece tokenizer trainer
+|   `-- build_decontamination_index.py <- benchmark decontamination index
+`-- src/myllm/
+    |-- model/
+    |   |-- config.py
+    |   |-- transformer.py
+    |   `-- layers.py
+    |-- training/
+    |   |-- train_step.py
+    |   |-- loop.py
+    |   |-- optimizer.py
+    |   |-- mesh.py
+    |   |-- checkpoint.py
+    |   |-- loss.py
+    |   |-- decay_phase.py
+    |   |-- watchdog.py
+    |   |-- quarantine.py
+    |   `-- schedule.py
+    |-- data/
+    |   |-- packed_corpus.py
+    |   |-- compose.py
+    |   |-- build.py
+    |   |-- loader.py
+    |   |-- tokenize.py
+    |   |-- synthetic.py
+    |   |-- filters.py
+    |   |-- decontamination.py
+    |   `-- special_tokens.py
+    |-- utils/
+    |   `-- storage.py
+    `-- canary.py
 ```
 
 ---

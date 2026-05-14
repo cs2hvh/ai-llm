@@ -1,10 +1,9 @@
 """Offline packed-corpus storage: uint32 token shards + provenance.
 
-B2 work from the 2026-05-12 reviewer Q&A (``docs/reviewer_qa_2026-05-12.md``
-§4) and plan v3 (``docs/plan_v3_after_review3.md`` §4). This module is
-the *data plane* — writer, reader, manifest, and seek index. The build
-pipeline that pulls real HF data, dedupes, tokenizes, and feeds this
-writer is a separate piece (``scripts/build_packed_corpus.py``).
+This module is the pre-1 packed-corpus data plane: writer, reader, manifest,
+and seek index. The build pipeline that pulls real HF data, dedupes,
+tokenizes, and feeds this writer is a separate piece
+(``scripts/build_packed_corpus.py``).
 
 Layout on disk::
 
@@ -961,8 +960,12 @@ def _write_seq_meta(path: Path, metas: list[SequenceMeta]) -> None:
         ],
     )
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with ipc.new_file(tmp, table.schema) as w:
-        w.write_table(table)
+    # On Windows, passing a path directly to pyarrow.ipc.new_file can leave
+    # the temp path locked briefly when the context exits. Owning the OSFile
+    # sink explicitly makes the close ordering unambiguous before os.replace.
+    with pa.OSFile(str(tmp), "wb") as sink:
+        with ipc.new_file(sink, table.schema) as w:
+            w.write_table(table)
     tmp.replace(path)
 
 

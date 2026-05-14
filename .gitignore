@@ -26,8 +26,12 @@ mlruns/
 .env
 .env.*
 !.env.example
+env.txt
 *.pem
 credentials.json
+
+# Local scratch / agent outputs
+tmp/
 
 # OS
 .DS_Store

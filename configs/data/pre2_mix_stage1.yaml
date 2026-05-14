@@ -1,0 +1,80 @@
+# Pre-2 Stage 1 foundation data planning mix.
+# Planning only. This is bucket-level and must be resolved into source manifests
+# before any corpus build.
+
+schema_version: 0.1
+status: planning
+name: pre2_mix_stage1_foundation
+target_tokens: 1_050_000_000_000
+synthetic_cap: 0.03
+
+source_buckets:
+  - bucket: high_quality_educational_web
+    share_range: [0.35, 0.45]
+    candidate_sources:
+      - FineWeb-Edu
+      - DCLM-Baseline
+      - selected FineWeb/FineWeb2 educational slices
+    gates: [license, quality_score, dedup, decontam, pii, manifest]
+  - bucket: general_open_web
+    share_range: [0.10, 0.20]
+    candidate_sources:
+      - Dolma selected web subsets
+      - curated FineWeb/FineWeb2 slices
+    gates: [license, quality_score, domain_balance, dedup, decontam]
+  - bucket: multilingual_indic
+    share_range: [0.08, 0.12]
+    candidate_sources:
+      - FineWeb2 language-selected slices
+      - Indic curated corpora
+      - Wikipedia/Wikisource language slices
+    gates: [language_id, tokenizer_fertility, license, heldout_eval]
+  - bucket: code
+    share_range: [0.10, 0.15]
+    candidate_sources:
+      - The Stack v2 or StarCoder2Data after terms review
+      - permissive GitHub/documentation slices
+    gates: [license, pii, opt_out, benchmark_decontam]
+  - bucket: math_stem
+    share_range: [0.05, 0.08]
+    candidate_sources:
+      - FineMath
+      - OpenWebMath
+      - Proof-Pile-2 if loader/legal review passes
+      - MegaMath tagged subsets
+    gates: [license, provenance, decontam, synthetic_tags]
+  - bucket: books_reference_academic
+    share_range: [0.05, 0.10]
+    candidate_sources:
+      - Project Gutenberg public-domain subset
+      - Wikipedia/Wikibooks
+      - permitted academic/reference subsets
+    gates: [license, public_domain_check, dedup, long_doc_quality]
+  - bucket: qa_documentation
+    share_range: [0.03, 0.06]
+    candidate_sources:
+      - StackExchange
+      - high-quality documentation
+      - GitHub issues/discussions if license-cleared
+    gates: [license, formatting, answer_quality, decontam]
+  - bucket: synthetic_tagged
+    share_range: [0.00, 0.03]
+    candidate_sources:
+      - verified textbook-style exposition
+      - generated math/code with verifier pass
+    gates: [source_model_tag, prompt_tag, verifier, decontam]
+
+required_metadata:
+  - source
+  - source_version
+  - license
+  - language
+  - domain
+  - quality_score
+  - synthetic_flag
+  - synthetic_model
+  - dedup_cluster
+  - decontam_status
+  - eval_overlap
+  - tokenizer_hash
+  - document_hash

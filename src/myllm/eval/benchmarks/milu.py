@@ -62,7 +62,7 @@ _PREFIX_RE = re.compile(
 )
 
 # Default = Hindi only; the most relevant subgroup for our project per
-# `docs/playbook_alignment.md` S1 (Hindi from Sangraha at 4% of pretrain).
+# `docs/PRE2_FINAL_PLAN_2026-05-14.md` S1 (Hindi from Sangraha at 4% of pretrain).
 # Pass languages=("hindi", "bengali", ...) for broader Indic eval.
 DEFAULT_LANGUAGES = ("hindi",)
 

@@ -1,0 +1,181 @@
+# Pre-2 source registry.
+# This is the machine-checkable gate before canary/POC corpus builds.
+# Candidate public sources remain "needs_review" until exact subset, revision,
+# license, terms, and redistribution posture are approved.
+
+schema_version: 0.1
+status: planning
+name: pre2_source_registry_v0
+
+required_controls:
+  - license_review
+  - source_revision_pin
+  - tokenizer_hash
+  - document_hash
+  - dedup_report
+  - decontamination_report
+  - pii_filter_report
+  - emitted_token_count
+
+sources:
+  - source_id: pre2_tiny_internal_fixture
+    display_name: Pre-2 tiny internally generated fixture
+    provider: internal
+    source_type: fixture
+    buckets: [fixture_smoke]
+    license_status: approved
+    license_expression: Apache-2.0
+    revision: repo-generated-2026-05-14
+    estimated_tokens: 100_000
+    allowed_stages: [canary]
+    required_controls: [document_hash, tokenizer_hash]
+    synthetic: true
+    synthetic_origin: deterministic_test_fixture
+    notes: For smoke and canary plumbing only; not a model-quality corpus.
+
+  - source_id: fineweb_edu_v0_5
+    display_name: FineWeb-Edu v0.5 pinned slices
+    provider: HuggingFaceFW
+    source_type: web
+    buckets: [high_quality_educational_web, educational_general_web, highest_quality_educational_web]
+    license_status: approved
+    license_expression: ODC-By-1.0 + CommonCrawl-ToU
+    terms_url: https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
+    revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+    estimated_tokens: 1_300_000_000_000
+    allowed_stages: [poc, proxy]
+    required_controls: [license_review, source_revision_pin, quality_score, dedup_report, decontamination_report, pii_filter_report]
+    notes: Approved for internal v0.5 POC/proxy using pinned HF revision and bounded slices; public release still requires final legal/data-card review.
+
+  - source_id: dclm_baseline_candidate
+    display_name: DCLM-style high-quality web candidate
+    provider: MLCommons / research artifact
+    source_type: web
+    buckets: [high_quality_educational_web, general_open_web]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, quality_score, dedup_report, decontamination_report, pii_filter_report]
+    notes: Register constituent artifact and license before use.
+
+  - source_id: dolma_constituents_candidate
+    display_name: Dolma/OLMo-family constituent-source candidates
+    provider: AllenAI / source-specific
+    source_type: web
+    buckets: [general_open_web, educational_general_web]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, constituent_source_manifest, dedup_report, decontamination_report]
+    notes: Do not import as a black box; each constituent source needs its own approved entry.
+
+  - source_id: fineweb2_multilingual_candidate
+    display_name: FineWeb2 multilingual selected slices
+    provider: HuggingFaceFW
+    source_type: multilingual
+    buckets: [multilingual_indic, general_open_web]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, language_id, tokenizer_fertility, dedup_report, decontamination_report]
+    notes: Candidate for multilingual breadth; exact language slices must be pinned.
+
+  - source_id: ai4bharat_sangraha_candidate
+    display_name: Sangraha Indic candidate subsets
+    provider: AI4Bharat
+    source_type: multilingual
+    buckets: [multilingual_indic]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, language_id, tokenizer_fertility, decontamination_report]
+    notes: Verify exact subset license and access terms before training use.
+
+  - source_id: wikimedia_candidate
+    display_name: Wikipedia/Wikibooks/Wikisource candidate slices
+    provider: Wikimedia
+    source_type: books_reference
+    buckets: [books_reference_academic, books_reference_long_documents, multilingual_indic]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, attribution_plan, dedup_report, decontamination_report]
+    notes: Share-alike and attribution posture need legal approval before release training.
+
+  - source_id: project_gutenberg_verified_pd_candidate
+    display_name: Project Gutenberg verified public-domain subset
+    provider: Project Gutenberg / mirror-specific
+    source_type: books_reference
+    buckets: [books_reference_academic, books_reference_long_documents]
+    license_status: needs_review
+    required_controls: [public_domain_check, source_revision_pin, dedup_report, long_doc_quality, decontamination_report]
+    notes: Approve only verified public-domain records, not bulk mirror assumptions.
+
+  - source_id: the_stack_v2_candidate
+    display_name: The Stack v2 candidate slices
+    provider: BigCode
+    source_type: code
+    buckets: [code, code_documentation]
+    license_status: needs_review
+    required_controls: [license_review, terms_acceptance_record, repository_license_scan, pii_filter_report, benchmark_decontam]
+    notes: RAIL-style restrictions and repository licenses must be reflected in release posture.
+
+  - source_id: permissive_code_docs_candidate
+    display_name: Permissive code and documentation candidate slices
+    provider: source-specific
+    source_type: code
+    buckets: [code, code_documentation, qa_documentation]
+    license_status: needs_review
+    required_controls: [license_review, repository_license_scan, opt_out_check, dedup_report, decontamination_report]
+    notes: Prefer source-level permissive license manifests over broad crawl labels.
+
+  - source_id: open_web_math_v0_5
+    display_name: OpenWebMath v0.5 pinned slices
+    provider: open-web-math
+    source_type: math
+    buckets: [math_stem, math_stem_reasoning]
+    license_status: approved
+    license_expression: ODC-By-1.0 + CommonCrawl-ToU
+    terms_url: https://huggingface.co/datasets/open-web-math/open-web-math
+    revision: fde8ef8de2300f5e778f56261843dab89f230815
+    estimated_tokens: 14_700_000_000
+    allowed_stages: [poc, proxy]
+    required_controls: [license_review, source_revision_pin, provenance_report, decontamination_report]
+    notes: Approved for internal v0.5 POC/proxy using pinned HF revision and bounded slices; public release still requires final legal/data-card review.
+
+  - source_id: finemath_candidate
+    display_name: FineMath candidate slices
+    provider: source-specific
+    source_type: math
+    buckets: [math_stem, math_stem_reasoning]
+    license_status: needs_review
+    required_controls: [license_review, source_revision_pin, provenance_report, decontamination_report]
+    notes: Keep generated/synthetic-origin records separate from organic web/math text.
+
+  - source_id: stackexchange_candidate
+    display_name: StackExchange-derived candidate data
+    provider: StackExchange / source-specific
+    source_type: qa_documentation
+    buckets: [qa_documentation]
+    license_status: needs_review
+    required_controls: [license_review, attribution_plan, share_alike_review, decontamination_report]
+    notes: Share-alike and attribution obligations must be resolved before training use.
+
+  - source_id: synthetic_verified_math_code_candidate
+    display_name: Verified synthetic math/code candidate traces
+    provider: internal_or_permissive_teacher
+    source_type: synthetic
+    buckets: [synthetic_tagged, synthetic_verified_math_code, synthetic_reasoning_textbook_traces]
+    license_status: needs_review
+    required_controls: [source_model_license_review, prompt_manifest, verifier_report, synthetic_accounting, decontamination_report]
+    synthetic: true
+    synthetic_origin: pending_teacher_or_generator_manifest
+    notes: Synthetic content counts toward caps and is not allowed until source model/output rights are approved.
+
+  - source_id: proof_pile_2_blocked
+    display_name: Proof-Pile-2
+    provider: EleutherAI
+    source_type: math
+    buckets: [math_stem]
+    license_status: blocked
+    required_controls: [loader_stability_review, license_review]
+    notes: Blocked for current pipeline due loader fragility and decompression failures; revisit only with a stable ingestion proof.
+
+  - source_id: unlicensed_private_or_leaked_data_excluded
+    display_name: Unlicensed, private, scraped social/private, or leaked corpora
+    provider: prohibited
+    source_type: web
+    buckets: [excluded]
+    license_status: excluded
+    required_controls: [none]
+    notes: Excluded from all training stages.

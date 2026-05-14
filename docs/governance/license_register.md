@@ -1,126 +1,94 @@
-# License Register — MyLLM v1
-*Status: SCAFFOLDING (B9, 2026-05-12 audit). Filled per actual run state at v1 release.*
+# License Register - MyLLM Base Program
 
-This document is the authoritative record of every dataset license, model
-license, and license clause that constrains the MyLLM v1 model's training,
-distillation, and release. It pairs with the data card and model card.
+Status: live draft, refreshed for the pre-2 plan on 2026-05-14.
 
-Required by:
-- EU AI Act GPAI obligations (Aug 2, 2025): copyright policy + transparency
-- ISO/IEC 42001 lifecycle process
-- NIST AI RMF GenAI profile
+This register records dataset licenses, model-license constraints, excluded
+sources, benchmark licenses, and release-posture assumptions for the MyLLM
+1B-class base-model program. It pairs with `data_card_v1.md`,
+`model_card_v1.md`, and the current plan in
+`docs/PRE2_FINAL_PLAN_2026-05-14.md`.
 
----
+## Pretraining Dataset Candidates
 
-## Pretraining datasets
+| Source | License / terms posture | Current use | Notes |
+|---|---|---|---|
+| HuggingFaceFW/fineweb-edu | ODC-By 1.0 | Candidate / likely core source | Requires attribution tracking and quality-slice accounting. |
+| bigcode/the-stack-v2 | BigCode Open RAIL-M v1 | Candidate code source | T&C accepted 2026-05-11; downstream use restrictions must be mirrored in release docs. |
+| Wikimedia / Wikipedia | CC-BY-SA 4.0 | Candidate, capped | Share-alike/legal interpretation needs counsel before public Apache-2.0 weight release. |
+| Project Gutenberg / pg19-like public-domain books | Public domain where verified | Candidate, capped | Use only verified public-domain material. |
+| allenai/peS2o | ODC-By 1.0 | Candidate science source | Track source provenance. |
+| open-web-math/open-web-math | ODC-By 1.0 | Candidate math source | Preferred over fragile Proof-Pile-2 ingestion. |
+| Stack Exchange-derived data | CC-BY-SA 4.0 / site terms | Candidate, capped | Share-alike and attribution implications need legal review. |
+| ai4bharat/sangraha | CC-BY-4.0 | Candidate Indic source | Useful for Hindi/Indic coverage; verify exact subset licenses. |
+| C4 / multilingual C4-like data | ODC-By 1.0 where using AllenAI C4 | Candidate multilingual source | Keep language splits explicit. |
+| Dolma / OLMo-family sources | Mixed, source-specific | Candidate after source-level license review | Do not import as a black box; register each constituent source. |
+| DCLM / FineWeb-style high-quality web data | License varies by artifact | Candidate after source-level license review | Use quality filters, dedup, and source accounting. |
 
-| HF dataset | License | License text URL | T&C accepted? | Notes |
-|---|---|---|---|---|
-| HuggingFaceFW/fineweb-edu | ODC-By 1.0 | https://opendatacommons.org/licenses/by/1-0/ | N/A (open) | |
-| bigcode/the-stack-v2 | BigCode Open RAIL-M v1 | https://huggingface.co/datasets/bigcode/the-stack-v2 | ✅ accepted 2026-05-11 | Use-restriction clauses re weapons / hate speech / etc. |
-| wikimedia/wikipedia | CC-BY-SA 4.0 | https://creativecommons.org/licenses/by-sa/4.0/ | N/A | Share-alike: derivatives must be CC-BY-SA |
-| pg19 | Public domain (Project Gutenberg pre-1919) | https://www.gutenberg.org/policy/license.html | N/A | |
-| allenai/peS2o | ODC-By 1.0 | https://huggingface.co/datasets/allenai/peS2o | N/A | |
-| open-web-math/open-web-math | ODC-By 1.0 | https://huggingface.co/datasets/open-web-math/open-web-math | N/A | |
-| HuggingFaceH4/stack-exchange-preferences | CC-BY-SA 4.0 | https://stackexchange.com/legal | N/A | |
-| ai4bharat/sangraha | CC-BY-4.0 | https://huggingface.co/datasets/ai4bharat/sangraha | N/A | 251B tokens / 22 langs; Hindi = 34.5B (verified 2026-05-12) |
-| mc4 (deprecated → allenai/c4) | ODC-By 1.0 | https://huggingface.co/datasets/allenai/c4 | N/A | |
+## Excluded Or Blocked Sources
 
-### Excluded pretrain sources (with reason)
-
-| HF dataset | Status | Why |
+| Source | Status | Reason |
 |---|---|---|
-| nvidia/Nemotron-CC | EXCLUDED | NVIDIA gating; manual approval pending (as of 2026-05-12). Re-include if/when access lands. |
-| EleutherAI/proof-pile-2 | EXCLUDED PERMANENTLY | Loader fragility (zstd decompression failures mid-stream); 4 separate failure modes during pre-launch smoke. Math slice absorbed by open-web-math. |
+| nvidia/Nemotron-CC | Blocked unless access and terms are approved | Gated source; no training use until access and license review are complete. |
+| EleutherAI/proof-pile-2 | Excluded for current pipeline | Loader fragility and decompression failures; math coverage should come from more stable sources. |
+| Unlicensed crawls, scraped social/private content, leaked corpora | Excluded | Fails release, governance, and reproducibility standards. |
+| API-generated outputs from closed commercial LLMs | Excluded | Typical terms restrict using outputs to develop competing models. |
 
----
+## Teacher And Distillation Policy
 
-## Distillation teachers
+The current pre-2 decision is to train the base model primarily from real
+corpus data. Heterogeneous-tokenizer top-K logit distillation is not part of
+the foundation training plan. Distillation may return later only as a
+bounded experiment with permissive teachers, tokenizer-aligned targets, legal
+review, and clear ablation wins.
 
-Locked teacher plan v2 — see `docs/teacher_distillation_strategy.md` for full reasoning.
+| Teacher family | Current status | Reason |
+|---|---|---|
+| Open permissive base models such as OLMo-family checkpoints | Possible future experiment | Need exact checkpoint license, tokenizer compatibility, and quality-gate evidence. |
+| DeepSeek-family checkpoints | Not locked | Requires exact current checkpoint and license review before use. |
+| Llama-family checkpoints | Excluded for derivative-weight release unless counsel approves | Community license terms impose naming and large-user restrictions. |
+| Gemma-family checkpoints | Excluded for training/distillation into this base model | Model terms can cover derivatives and synthetic outputs. |
+| GPT / Claude / Gemini API outputs | Excluded | Closed-provider terms commonly prohibit training competing models on outputs. |
+| Mistral checkpoints with revenue or derivative restrictions | Excluded | Restrictive clauses are not acceptable for a clean foundation release. |
 
-| Teacher model | License | Critical clauses | Allowed for our use? |
-|---|---|---|---|
-| `deepseek-ai/DeepSeek-V4-Pro-Base` | MIT | None — fully permissive | ✅ YES — locked as primary teacher |
-| `allenai/Olmo-3-1125-32B` | Apache-2.0 | None — fully permissive | ✅ YES — locked as secondary teacher (production phase only, after canary) |
+## Planned Output License
 
-### Teachers we EXPLICITLY excluded (and why)
+Target posture: Apache-2.0 for code and, if legal review clears the final data
+mix, Apache-2.0 or another permissive license for weights.
 
-| Teacher | License | Critical clause | Verdict |
-|---|---|---|---|
-| `mistralai/Mistral-Medium-3.5-128B` | "Modified MIT" | *"You are not authorized to exercise any rights under this license if the global consolidated monthly revenue of your company exceeds $20 million."* — applies to derivatives + combined works | EXCLUDED. Distilled logits would arguably create a derivative; the $20M cap is a perpetual time-bomb on every weight that comes from a run including this teacher. |
-| `Qwen/Qwen3.6-27B` | Apache-2.0 | (technical, not legal): "Type: Causal Language Model with Vision Encoder" + thinking-mode-default | EXCLUDED. Not a base text-only model. Distilling would bake `<think>` traces + vision-encoder coupling into our base. |
-| Any Llama 3.x / Llama 4 | Llama Community License | 700M-MAU clause + naming-prefix requirement on derivatives | EXCLUDED. Same class of restriction as Mistral's revenue clause. |
-| Gemma 2 / 3 / 4 (Google) | Gemma TOS | §3.2 "Model Derivatives" explicitly covers "synthetic data Outputs by Gemma" | EXCLUDED. Forbidden for distillation. |
-| GPT-4 / Claude / Gemini API outputs | Various ToS | "do not use outputs to develop competing models" | EXCLUDED. |
-| `deepseek-ai/DeepSeek-V3-Base` | DeepSeek Model License (custom, non-OSI) | Custom commercial-use clauses; legally requires per-use review | EXCLUDED for v1 (redundant with V4-Pro family anyway). |
+Open legal risks before any public release:
 
----
+1. CC-BY-SA sources may impose attribution or share-alike obligations.
+2. RAIL-style code-data restrictions may need to be propagated into acceptable-use terms.
+3. Every gated dataset must have auditable terms acceptance and redistribution review.
+4. The data card must report real token shares from the final manifest, not planning estimates.
 
-## Output license posture
+## Benchmark Datasets
 
-**Planned**: MyLLM-1B-Base-v1 weights released under **Apache-2.0**.
+Benchmark text may be ingested for decontamination indexes and evaluation
+prompts, not for training. Register exact versions before release.
 
-This is feasible because:
-- All training-data licenses (ODC-By, CC-BY-SA, CC-BY-4.0, public domain) permit derivative use
-- All distillation-teacher licenses (MIT, Apache-2.0) permit derivative use without naming or revenue restrictions
-- All data filters (length, repetition, PII redaction) are own-implementation
-- The model code is our own (Apache-2.0 friendly)
+| Benchmark | License posture | Use |
+|---|---|---|
+| MMLU-Pro / MMLU-ProX | Permissive or dataset-specific; verify exact source | Eval + decontamination |
+| Belebele | CC-BY-SA 4.0 | Eval + decontamination |
+| MILU | CC-BY 4.0 | Eval + decontamination |
+| HumanEval+ / MBPP+ | MIT-style; verify exact source | Code eval + decontamination |
+| GSM8K / MATH / MGSM | Verify exact dataset license and version | Math eval + decontamination |
+| BBH / IFEval | Apache-2.0 or source-specific; verify exact version | Reasoning / instruction eval |
+| LiveCodeBench | Versioned benchmark | Eval only; decontam by release window, not static old snapshot |
+| RULER | Synthetic eval | Generated at eval time |
 
-**Caveats / open questions** (legal review before release):
-- CC-BY-SA share-alike: technically a model trained on Wikipedia-style data may need to honor share-alike on the model's outputs. Industry practice has been to argue training is fair use / not subject to share-alike. Need counsel sign-off before Apache-2.0 release if Wikipedia stays at >5% of pretrain mix.
-- bigcode/the-stack-v2 RAIL-M clauses: the use-restrictions section is binding on the distributor. Our model card must include the same use-restriction clauses (or successor language). To be drafted.
-
----
-
-## Benchmark datasets (decontamination + eval)
-
-The pretrain corpus is n-gram-decontaminated against these benchmarks. The
-*benchmark* license matters here because we ingest prompt text into the
-decontamination index (which lives alongside training artifacts) — not for
-training, but for filtering. All eight extended-gate benchmarks below are
-permissive (MIT or Apache-2.0).
-
-| Benchmark id | HF dataset | License | Used for |
-|---|---|---|---|
-| mmlu-prox | li-lab/MMLU-ProX | MIT | Decon + eval |
-| belebele | facebook/belebele | CC-BY-SA 4.0 | Decon + eval |
-| milu | ai4bharat/MILU | CC-BY 4.0 | Decon + eval |
-| mmlu-pro | TIGER-Lab/MMLU-Pro | MIT | Decon + planned eval |
-| humaneval-plus | evalplus/humanevalplus | MIT | Decon + planned eval |
-| mbpp-plus | evalplus/mbppplus | MIT | Decon + planned eval |
-| gsm8k | openai/gsm8k | MIT | Decon + planned eval |
-| math | HuggingFaceH4/MATH-500 | MIT | Decon + planned eval |
-| mgsm | juletxara/mgsm | MIT | Decon + planned eval |
-| bbh | maveriq/bigbenchhard | Apache-2.0 | Decon + planned eval |
-| ifeval | google/IFEval | Apache-2.0 | Decon + planned eval |
-
-LiveCodeBench and RULER are intentionally NOT in the decontamination
-index: LiveCodeBench is release-versioned (re-index per release in Phase C
-when eval lands), RULER is synthetic and generated at eval time.
-
----
-
-## Acceptance log
+## Acceptance Log
 
 | Date | Action | By |
 |---|---|---|
-| 2026-05-11 | bigcode/the-stack-v2 T&Cs accepted on HuggingFace | harshit.hv@samatva.com |
-| 2026-05-11 | nvidia/Nemotron-CC access requested | harshit.hv@samatva.com (PENDING) |
-| 2026-05-12 | Mistral-Medium-3.5-128B excluded after license file ($20M cap) verification | harshit.hv@samatva.com |
-| 2026-05-12 | Qwen3.6-27B excluded after modality verification (multimodal + thinking) | harshit.hv@samatva.com |
-| 2026-05-12 | DeepSeek-V4-Pro-Base locked as primary teacher | harshit.hv@samatva.com |
-| 2026-05-12 | Olmo-3-1125-32B locked as secondary teacher (production-only) | harshit.hv@samatva.com |
+| 2026-05-11 | bigcode/the-stack-v2 T&C accepted on Hugging Face | harshit.hv@samatva.com |
+| 2026-05-11 | nvidia/Nemotron-CC access requested | harshit.hv@samatva.com |
+| 2026-05-14 | Old locked-teacher plan removed from current governance docs | Codex |
+| 2026-05-14 | Pre-2 data, teacher, and license posture aligned to current plan | Codex |
 
----
+## Update Policy
 
-## Update policy
-
-Any new dataset or teacher addition MUST:
-1. Update this register with license + URL
-2. Get T&C acceptance if gated
-3. Be reflected in `configs/data/pretrain_mix.yaml` AND `configs/decay_phase_distillation.yaml`
-4. Update `docs/data_card_v1_template.md`
-5. Be verified via dossier WebFetch (per `feedback_verify_before_locking.md`)
-
-Removals follow the same process — preserve the entry in the "EXCLUDED" sections for audit history.
+Any dataset, teacher, benchmark, or release-license change must update this
+register in the same PR as the config or manifest change. Preserve excluded
+entries for audit history, but avoid linking to deleted review drafts.

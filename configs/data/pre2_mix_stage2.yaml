@@ -1,0 +1,46 @@
+# Pre-2 Stage 2 capability data planning mix.
+# Planning only. Resolve buckets into source manifests before build.
+
+schema_version: 0.1
+status: planning
+name: pre2_mix_stage2_capability
+target_tokens: 300_000_000_000
+synthetic_cap: 0.07
+
+source_buckets:
+  - bucket: educational_general_web
+    target_share: 0.47
+    allowed_range: [0.45, 0.55]
+    purpose: retain broad language/factual coverage
+  - bucket: code
+    target_share: 0.17
+    allowed_range: [0.15, 0.20]
+    purpose: improve programming and documentation competence
+  - bucket: math_stem
+    target_share: 0.14
+    allowed_range: [0.12, 0.18]
+    purpose: improve reasoning and symbolic competence
+  - bucket: qa_documentation
+    target_share: 0.09
+    allowed_range: [0.08, 0.12]
+    purpose: improve explanatory and task-style text
+  - bucket: multilingual_indic
+    target_share: 0.08
+    allowed_range: [0.08, 0.12]
+    purpose: preserve Hindi/Indic and multilingual quality
+  - bucket: synthetic_verified_math_code
+    target_share: 0.05
+    allowed_range: [0.03, 0.07]
+    purpose: targeted skill repair only
+
+entry_gates:
+  - stage1_loss_curve_reviewed
+  - source_bucket_validation_available
+  - contamination_report_available
+  - synthetic_sources_tagged
+
+exit_artifacts:
+  - source_bucket_loss_delta
+  - eval_delta_vs_stage1
+  - memorization_probe_report
+  - continue_to_anneal_decision
