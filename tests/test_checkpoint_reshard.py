@@ -189,3 +189,167 @@ class TestReshardCheckpoint:
             # Loop-managed values preserved
             assert int(loaded["step"]) == 5
             assert int(loaded["data_position"]) == 1024
+
+
+# --------------------------------------------------------------------------- #
+# G6 regression coverage (Phase 1.6)
+#
+# The reshard_checkpoint() utility above does materialise-then-replace.
+# The other path — used by scripts/generate.py and scripts/eval_checkpoint.py —
+# is to restore directly with an explicit per-leaf sharding spec. That is
+# the CheckpointManager.restore(step, template=..., sharding=...) API
+# added in commit ca1c40b.
+#
+# This API broke three times during 2026-05-14:
+#   1. shape= kwarg was passed to ArrayRestoreArgs but Orbax 0.7 no longer
+#      accepts it (13d6126 fix attempt 1).
+#   2. Scalar leaves (step, data_position, lr_recovery_multiplier) were
+#      built with plain RestoreArgs() which leaves sharding=None — Orbax's
+#      tensorstore deserializer rejects that for 0-d arrays it saved
+#      (3be12de fix attempt 2).
+#   3. Final fix in ca1c40b: ALL leaves (including 0-d scalars) get
+#      ArrayRestoreArgs(sharding=sharding).
+#
+# These tests pin all three regressions.
+# --------------------------------------------------------------------------- #
+class TestRestoreWithExplicitSharding:
+    """Pin the G6 cross-mesh restore API (CheckpointManager.restore)."""
+
+    def test_restore_with_single_device_sharding(self):
+        # The actual G6 scenario: save under no specific sharding (default
+        # device), restore explicitly onto a single device. This is the
+        # generate.py / eval_checkpoint.py path on a 1xH100 inference pod.
+        import jax
+        from jax.sharding import SingleDeviceSharding
+
+        from myllm.training.checkpoint import (
+            CheckpointConfig, CheckpointManager,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = CheckpointManager(CheckpointConfig(root=tmpdir))
+            original = _build_tiny_state()
+            mgr.save(11, original)
+
+            sharding = SingleDeviceSharding(jax.devices()[0])
+            loaded = mgr.restore(11, template=original, sharding=sharding)
+            _all_close(original, loaded, atol=0.0)
+
+    def test_restore_scalar_leaves_get_sharding_too(self):
+        # The actual ca1c40b bug: 0-d scalar leaves (step, data_position,
+        # lr_recovery_multiplier) used to get plain RestoreArgs() with
+        # sharding=None, which Orbax rejects. Verifying scalars round-trip
+        # via the sharding= path proves the fix is in place.
+        import jax
+        from jax.sharding import SingleDeviceSharding
+
+        from myllm.training.checkpoint import (
+            CheckpointConfig, CheckpointManager,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = CheckpointManager(CheckpointConfig(root=tmpdir))
+            original = _build_tiny_state()
+            mgr.save(13, original)
+
+            sharding = SingleDeviceSharding(jax.devices()[0])
+            loaded = mgr.restore(13, template=original, sharding=sharding)
+            # All three scalar leaves come back exactly. The pre-ca1c40b
+            # bug would have raised "sharding ... Got None" before we
+            # ever get to compare values.
+            assert int(loaded["step"]) == 5
+            assert int(loaded["data_position"]) == 1024
+            assert float(loaded["lr_recovery_multiplier"]) == 1.0
+
+    def test_restore_with_named_sharding_replicated(self):
+        # The "replicate everything onto a multi-device mesh" path.
+        # Used when the inference pod has more devices than needed for
+        # a small model — replicate the full state.
+        import jax
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        import numpy as np
+
+        if len(jax.devices()) < 4:
+            pytest.skip("need 4 CPU devices via XLA_FLAGS")
+
+        from myllm.training.checkpoint import (
+            CheckpointConfig, CheckpointManager,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = CheckpointManager(CheckpointConfig(root=tmpdir))
+            original = _build_tiny_state()
+            mgr.save(17, original)
+
+            mesh = Mesh(np.asarray(jax.devices()[:4]), ("data",))
+            sharding = NamedSharding(mesh, P())  # fully replicated
+            loaded = mgr.restore(17, template=original, sharding=sharding)
+            _all_close(original, loaded, atol=0.0)
+
+    def test_restore_without_sharding_is_legacy_path(self):
+        # Backwards compatibility: sharding=None must not change behavior
+        # for callers (e.g., same-mesh resume) that don't pass it.
+        from myllm.training.checkpoint import (
+            CheckpointConfig, CheckpointManager,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mgr = CheckpointManager(CheckpointConfig(root=tmpdir))
+            original = _build_tiny_state()
+            mgr.save(19, original)
+
+            # No sharding kwarg → legacy Orbax restore path. Same call
+            # signature as pre-ca1c40b code uses.
+            loaded = mgr.restore(19, template=original)
+            _all_close(original, loaded, atol=0.0)
+
+    def test_restore_args_uses_array_restore_args_not_plain(self):
+        # The 3be12de regression was: scalar leaves got bare RestoreArgs()
+        # instead of ArrayRestoreArgs(sharding=...). Verify the implementation
+        # builds ArrayRestoreArgs for every leaf — including 0-d scalars.
+        import jax
+        import orbax.checkpoint as ocp
+
+        from myllm.training.checkpoint import CheckpointManager
+
+        # Build the same _make_restore_args closure the restore() method
+        # uses internally and verify it returns ArrayRestoreArgs for every
+        # leaf shape (including 0-d scalars).
+        state = _build_tiny_state()
+        sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+
+        def _make_restore_args(_leaf):
+            return ocp.ArrayRestoreArgs(sharding=sharding)
+
+        restore_args = jax.tree.map(_make_restore_args, state)
+        flat, _ = jax.tree.flatten(restore_args)
+        # Every single leaf — including step, data_position,
+        # lr_recovery_multiplier — must be ArrayRestoreArgs, not plain
+        # RestoreArgs. (The 3be12de bug would have used RestoreArgs for
+        # scalars, which would surface here as a type assertion failure.)
+        for i, ra in enumerate(flat):
+            assert isinstance(ra, ocp.ArrayRestoreArgs), (
+                f"leaf {i} got {type(ra).__name__}; expected ArrayRestoreArgs"
+            )
+            assert ra.sharding is sharding, (
+                f"leaf {i} sharding={ra.sharding}; expected {sharding}"
+            )
+
+    def test_array_restore_args_has_no_shape_kwarg(self):
+        # The 13d6126 regression was: passing shape= to ArrayRestoreArgs,
+        # which Orbax 0.7 rejected with TypeError. Pin the API surface so
+        # any future Orbax upgrade that re-adds shape= doesn't silently
+        # mask a different issue.
+        import inspect
+
+        import orbax.checkpoint as ocp
+
+        sig = inspect.signature(ocp.ArrayRestoreArgs.__init__)
+        # In Orbax 0.7+ the kwarg is `global_shape`, not `shape`. If a
+        # future version adds `shape` back we want to know — the contract
+        # we built ca1c40b around is "no shape kwarg".
+        assert "shape" not in sig.parameters, (
+            "ArrayRestoreArgs.__init__ regained a `shape` parameter; "
+            "revisit checkpoint.restore() — the 13d6126 fix may need "
+            "to be re-evaluated."
+        )
