@@ -720,6 +720,20 @@ def main() -> int:
              "iterator is rewound. Without this, an exhausted-corpus "
              "resume immediately ends (iter has 0 remaining batches).",
     )
+    p.add_argument(
+        "--corpus-epochs",
+        type=int,
+        default=1,
+        help="How many times the corpus iterator cycles through the packed "
+             "corpus before stopping. Default 1 = single-pass (legacy "
+             "behavior; matches the 2026-05-13 pilot). For Stage 2 (1B "
+             "rehearsal at 10-30B tokens vs the 5B-token pilot corpus), "
+             "set to 6+ so the run reaches --total-steps before the "
+             "data iterator exhausts. Set to 0 for unlimited (iterator "
+             "wraps forever; --total-steps is the only stop signal). "
+             "Sequence IDs and data_position remain monotonically "
+             "increasing across epochs, so resume is bitwise-exact.",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -887,7 +901,11 @@ def main() -> int:
             resumed_data_position=resumed_data_position,
             start_sequence_id=start_sid,
         )
-        pair_iter = iter_packed_pairs(reader, start_sequence_id=start_sid)
+        pair_iter = iter_packed_pairs(
+            reader,
+            start_sequence_id=start_sid,
+            epochs=args.corpus_epochs if args.corpus_epochs > 0 else None,
+        )
         batch_iter = batch_pairs(pair_iter, micro_batch, model_input_len)
     else:
         # Real path: tokenizer + HF stream + filters + tokenize + pack.

@@ -817,6 +817,7 @@ def iter_packed_pairs(
     reader: PackedCorpusReader,
     *,
     start_sequence_id: int = 0,
+    epochs: int | None = 1,
 ) -> Iterator[tuple[list[int], list[int], list[int], list[int]]]:
     """Yield ``(input_ids, labels, segment_ids, loss_mask)`` tuples from a
     packed corpus — same shape as ``myllm.data.tokenize.make_input_label_pairs``.
@@ -846,28 +847,117 @@ def iter_packed_pairs(
 
     The packed corpus is canonical (sequence_id → tokens never changes),
     so this gives bitwise-exact resume.
+
+    Multi-epoch (Phase 1.1, 2026-05-15)
+    -----------------------------------
+    ``epochs`` controls how many times the iterator cycles through the
+    full corpus:
+
+      - ``epochs=1`` (default): single-pass. When sequence_id reaches
+        ``reader.total_sequences``, the iterator stops. This is the
+        legacy behavior — the Stage 1 pilot used this and stopped at
+        step ~152K when the corpus exhausted.
+      - ``epochs=N`` (N > 1): cycle N times. Sequence indices wrap via
+        ``sid % reader.total_sequences``. Total yields = N * total.
+      - ``epochs=None``: unlimited — wrap forever. Stop signal is the
+        training loop's ``--total-steps`` ceiling, not the iterator.
+
+    ``start_sequence_id`` is the GLOBAL position (a token-count cursor
+    that monotonically increases across epochs). It can exceed
+    ``reader.total_sequences``; the iterator computes the in-corpus
+    index via modulo internally. On resume after K full epochs +
+    sequence S within the next epoch, the saved
+    ``data_position / model_input_len`` will equal
+    ``K * reader.total_sequences + S`` — bitwise exact.
+
+    Logs an ``epoch_boundary_crossed`` event each time the iterator
+    wraps back to sequence 0, so the operator can see how many epochs
+    have elapsed in the live training run.
     """
+    if reader.total_sequences <= 0:
+        return  # empty corpus — nothing to yield
+
+    total = reader.total_sequences
     sid = start_sequence_id
-    while sid < reader.total_sequences:
-        tokens = reader.get_sequence(sid)
-        seg_ids = reader.get_segment_ids(sid)
-        if tokens.shape[0] < 2:
+
+    if epochs is not None and epochs < 1:
+        raise ValueError(f"epochs must be None or >= 1, got {epochs!r}")
+
+    # epochs=1 is the LEGACY single-pass mode: stop when sid hits
+    # total_sequences, no wrap-around. Preserves the
+    # 2026-05-13-pilot-era contract — start_sequence_id=3 on a
+    # 5-sequence corpus yields exactly 2 sequences (sids 3 and 4),
+    # NOT 5 (which would require wrapping).
+    if epochs == 1:
+        while sid < total:
+            yielded = _yield_one(reader, sid)
+            if yielded is not None:
+                yield yielded
             sid += 1
-            continue
-        # int conversion — the training loop's batch_pairs expects Python
-        # int / list, not numpy scalars (some downstream code is dtype-strict).
-        token_list = [int(t) for t in tokens]
-        seg_list = [int(s) for s in seg_ids]
-        input_ids = token_list[:-1]
-        labels = token_list[1:]
-        input_segments = seg_list[:-1]
-        label_segments = seg_list[1:]
-        loss_mask = [
-            1 if (a == b and a != -1) else 0
-            for a, b in zip(input_segments, label_segments, strict=False)
-        ]
-        yield input_ids, labels, input_segments, loss_mask
+        return
+
+    # Multi-epoch mode: epochs > 1 OR epochs=None (unlimited). Wrap via
+    # modulo. Cap = epochs * total yields from start, or unbounded for
+    # epochs=None. start_sequence_id can exceed total (e.g., resuming
+    # from a checkpoint that was N epochs deep); modulo handles it.
+    max_yields: int | None = epochs * total if epochs is not None else None
+    sequences_yielded = 0
+    short_skip_budget = max(2 * total, 1000)  # guard vs all-short-sequences infinite loop
+    short_skipped = 0
+    current_epoch = sid // total
+
+    while max_yields is None or sequences_yielded < max_yields:
+        actual_sid = sid % total
+        new_epoch = sid // total
+        if new_epoch != current_epoch and sid > start_sequence_id:
+            log.info(
+                "epoch_boundary_crossed",
+                from_epoch=current_epoch,
+                to_epoch=new_epoch,
+                sequence_id=sid,
+                actual_in_epoch=actual_sid,
+            )
+            current_epoch = new_epoch
+
+        yielded = _yield_one(reader, actual_sid)
         sid += 1
+        if yielded is None:
+            short_skipped += 1
+            if short_skipped > short_skip_budget:
+                log.error(
+                    "iter_packed_pairs_all_sequences_short_aborting",
+                    total=total, start=start_sequence_id,
+                    short_skipped=short_skipped,
+                )
+                return
+            continue
+        yield yielded
+        sequences_yielded += 1
+
+
+def _yield_one(reader: "PackedCorpusReader", sid: int) -> tuple[list[int], list[int], list[int], list[int]] | None:
+    """Helper for iter_packed_pairs: build the 4-tuple for a single sequence.
+
+    Returns None if the sequence is too short (< 2 tokens) — caller should
+    skip and advance to the next sid.
+    """
+    tokens = reader.get_sequence(sid)
+    seg_ids = reader.get_segment_ids(sid)
+    if tokens.shape[0] < 2:
+        return None
+    # int conversion — the training loop's batch_pairs expects Python
+    # int / list, not numpy scalars (some downstream code is dtype-strict).
+    token_list = [int(t) for t in tokens]
+    seg_list = [int(s) for s in seg_ids]
+    input_ids = token_list[:-1]
+    labels = token_list[1:]
+    input_segments = seg_list[:-1]
+    label_segments = seg_list[1:]
+    loss_mask = [
+        1 if (a == b and a != -1) else 0
+        for a, b in zip(input_segments, label_segments, strict=False)
+    ]
+    return input_ids, labels, input_segments, loss_mask
 
 
 def sequence_id_from_data_position(data_position: int, sequence_length: int) -> int:
