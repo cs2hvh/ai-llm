@@ -1341,42 +1341,64 @@ def main() -> int:
     # exactly as before. Batches are taken off the top of the iterator so
     # the same data isn't seen during both eval and training.
     #
-    # Caveat: when FSDP is on, train_step's JIT uses donate_argnums=(0,)
-    # which destroys the input state's buffer to save GPU memory. Reusing
-    # train_step_fn for eval would corrupt training state on the next
-    # training call. Skip eval in that mode for now — a proper
-    # forward-only eval_step (no grads, no opt, no donation) is the right
-    # fix and goes in alongside the Stage 2 prep work. Stage 1 pilot at
-    # 250M doesn't need FSDP (fits on a single H200), so eval works there.
+    # 2026-05-15 Phase 1.5: switched to a forward-only ``make_eval_step``
+    # under FSDP. train_step's ``donate_argnums=(0,)`` is what previously
+    # made eval-during-FSDP unsafe (calling train_step on the live state
+    # would clobber its buffers). The new ``eval_step`` runs forward + CE
+    # only, no grads, no opt update, no donation — safe to call between
+    # FSDP train steps.
     eval_fn = None
     if args.eval_every is not None:
-        if args.fsdp:
-            log.warning(
-                "eval_hook_skipped_fsdp",
-                msg="--eval-every ignored when --fsdp is set: train_step's "
-                    "donate_argnums=(0,) would corrupt state on eval reuse. "
-                    "Eval will be wired with a forward-only eval_step before "
-                    "Stage 2.",
-            )
-        else:
-            from myllm.training.eval_hook import (
-                make_validation_loss_eval,
-                take_held_out_batches,
-            )
-            log.info(
-                "eval_hook_enabling",
-                eval_every=args.eval_every,
-                n_held_out_batches=args.eval_n_batches,
-            )
-            held_out, batch_iter = take_held_out_batches(batch_iter, args.eval_n_batches)
-            if held_out:
-                eval_fn = make_validation_loss_eval(train_step_fn, held_out, label="val")
-                log.info("eval_hook_attached", n_batches=len(held_out))
-            else:
-                log.warning(
-                    "eval_hook_skipped",
-                    reason="data iterator produced 0 held-out batches",
+        from myllm.training.eval_hook import take_held_out_batches
+        log.info(
+            "eval_hook_enabling",
+            eval_every=args.eval_every,
+            n_held_out_batches=args.eval_n_batches,
+            fsdp=bool(args.fsdp),
+        )
+        held_out, batch_iter = take_held_out_batches(batch_iter, args.eval_n_batches)
+        if held_out:
+            if args.fsdp:
+                # FSDP-safe path: dedicated forward-only eval_step that
+                # declares the same in_shardings as train_step but does
+                # NOT donate. State is invariant across eval_step calls,
+                # so the live training state is safe to pass straight in.
+                from myllm.training.eval_step import make_eval_step
+                from myllm.training.eval_hook import (
+                    make_validation_loss_eval_from_eval_step,
                 )
+                eval_step_fn = make_eval_step(
+                    model=model,
+                    z_loss_coef=model_cfg.z_loss_coef,
+                    ignore_index=pad_id,
+                    use_chunked_ce=args.use_chunked_ce,
+                    chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+                    state_shardings=state_shardings,
+                    batch_sharding=batch_sharding_for_train_step,
+                )
+                eval_fn = make_validation_loss_eval_from_eval_step(
+                    eval_step_fn, held_out, label="val",
+                )
+                log.info(
+                    "eval_hook_attached",
+                    n_batches=len(held_out),
+                    path="eval_step (FSDP-safe forward-only)",
+                )
+            else:
+                # DP-replicated path: the legacy train_step_fn reuse is
+                # still fine here (no donation in that mode).
+                from myllm.training.eval_hook import make_validation_loss_eval
+                eval_fn = make_validation_loss_eval(train_step_fn, held_out, label="val")
+                log.info(
+                    "eval_hook_attached",
+                    n_batches=len(held_out),
+                    path="train_step (legacy, DP-replicated)",
+                )
+        else:
+            log.warning(
+                "eval_hook_skipped",
+                reason="data iterator produced 0 held-out batches",
+            )
 
     final_state = train_loop(
         train_step_fn=train_step_fn,

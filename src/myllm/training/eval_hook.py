@@ -66,7 +66,8 @@ def make_validation_loss_eval(
 
     For the cleanest implementation, pass an `eval_step_fn` that runs
     forward + loss only (no grads, no optax update). See
-    myllm.training.train_step.make_eval_step.
+    ``make_validation_loss_eval_from_eval_step`` below — that is the
+    FSDP-safe path (Phase 1.5, 2026-05-15).
     """
     n_batches = len(held_out_batches)
     if n_batches == 0:
@@ -103,6 +104,54 @@ def make_validation_loss_eval(
             f"{label}_n_batches": float(len(losses)),
         }
         return out
+
+    return eval_fn
+
+
+def make_validation_loss_eval_from_eval_step(
+    eval_step_fn: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
+    held_out_batches: list[dict[str, Any]],
+    *,
+    label: str = "val",
+) -> Callable[[int, dict[str, Any]], dict[str, float] | None]:
+    """Build an `eval_fn` from a forward-only ``eval_step_fn``.
+
+    Use this with ``myllm.training.eval_step.make_eval_step(...)``. The
+    difference vs. ``make_validation_loss_eval`` is that ``eval_step_fn``
+    returns a metrics dict (no new state) and does NOT donate state
+    buffers, so it is safe to call between FSDP-donated train steps.
+
+    Phase 1.5 (2026-05-15): introduced so the loop can run eval under
+    ``--fsdp`` without train_step's donate_argnums clobbering state.
+
+    The data_position pop guard is no longer needed: the eval_step's
+    JIT in_shardings include data_position when the live state has it,
+    or it's absent entirely. Either way no int32 cast happens.
+    """
+    n_batches = len(held_out_batches)
+    if n_batches == 0:
+        raise ValueError("held_out_batches must contain at least one batch")
+
+    def eval_fn(step: int, state: dict[str, Any]) -> dict[str, float] | None:
+        losses: list[float] = []
+        for batch in held_out_batches:
+            metrics = eval_step_fn(state, batch)
+            loss = float(metrics.get("loss", float("nan")))
+            if math.isfinite(loss):
+                losses.append(loss)
+        if not losses:
+            log.warning("eval_no_finite_loss", step=step, batches_tried=n_batches)
+            return None
+        mean_loss = sum(losses) / len(losses)
+        try:
+            ppl = float(math.exp(mean_loss))
+        except OverflowError:
+            ppl = float("inf")
+        return {
+            f"{label}_loss": float(mean_loss),
+            f"{label}_ppl": ppl,
+            f"{label}_n_batches": float(len(losses)),
+        }
 
     return eval_fn
 

@@ -32,6 +32,7 @@ def cross_entropy_with_z_loss(
     ignore_index: int | None = None,
     z_loss_coef: float = 1.0e-4,
     loss_mask: Any | None = None,
+    return_per_token: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Token-level cross-entropy + z-loss.
 
@@ -46,6 +47,12 @@ def cross_entropy_with_z_loss(
             masking (R2): we don't want to penalize the model for failing to
             predict doc B's first token from doc A's content. AND-combined
             with the ignore_index check if both are set.
+        return_per_token: when True, the metrics dict additionally contains
+            ``nll_per_token: [B, S]`` (raw NLL, BEFORE weight masking) and
+            ``weight_per_token: [B, S]`` (the combined ignore_index+loss_mask
+            weight). The caller can do its own grouped reduction (e.g.,
+            per-source bucketed mean for P0-1 per-source val loss). When
+            no weight applies, ``weight_per_token`` is all-ones.
 
     Returns:
         ``(loss, metrics_dict)``. The metrics dict contains ``ce`` and
@@ -82,7 +89,13 @@ def cross_entropy_with_z_loss(
         z_loss = ops.mean(log_z * log_z)
 
     total = ce + z_loss_coef * z_loss
-    return total, {"ce": ce, "z_loss": z_loss}
+    metrics: dict[str, Any] = {"ce": ce, "z_loss": z_loss}
+    if return_per_token:
+        metrics["nll_per_token"] = nll
+        metrics["weight_per_token"] = (
+            weight if weight is not None else ops.ones_like(nll)
+        )
+    return total, metrics
 
 
 def chunked_cross_entropy_with_z_loss(
@@ -95,6 +108,7 @@ def chunked_cross_entropy_with_z_loss(
     ignore_index: int | None = None,
     z_loss_coef: float = 1.0e-4,
     loss_mask: Any | None = None,
+    return_per_token: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Cross-entropy + z-loss that never materialises the full [B, S, V] logit tensor.
 
@@ -208,7 +222,13 @@ def chunked_cross_entropy_with_z_loss(
         z_loss = ops.mean(log_z * log_z)
 
     total = ce + z_loss_coef * z_loss
-    return total, {"ce": ce, "z_loss": z_loss}
+    metrics: dict[str, Any] = {"ce": ce, "z_loss": z_loss}
+    if return_per_token:
+        metrics["nll_per_token"] = nll
+        metrics["weight_per_token"] = (
+            weight if weight is not None else ops.ones_like(nll)
+        )
+    return total, metrics
 
 
 def kl_div_topk_loss(
