@@ -161,12 +161,13 @@ class CheckpointManager:
                 import orbax.checkpoint as ocp
 
                 def _make_restore_args(leaf):
-                    # jax.Array / numpy array leaves: pass sharding + dtype + shape
+                    # jax.Array / numpy array leaves: pass sharding + dtype.
+                    # orbax 0.7's ArrayRestoreArgs doesn't accept `shape` —
+                    # the saved checkpoint already encodes per-array shape.
                     if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
                         return ocp.ArrayRestoreArgs(
                             sharding=sharding,
                             dtype=leaf.dtype,
-                            shape=tuple(leaf.shape),
                         )
                     # Python scalars (step, multiplier, data_position): default
                     return ocp.RestoreArgs()
