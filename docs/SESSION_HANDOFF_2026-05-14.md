@@ -863,3 +863,62 @@ All Week 1 work is CPU-only. ~25-35 hr of engineering. Can do in a couple of foc
 3. Generation VERIFIED on 1×H100. Model produces coherent text, multilingual ✓.
 4. NEXT: Phase 1 = multi-epoch corpus reader + reviewer P0s, no GPU needed.
 ```
+
+---
+
+## 15. THIRD POST-PILOT UPDATE (2026-05-15, evening — Phase 1 done)
+
+### 15.0 TL;DR
+
+Phase 1 (the no-GPU engineering queue from §14.9) is **complete**, in 5 commits on `main`. Suite went from 642 → 674 tests (+32 new). All P0 reviewer asks shipped. The repo is now ready for Phase 3 (release-scorecard wiring + benchmark run, ~$50 of GPU) or Phase 4 (Stage 2 launch).
+
+### 15.1 Commits, one-line each
+
+| # | Commit | What |
+|---|---|---|
+| 1.1 | `be7574c` | Multi-epoch corpus reader — `iter_packed_pairs(epochs=N)`. Stage 2 unblocker (8 tests) |
+| 1.3+1.4 | `082fa20` | `--production` flag + strict packed-resume safety (P0-2 + P0-3, 5 tests) |
+| 1.5 | `107a551` | Forward-only `make_eval_step` — FSDP-safe, no donation, exposes per-token NLL (7 tests) |
+| 1.6 | `97c59c1` | `tests/test_checkpoint_reshard.py` — pins all 3 G6 regression modes (6 tests) |
+| 1.2 | `fbe9c72` | Per-source val loss (P0-1) via per-token NLL bucketed by DocSpan `source_id` (14 tests) |
+
+### 15.2 What each delivers
+
+- **Multi-epoch reader** (`src/myllm/data/packed_corpus.py:iter_packed_pairs`): `epochs=1` keeps legacy single-pass; `epochs=N` wraps `sid % total` for N cycles; `epochs=None` is unlimited. `data_position` stays monotonically increasing across epochs so resume is bitwise-exact. Stage 2 (1B at 10-30B tokens on a 5B-token corpus) needs `epochs=6+`.
+- **`--production` flag** (`scripts/run_pretrain.py`): currently gates one fail-closed behavior — `peek_data_position_from_checkpoint(strict=True)`. Refuses to resume when the manifest is missing `data_position` (would otherwise silently re-feed already-trained data). More guards land here as Stage 2/3 prep items come up.
+- **Forward-only `eval_step`** (`src/myllm/training/eval_step.py`): runs model+CE forward; no grads, no opt update, no donation. Compiles under the same `in_shardings` as `train_step` when `state_shardings=` is supplied, so live FSDP-sharded training state is reusable. Enabled `--eval-every` to work under `--fsdp` (was previously skipped with a warning). Also surfaces `nll_per_token` + `weight_per_token` for the per-source bucketer below.
+- **G6 regression tests** (`tests/test_checkpoint_reshard.py`): pins the three failure modes from the 2026-05-14 fix iteration — (a) `shape=` kwarg gone from Orbax 0.7, (b) scalar leaves need `ArrayRestoreArgs(sharding=…)` not bare `RestoreArgs()`, (c) every leaf gets a sharding, no exceptions. Cross-mesh restore will fail loudly in CI if any of those regresses.
+- **Per-source val loss** (`src/myllm/training/eval_hook.py`): `build_per_source_held_out(reader, n_sequences, micro_batch_size)` returns batches + per-label-position source-id arrays + a `source_name -> int` vocab. `make_per_source_validation_loss_eval_from_eval_step` consumes those plus the forward-only eval_step (with `return_per_token_nll=True`) to report aggregate AND per-source `val_loss` / `val_ppl` / `val_n_tokens`. Wired via `--per-source-val-loss` CLI flag; requires `--packed-corpus-root` (synthetic / on-the-fly data has no DocSpan provenance).
+
+### 15.3 Things to know when launching the next training run
+
+- **Stage 2 launch must use `--corpus-epochs 6` (or more)** to avoid the same single-pass exhaustion that ended the Stage 1 pilot at step 152K.
+- **Always pass `--production`** for real training runs. Smoke + dev can leave it off.
+- **For the model card per-source PPL table**, add `--per-source-val-loss --eval-every 5000` (or 2000 for Stage 1.5-style decay passes). Output keys are `val_loss/<source>` and `val_ppl/<source>` — they show up in W&B as nested metrics under `val/`.
+- **FSDP eval is now safe.** No more `eval_hook_skipped_fsdp` warning. The forward-only path is selected automatically when `--fsdp` is set.
+
+### 15.4 What stays open
+
+- **Phase 3** (release_scorecard.py predict_fn + benchmark run) — ~$50 of H100 time. Yields the concrete benchmark numbers (MMLU/MMLU-Pro/HumanEval/IFEval/MATH/MBPP-Plus/MGSM/MMLU-ProX/Belebele) that the eventual model card and Stage 2 decision gate need.
+- **Phase 4** (Stage 2 — 1B rehearsal at 10-30B tokens) — ~$700–$2000.
+- **Phase 5** (Stage 3 distillation prep + launch) — ~$13K. Teacher caching needs to land; v2 corpus needs to be composed at scale.
+- **Polish**: bump R2 `max_pool_connections`, add a RoPE drift test, stream from S3 instead of local stage, fix the per-source corpus parsers that have one-off issues.
+- **[USER ACTION]** Harshit needs to request HF access for `ai4bharat/MILU` before we can add it to the decontam index.
+
+### 15.5 What the test suite looks like now
+
+```
+$ pytest -q
+==== 674 passed, 1 skipped, … warnings in ~48s ====
+```
+
+Phase 1 added: 8 (1.1) + 5 (1.3+1.4) + 7 (1.5) + 6 (1.6) + 14 (1.2) = 40 net (some are extensions to existing test classes). New test files added in Phase 1:
+- `tests/test_eval_step.py` (7 tests)
+- `tests/test_per_source_eval.py` (14 tests)
+
+### 15.6 Don't forget when you read this
+
+- Phase 1 is DONE. Don't redo any of those items.
+- For the per-source PPL numbers in the model card, you'll need to *re-eval the pilot checkpoint* with `--per-source-val-loss`. That's a 1-GPU 5-min job on the final checkpoint (`step-000171990` from R2).
+- Auto-memory pointer in `MEMORY.md` still says `project_session_state_2026-05-14.md`. That's fine — this section 15 + the Phase 1 commits *together* are what a fresh session needs.
+

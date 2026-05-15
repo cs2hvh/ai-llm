@@ -2,7 +2,7 @@
 
 **Status doc, kept current.** Single source of truth for "what is this project, how does it work, where is it." If something in here is out of date, fix it first.
 
-**Last update:** 2026-05-13 (evening) — FSDP shipped + validated on 2× H200 SXM; dual-mode decontam wired; code-only source built (180M tokens); audit machinery green; **Stage 1 pilot unblocked**.
+**Last update:** 2026-05-15 (evening) — **Stage 1 pilot DONE** (250M, val_loss 2.730 / val_ppl 15.34, on R2). G6 cross-mesh checkpoint restore FIXED + regression-pinned. Generation verified on 1×H100 (English + Hindi). **Phase 1 engineering queue DONE** (5 commits: 1.1 multi-epoch reader, 1.3+1.4 --production + strict resume, 1.5 forward-only eval_step, 1.6 G6 tests, 1.2 per-source val loss). Suite 674 passed.
 **Lead:** harshit.hv@samatva.com (solo, treats project as enterprise)
 **Build partner:** Claude (Anthropic) — pair-programming + research agent fleet
 **Repo:** https://github.com/cs2hvh/ai-llm — `main` branch is canonical
@@ -26,36 +26,41 @@ A **1B-parameter decoder-only foundation model**, trained from scratch with a mu
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    CURRENT STATE (2026-05-13)                    │
+│                    CURRENT STATE (2026-05-15)                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │   PHASE                              STATUS                      │
 │   ─────────────────────────────────  ──────────────────────      │
-│   Phase 1: Tokenizer + design        ✓ DONE (R2-hosted)          │
-│   Phase A: Bug fixes + audit         ✓ DONE                      │
-│   Phase B: Corpus pipeline           ✓ DONE (820M staged)        │
-│   Canary ladder (L0/L1/L3/L5)        ✓ ALL PASS on 5×H200        │
-│   Throughput baseline                ✓ Measured (1B+250M)        │
-│   Senior review round 1              ✓ Processed                 │
-│   Senior review round 2              ✓ All P0 fixes shipped      │
-│   FSDP-in-JAX (Commits A–G)          ✓ DONE (gauntlet G1-G4 PASS │
-│                                        on 2× H200 SXM 2026-05-13)│
-│   Code-only source (codeparrot)      ✓ DONE (180M tokens, R2)    │
-│   Dual-mode decontam (8+13 gram)     ✓ DONE (wired+indexed, 10   │
-│                                        benchmarks on R2)         │
-│   Teacher audit machinery            ✓ DONE (real-text rerun TBD)│
+│   Tokenizer + design                 ✓ DONE (R2-hosted)          │
+│   Bug fixes + audit                  ✓ DONE                      │
+│   Corpus pipeline                    ✓ DONE                      │
+│   Canary ladder (L0/L1/L3/L5)        ✓ ALL PASS                  │
+│   FSDP-in-JAX (Commits A–G + G6 fix) ✓ DONE (cross-mesh restore) │
+│   Dual-mode decontam (8+13 gram)     ✓ DONE                      │
+│   Composed 5B pilot corpus           ✓ DONE (R2, 13 sources)     │
 │                                                                  │
-│   ▶ Compose v2 1B corpus             ◐ NEXT (~30 min on GPU pod) │
-│   ▶ Re-bench 1B-shape post-FSDP      ◯ during Stage 1 warmup     │
-│   ▶ Stage 1: 250M pilot @ 30-50B     ◐ READY TO LAUNCH           │
-│   ▶ Stage 2: 1B rehearsal @ 10-30B   ◯ blocks on Stage 1 green   │
-│   ▶ Stage 3: Base v1 (600B tokens)   ◯ blocks on Stage 2 green   │
-│   ▶ Release scorecard                ◯ blocks on base run        │
+│   Stage 1 pilot @ 250M, ~5B tokens   ✓ DONE  (val_ppl 15.34)     │
+│   Stage 1.5 decay-only continuation  ✓ DONE  (val_ppl 15.34)     │
+│   Generation smoke test (1×H100)     ✓ DONE  (EN + Hindi)        │
+│                                                                  │
+│   Phase 1 engineering (no-GPU)       ✓ DONE  (1.1/1.3+1.4/1.5/   │
+│                                        1.6/1.2 — 5 commits)      │
+│                                                                  │
+│   ▶ Phase 3: release scorecard       ◐ NEXT (~$50 of H100 time)  │
+│   ▶ Phase 4: Stage 2 (1B rehearsal)  ◯ ~$700–$2000               │
+│   ▶ Phase 5: Stage 3 (distillation)  ◯ ~$13K, blocks on Stage 2  │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Reference today's commits** (chronological): cc56daa wires dual-mode decontam through `build_packed_corpus.py`; aaff2fb fixes the mmlu-prox column-schema bug; b1dd5dd ships the teacher top-K mass audit script + 14 tests; eab98c9 lands `pod_setup_apt.sh` + `pod_launch_gpu.sh` + `run_fsdp_gauntlet.sh` + `run_teacher_audit.sh`; 7002d50 isolates gauntlet checkpoints from real-run state; 6cf299e pins the canonical `torch==2.7.1 + jax[cuda12]==0.4.38` single-venv recipe after a 7-attempt CUDA-version saga.
+**Reference recent Phase 1 commits** (chronological, all on `main`):
+`be7574c` Phase 1.1 multi-epoch corpus reader (Stage 2 unblocker).
+`082fa20` Phase 1.3 + 1.4 `--production` flag + strict resume safety (P0-2 + P0-3).
+`107a551` Phase 1.5 forward-only `make_eval_step` (FSDP-safe, no donation, exposes per-token NLL).
+`97c59c1` Phase 1.6 G6 cross-mesh restore regression coverage.
+`fbe9c72` Phase 1.2 per-source val loss via per-token NLL bucketed by DocSpan source-id.
+
+**Pilot artifacts on R2**: see [`pilots/250m_v1/R2_PATHS.md`](../pilots/250m_v1/R2_PATHS.md). Final checkpoint at `s3://llm-data/checkpoints/pilot-250m-v1-decay/step-000171990/` (2.65 GB).
 
 ---
 
@@ -70,10 +75,9 @@ A **1B-parameter decoder-only foundation model**, trained from scratch with a mu
 | **Data storage** | **Cloudflare R2** (S3-compatible) | Cheap egress, fast (32-way parallel multipart upload → 954 Mbps measured). Per-source corpora + composed mixed corpus + tokenizer + checkpoints all live there. |
 | **Data pipeline** | HuggingFace `datasets` streaming | One stream per source, filter chain → tokenize → pack → write to R2 |
 | **Checkpoint** | **Orbax** (sharded, templated restore) | Atomic shard writes, per-step manifest.json for partial-write detection, templated restore preserves namedtuples (muP `MultiTransformState`) |
-| **Sharding (current)** | DP-replicated state via `jax.sharding.NamedSharding(mesh, P("data"))` for inputs | **Limitation**: optimizer state is replicated, not sharded. Hits OOM at 5-GPU 1B/seq=8192. |
-| **Sharding (planned)** | **FSDP/ZeRO-3** via `NamedSharding` on params + opt state | Lets us fit 1B/seq=8192 at mb≥2 per device. ~3-5 dev-days. |
+| **Sharding** | **FSDP/ZeRO-3** via `NamedSharding` on params + opt state, `donate_argnums` + `with_sharding_constraint` for reduce-scatter; G6 cross-mesh restore lets a checkpoint saved on N devices load on M devices | Shipped 2026-05-13, validated G1-G4 on 2× H200 SXM. G6 reshard fix shipped + regression-pinned 2026-05-14/15. Eval is FSDP-safe via the forward-only `eval_step` (Phase 1.5). |
 | **Logging** | structlog (JSON events) + W&B for training runs | Greppable, machine-parseable; W&B for human dashboarding |
-| **Tests** | pytest, ~457 tests across 39 files | All green; no GPU dependency for the core suite |
+| **Tests** | pytest, 674 tests across ~45 files | All green; no GPU dependency for the core suite |
 
 **Why JAX over PyTorch**: deterministic JIT, native multi-device via shardings (no separate FSDP library), cleaner functional patterns. The cost is a smaller ecosystem and harder ZeRO-3 implementation than PyTorch+FSDP. Trading ecosystem for control.
 
@@ -495,21 +499,29 @@ STAGE 0 — FSDP + canary validation (no real training)
   Goal:        FSDP working + L2/L3 canaries green
   Compute:     ~$200-500 on a brief GPU session
   Gate:        L2 parity within 5e-3, L3-multigpu bitwise-exact
-  Status:      ◐ STARTING TOMORROW
+  Status:      ✓ DONE (2026-05-13) — gauntlet G1-G4 PASS on 2× H200 SXM
 
-STAGE 1 — Pilot (250M @ 30-50B tokens)
-  Duration:    2-3 days wall
+STAGE 1 — Pilot (250M @ ~5B tokens, corpus-bound)
+  Duration:    ~2 days wall (Stage 1: 152K steps + Stage 1.5: 20K steps)
   Goal:        End-to-end pipeline validation (corpus → train → eval)
   Compute:     ~$1K
   Gate:        Loss curve smooth, watchdog quiet, no NaN, eval suite runs
-  Status:      ◯ blocks on Stage 0
+  Status:      ✓ DONE (2026-05-13/14) — val_loss 2.730 / val_ppl 15.34;
+               artifacts on R2 (see pilots/250m_v1/R2_PATHS.md).
+               Found single-pass exhaustion → fixed via Phase 1.1
+               multi-epoch reader. int32 overflow in data_position →
+               fixed (commit 9f442f7). Pilot generates coherent
+               English + Hindi text.
 
 STAGE 2 — 1B systems rehearsal (10-30B tokens)
   Duration:    3-5 days wall
   Goal:        Validate the 1B-shape model trains stable + at expected MFU
   Compute:     ~$2-3K
   Gate:        Throughput ≥ 80% of expected; eval curves moving
-  Status:      ◯ blocks on Stage 1
+  Status:      ◯ blocks on Phase 3 (release scorecard benchmark on the
+               pilot checkpoint, before committing $700-2K to Stage 2).
+               Must launch with --corpus-epochs >= 6 and --production
+               (Phase 1.1 / 1.3+1.4 deliverables).
 
 STAGE 3 — Base v1 (600B tokens @ 1B params)         ◀── THE REAL RUN
   Duration:    ~30 days wall (FSDP, seq=4096) or ~50 days (seq=8192)
@@ -647,17 +659,28 @@ llm-build/
 │   ├── playbook_alignment.md
 │   ├── safety_policy.md
 │   └── indiaai_compute_brief.md     ← Compute-subsidy application draft
+├── pilots/
+│   └── 250m_v1/                     ← Stage 1 pilot time-capsule (archival)
+│       ├── README.md / RESULTS.md / TIMELINE.md / COMMANDS.md / R2_PATHS.md
+│       ├── configs/                 ← Frozen pilot configs
+│       └── artifacts/               ← Small JSON snapshots (eval results, manifests)
 ├── scripts/
-│   ├── run_pretrain.py              ← Main training entry point
+│   ├── run_pretrain.py              ← Main training entry point. Flags now include
+│   │                                  --corpus-epochs, --production,
+│   │                                  --per-source-val-loss, --reset-data-position-on-resume.
 │   ├── build_packed_corpus.py       ← Per-source corpus builder
 │   ├── compose_mixed_corpus.py      ← Multi-source mixer
-│   ├── run_parallel_builds.py       ← Fan-out runner for the 12 sources
+│   ├── eval_checkpoint.py           ← Post-hoc val_loss/val_ppl from a saved checkpoint
+│   │                                  (auto-detects device topology via G6 reshard)
+│   ├── generate.py                  ← Autoregressive top-p sampling from a checkpoint
+│   ├── inspect_quarantine.py        ← Forensic tool: NaN-skip provenance via seq_meta
+│   ├── run_parallel_builds.py       ← Fan-out runner for the 13 sources
 │   ├── benchmark_throughput.py      ← Throughput + MFU bench
 │   ├── canary_ladder.py             ← L0 + L5 ladder runner
 │   ├── canary_l3_resume.py          ← Synthetic-data L3 (bitwise resume)
 │   ├── canary_l3_resume_packed.py   ← Real packed-corpus L3 (caught off-by-one!)
 │   ├── train_tokenizer_spm.py       ← Native SentencePiece tokenizer trainer
-│   └── build_decontamination_index.py  ← Pre-build 11-benchmark index
+│   └── build_decontamination_index.py  ← Pre-build 10-benchmark index
 └── src/myllm/
     ├── model/
     │   ├── config.py                ← Pydantic ModelConfig + MupConfig
@@ -667,9 +690,16 @@ llm-build/
     │   ├── train_step.py            ← JIT'd (state, batch) → (state, metrics)
     │   ├── loop.py                  ← Outer loop + watchdog + recovery
     │   ├── optimizer.py             ← AdamW + muP multi_transform + fp32 pins
-    │   ├── mesh.py                  ← Sharding (currently DP-replicated)
-    │   ├── checkpoint.py            ← Orbax wrapper + retention + WSM merge
-    │   ├── loss.py                  ← gather-CE + chunked-CE + multi-teacher KL
+    │   ├── mesh.py                  ← Sharding (FSDP via NamedSharding)
+    │   ├── checkpoint.py            ← Orbax wrapper + retention + WSM merge +
+    │   │                              G6 cross-mesh restore (sharding= kwarg)
+    │   ├── loss.py                  ← gather-CE + chunked-CE + multi-teacher KL;
+    │   │                              return_per_token surfaces nll_per_token
+    │   ├── eval_step.py             ← Forward-only eval (Phase 1.5). No grads,
+    │   │                              no donation, exposes nll_per_token for
+    │   │                              per-source bucketing.
+    │   ├── eval_hook.py             ← make_validation_loss_eval (legacy +
+    │   │                              eval_step-based + per-source variants)
     │   ├── decay_phase.py           ← Decay-phase distillation activation
     │   ├── watchdog.py              ← Loss-spike detection
     │   ├── quarantine.py            ← NaN-batch provenance log
@@ -711,14 +741,18 @@ llm-build/
 | **Multi-GPU loss parity (L2 canary)** | **✓ proven** | **DP vs FSDP loss curves match within atol=5e-3 over 50 synthetic steps** |
 | **Dual-mode decontam (8+13 gram MinHash)** | **✓ proven** | **10 benchmarks indexed (1.75M / 1.74M ngrams); 558 docs flagged in codeparrot build (real catch)** |
 | **Code-only source build** | **✓ proven** | **180M tokens from codeparrot/github-code-clean, 2 shards, R2-hosted (codeparrot fallback for gated starcoderdata)** |
-| **Teacher-audit machinery (top-K mass)** | **✓ proven** | **OLMo-2-13B + DeepSeek-V2-Lite loaded on H200 SXM, audit forward ran, top-K masses computed. K decision deferred until re-run on real text (synthetic random tokens → uniform softmax → K=32 recommendation is a methodology artifact, not real)** |
-| Reshard checkpoint across mesh shapes (G6) | ◐ partial | Orbax restore call lacks RestoreArgs.sharding; correctness logic exists, API call needs fix before Stage 2 pod transitions |
-| Real training at 1B scale | ◯ not yet | Unblocked: Stage 1 pilot can launch |
+| **Teacher-audit machinery (top-K mass)** | **✓ proven** | **OLMo-2-13B + DeepSeek-V2-Lite loaded on H200 SXM, audit forward ran, top-K masses computed. K decision deferred until re-run on real text** |
+| **Reshard checkpoint across mesh shapes (G6)** | **✓ proven** | **Cross-mesh restore via explicit per-leaf sharding (commit `ca1c40b`); 4→1 device restore validated on 1×H100, regression-pinned in `tests/test_checkpoint_reshard.py`** |
+| **Real training at 250M pilot scale** | **✓ proven** | **Stage 1 (~152K steps) + Stage 1.5 decay (20K steps) on 4×H200 SXM; final val_loss 2.730 / val_ppl 15.34** |
+| **End-to-end generation** | **✓ proven** | **Autoregressive top-p sampling via `scripts/generate.py` on 1×H100; coherent English and Hindi output from pilot checkpoint** |
+| **Multi-epoch corpus iteration** | **✓ proven** | **`iter_packed_pairs(epochs=N)` shipped 2026-05-15; needed for Stage 2 (1B at 10-30B tokens on a 5B-token corpus)** |
+| **FSDP-safe forward-only eval_step** | **✓ proven** | **`make_eval_step` with no grads / no opt / no donation; declares matching in_shardings to train_step. Replaces the legacy train_step reuse path under `--fsdp`** |
+| **Per-source val loss bucketing** | **✓ proven** | **Per-token NLL bucketed by DocSpan source_id; reports `val_loss/<src>` and `val_ppl/<src>` per source; CLI: `--per-source-val-loss`** |
+| Real training at 1B scale | ◯ not yet | Phase 4 — Stage 2 rehearsal at 10-30B tokens, ~$700–$2000 |
 | Distillation teacher cache build | ◯ not yet | Audit machinery ready; cache step pending Stage 3 prep |
-| Eval pipeline run end-to-end | ◯ not yet | Eval adapters exist; not yet wired into training loop |
-| Release scorecard | ◯ not yet | Format defined; depends on a v1 model |
+| Release scorecard predict_fn + benchmarks | ◯ not yet | Phase 3 — ~$50 of GPU time once predict_fn is wired |
 
-**Translation (2026-05-13):** the data + canary + single-step infra is **done and proven**, and the **FSDP correctness gates are green**. We are unblocked for Stage 1 pilot training. The remaining items are operational (compose v2 corpus, run pilot, run rehearsal, run base) rather than design or correctness.
+**Translation (2026-05-15):** the data + canary + single-step infra is **done and proven**, FSDP is **shipped and proven at 250M pilot scale** (Stage 1 + Stage 1.5 completed end-to-end), and the **Phase 1 engineering queue** (multi-epoch reader, --production, FSDP-safe eval, G6 regressions, per-source val loss) **is shipped**. We are unblocked for Phase 3 (release-scorecard wiring + benchmark run, ~$50 GPU) and after that Phase 4 (Stage 2 rehearsal).
 
 ---
 
