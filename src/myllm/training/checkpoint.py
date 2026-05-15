@@ -161,16 +161,15 @@ class CheckpointManager:
                 import orbax.checkpoint as ocp
 
                 def _make_restore_args(leaf):
-                    # jax.Array / numpy array leaves: pass sharding + dtype.
-                    # orbax 0.7's ArrayRestoreArgs doesn't accept `shape` —
-                    # the saved checkpoint already encodes per-array shape.
-                    if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
-                        return ocp.ArrayRestoreArgs(
-                            sharding=sharding,
-                            dtype=leaf.dtype,
-                        )
-                    # Python scalars (step, multiplier, data_position): default
-                    return ocp.RestoreArgs()
+                    # Force-set sharding for EVERY leaf. orbax saves Python
+                    # scalars (step, multiplier, data_position) as 0-d
+                    # arrays in tensorstore, so they need a sharding too.
+                    # Returning plain ``RestoreArgs()`` for them leaves
+                    # ``sharding=None``, which orbax's deserializer rejects
+                    # ("sharding passed to deserialization should be
+                    # specified ... Got None") even though those leaves
+                    # have no spatial dimensions to shard.
+                    return ocp.ArrayRestoreArgs(sharding=sharding)
 
                 restore_args = jax.tree.map(_make_restore_args, template)
                 state = self._orbax.restore(
