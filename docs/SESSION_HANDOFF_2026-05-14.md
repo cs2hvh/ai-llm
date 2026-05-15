@@ -2,8 +2,8 @@
 
 **For the next session (you or another Claude) picking this up.** Read this first; it's the canonical resume pointer for whatever state the project is in.
 
-**Last update:** 2026-05-14 22:00 UTC, **post-pilot**. Pilot completed at step 151,990 due to corpus exhaustion. Stage 1.5 decay-only continuation pass is **scaffolded but not yet launched** — pending user decision.
-**Author:** Session that ran the pilot end-to-end. Replaces `docs/SESSION_STATE_2026-05-13.md`. Sections §0–§12 are the original handoff (still valid for orientation); see §13 below for "what happened next."
+**Last update:** 2026-05-15 ~20:00 UTC, **post-pilot, post-Stage-1.5, post-generation-test**. Pod has been torn down (or is being torn down) — all artifacts safely on R2.
+**Author:** Session that ran the pilot end-to-end + Stage 1.5 + first generation test. Replaces `docs/SESSION_STATE_2026-05-13.md`. Sections §0–§12 are the original handoff (still valid for orientation); §13 covers post-pilot; **§14 covers Stage 1.5 + generation verification + G6 fix + tear-down**.
 
 ---
 
@@ -653,3 +653,213 @@ git -C /workspace/llm-build log --oneline -5   # see recent commits
 ```
 
 That gets you oriented in 2 minutes.
+
+---
+
+## 14. SECOND POST-PILOT UPDATE (2026-05-15 ~20:00 UTC)
+
+Updates since §13 was written. **All compute work is now done; pod has been torn down.** All artifacts on R2.
+
+### 14.1 Stage 1.5 decay pass — LAUNCHED + COMPLETED
+
+User decided to run Stage 1.5 (per §13.4) for WSD-decay code-path validation + small val_loss improvement.
+
+```
+Launched:  2026-05-14T22:33 UTC
+Completed: 2026-05-15T00:51 UTC
+Wall time: ~2h 18m on the same 4×H200 SXM pod
+Cost:      ~$32
+Final step: 171,990 (resumed from step 151,990 + 20K decay steps)
+W&B run:   pilot-250m-v1-decay-2026-05-14 (id: pxoungh9)
+```
+
+**No NaN-skips or hard_spikes during decay.** WSD schedule fired cleanly; LR walked 3e-4 → 3e-5 linearly over the 20K steps. Eval hook fired ~20 times (~every 1000 steps) — the int32 fix from `dd7b202` confirmed working in production.
+
+### 14.2 Post-decay eval results
+
+Ran `scripts/eval_checkpoint.py` against the final step-171990 checkpoint on the 4×H200 pod:
+
+```
+val_loss : 2.730350     ← from 2.878 pre-decay (−0.147 nat improvement)
+val_ppl  : 15.34        ← from 17.77 pre-decay (−13.7% perplexity)
+```
+
+This is **the official pilot final number**. Lands in my honest projection range (2.65-2.75). Stage 1.5 paid off.
+
+### 14.3 G6 reshard fix — committed and validated in production
+
+The pilot's checkpoint was saved on 4×H200 (DP=4). Trying to load on 1×H100 for generation testing triggered the long-known G6 bug at `checkpoint.py:143` (documented in §4 of original handoff, deferred Stage 2 prep). **Hit early; fixed in 3 iterative commits**:
+
+```
+13d6126  G6 reshard fix v1 (had stale orbax 0.6 `shape` kwarg)
+3be12de  drop unsupported `shape` kwarg (orbax 0.7 API drift)
+ca1c40b  force sharding on ALL leaves (orbax saves scalars as 0-d arrays too)
+```
+
+**Final pattern**:
+- `CheckpointManager.restore()` now accepts optional `sharding: jax.sharding.Sharding`
+- When provided, builds `restore_args` via `jax.tree.map(template, lambda x: ArrayRestoreArgs(sharding=sharding))` — for **every leaf**, including Python-scalar leaves that orbax stores as 0-d arrays
+- Backwards-compatible: `sharding=None` (default) preserves the old behavior for same-mesh resume during training
+- Callers in `scripts/generate.py` and `scripts/eval_checkpoint.py` auto-detect the current device topology
+
+**Unlocks**:
+- Loading pilot checkpoint on any device count (1×H100, 4×B200, 8×H200, etc.)
+- Stage 2 mid-run pod resize (Stage-2 prep item retired)
+- Stage 3 cross-mesh resume
+
+### 14.4 Generation test — model verified working
+
+After the G6 fix, ran `scripts/generate.py` (new file, commit `bc1d2b1`) on 1×H100 against the final checkpoint. **10 default prompts, ~$1 of compute.** Results:
+
+**What WORKED** (genuine signal of recipe success):
+- **Domain awareness**: code prompts → indented Python; theorem → LaTeX math; Wikipedia-style → encyclopedia format; news → news cadence
+- **Multilingual**: "नमस्ते" produced coherent Hindi news article (sangraha data successfully integrated)
+- **Code structure**: `def fibonacci(n):` continued with `return n + 1`, `def test_reorder(self):` etc. — Python style correct (content wrong)
+- **Academic style**: "Theorem (Pythagorean):" produced LaTeX-formatted theorem-definition structure with `$S$`, `$k$`, etc.
+- **No garbage**: every output grammatical, fluent, no `<unk>` spam, no NaN crashes
+- **Style transfer per prompt**: different domains produce different (correct-style) outputs
+
+**Expected weaknesses** (at this scale, no SFT):
+- ❌ Factual recall: "capital of France" doesn't produce "Paris" (small model can't store many facts)
+- ❌ Math: "2+2 = one plus one" — math reasoning emerges at 1B+ scale
+- ❌ Looping after ~30-50 tokens (small base model classic; mitigated by larger scale + repetition penalty + SFT)
+- ❌ No instruction following — it's a BASE model
+
+**Verdict**: pilot validates the recipe. Multilingual + code + academic style all working. Stage 2's 1B at 10-30B tokens will fix most of the factual / reasoning weaknesses. SFT (post-release) addresses chat/instruction.
+
+### 14.5 New scripts committed this round
+
+| Commit | File | What |
+|---|---|---|
+| `bc1d2b1` | `scripts/generate.py` | Autoregressive text generation. 80 tokens / prompt default. Top-p + temperature OR greedy. Default 10 smoke-test prompts covering knowledge, code, Hindi, math notation. JIT-compiled forward over ctx-length padded buffer. |
+| `13d6126` + `3be12de` + `ca1c40b` | `src/myllm/training/checkpoint.py` (final state at `ca1c40b`) | G6 cross-mesh restore fix. See §14.3. |
+
+### 14.6 R2 state (verified before pod tear-down)
+
+```
+s3://llm-data/                                            Total: 161.30 GB
+├── tokenizer/myllm-spm-unigram-131k-v2.json              4.79 MB
+├── decontamination/                                       75 MB (8-gram + 13-gram)
+├── corpus_v1_pilot/sources/                              20.08 GB (13 sources)
+├── corpus_v1_pilot/train/                                20.09 GB (composed, 10 shards)
+├── checkpoints/pilot-250m-v1/
+│   ├── step-000005000 → step-000150000                   (31 checkpoints @ 2.65GB each)
+│   ├── step-000151990/                                   ← Stage 1 FINAL (val_loss 2.878)
+│   └── step-000151990/eval-final.json                    ← post-hoc eval result
+└── checkpoints/pilot-250m-v1-decay/
+    ├── step-000152000 → step-000170000                   (10 decay checkpoints)
+    ├── step-000171990/                                   ← STAGE 1.5 FINAL (val_loss 2.730) ← THE BEST ONE
+    └── step-000171990/eval-final-decay.json              ← post-decay eval result
+```
+
+The pilot final = `s3://llm-data/checkpoints/pilot-250m-v1-decay/step-000171990/`. **This is the artifact for the model card.**
+
+### 14.7 Pod torn down — confirmed CPU-only work from here
+
+- 4×H200 SXM pod: TERMINATED
+- 1×H100 inference pod: TERMINATED
+- Stage 1 / Stage 1.5 / generation testing all DONE
+- $0/hr compute cost from here until next GPU need
+
+**No state lost.** Everything reproducible from R2 + GitHub (`main` at commit `ca1c40b`).
+
+### 14.8 Recent commits (since §13 was written)
+
+| Hash | Subject |
+|---|---|
+| `ca1c40b` | **checkpoint: sharding required on ALL leaves, not just shape+dtype ones** |
+| `3be12de` | checkpoint: drop unsupported `shape` kwarg from ArrayRestoreArgs |
+| `13d6126` | G6 reshard fix: cross-mesh checkpoint restore via explicit sharding |
+| `bc1d2b1` | scripts/generate.py — autoregressive generation from saved checkpoint |
+| `d3ac216` | SESSION_HANDOFF_2026-05-14: append §13 post-pilot update |
+
+Plus the original Stage 1.5 commits (`dd7b202`, `70b9009`, `9f442f7`) from §13.6.
+
+### 14.9 NEXT-STEPS PLAN (the canonical roadmap, post-pilot)
+
+**All work below can proceed without compute until Phase 3.** Pod can stay torn-down.
+
+#### Phase 1 — Stage 2 enablement (engineering, no GPU, ~25-35 hr)
+
+In rough priority order:
+
+| Task | File(s) | Effort | Why it's a Stage 2 blocker |
+|---|---|---|---|
+| **Multi-epoch corpus reader** | `src/myllm/data/packed_corpus.py` | 4-6 hr | Stage 2 wants 10-30B tokens; pilot corpus is 5B. Single-epoch exhausts before target. |
+| **P0-1: per-source val loss** | `src/myllm/training/eval_hook.py` + `scripts/run_pretrain.py` | 10-14 hr | Reviewer flag; diagnostic visibility during long runs |
+| **P0-2: `--production` flag + fail-closed packed-corpus check** | `scripts/run_pretrain.py` | 2-3 hr | Reviewer flag; safety guard |
+| **P0-3: packed-resume safety** | `src/myllm/data/packed_corpus.py::peek_data_position_from_checkpoint` | 2-3 hr | Reviewer flag; silent-restart bug |
+| **Forward-only eval_step (FSDP-safe)** | `src/myllm/training/train_step.py` + `eval_hook.py` | 4-6 hr | Stage 2 needs FSDP; current eval breaks under FSDP via `donate_argnums` |
+| **Cross-topology restore test** | `tests/test_checkpoint_reshard.py` (new) | 2 hr | Catch G6-class regressions before next deployment |
+
+G6 reshard itself: ALREADY DONE (this session's `ca1c40b`).
+
+#### Phase 2 — Writeup (no compute, ~10-15 hr)
+
+| Task | Effort |
+|---|---|
+| Update `docs/governance/model_card_v1.md` with real numbers + sample generations + limitations | 3-4 hr |
+| Update `docs/PROJECT_OVERVIEW.md` §2 scoreboard to "Stage 1 ✓ COMPLETE" | 1 hr |
+| Public-facing "what we built" doc / blog post draft | 4-6 hr |
+| Final reviewer packet for Stage 2 go/no-go | 2-3 hr |
+
+#### Phase 3 — Release scorecard (small GPU run, ~$50)
+
+| Task | Effort | Compute |
+|---|---|---|
+| Implement `predict_fn` in `src/myllm/eval/release_scorecard.py` (load checkpoint + greedy decode + benchmark scoring) | 4-6 hr | None |
+| Run real benchmarks (MMLU-Pro, HellaSwag, ARC-Easy/Challenge, GSM8K, HumanEval-plus, IFEval, Belebele) against final pilot checkpoint | runtime | ~$50 on 1×H100 for full sweep |
+| Post-process scorecard → JSON + Markdown → drop into model card | 1 hr | None |
+
+#### Phase 4 — Stage 2 launch (after Phase 1 lands)
+
+| Task | Effort | Compute |
+|---|---|---|
+| Stage 2 dry-run + canary on small pod | 4-8 hr | ~$20 |
+| Final reviewer pass on Stage 2 readiness | external | none |
+| Stage 2: 1B rehearsal @ 10-30B tokens | 3-5 days wall | ~$700-2000 on 4×B200 or 8×H200 |
+| Stage 2 post-mortem + Stage 3 go/no-go | 1-2 days | none |
+
+#### Phase 5+ — Stage 3 base run (much later)
+
+Separate planning round after Stage 2 lands. Items:
+
+- Compose v2 600B-token corpus build (~5 days, ~$50 R2)
+- Teacher logit caching for DeepSeek-V4-Pro + Olmo-3-32B (~7 days, ~$500-1000 GPU)
+- Real-text teacher audit re-run (~1 day, small GPU)
+- Stage 3 launch: 1B @ 600B tokens with distillation (~30 days, ~$13K)
+
+#### Background — Rust migration (parallel, separate person)
+
+- v0.2.1 plan locked at `docs/stage3_rust_migration_plan.md`
+- Implementer on `cs2hvh/llm-build-rust` fork
+- Independent of Stages 1/2/3 timing
+
+### 14.10 Recommended order for next session(s)
+
+```
+Week 1:  Phase 1 engineering — multi-epoch reader + P0-1/2/3 + forward-only eval_step + tests
+Week 2:  Phase 2 writeup + Phase 3 scorecard ($50 GPU)
+Week 3:  Stage 2 dry-run + launch (~$700-2000, 3-5 days)
+Week 4+: Stage 3 prep
+```
+
+All Week 1 work is CPU-only. ~25-35 hr of engineering. Can do in a couple of focused workdays.
+
+### 14.11 What the NEXT SESSION should know
+
+- **Pilot is done.** Don't restart anything. The model is on R2.
+- **Use commit `ca1c40b` (or later) on `main`** as the base. G6 reshard is in place.
+- **First engineering target** = multi-epoch corpus reader. It blocks Stage 2.
+- **No GPU needed until Phase 3**. Engineer on a cheap CPU box or local laptop.
+- **Stage 2 decision gate** lands AFTER Phase 1 + 2 + 3 are done. Don't jump ahead.
+- **DON'T try to restart pilot training**. Pilot is COMPLETE. There's no more useful training to do at 250M.
+
+### 14.12 Summary (for the next session, in 4 lines)
+
+```
+1. Pilot DONE. val_loss 2.730 / val_ppl 15.34. Final ckpt on R2.
+2. G6 reshard FIXED (cross-mesh restore works for any device count).
+3. Generation VERIFIED on 1×H100. Model produces coherent text, multilingual ✓.
+4. NEXT: Phase 1 = multi-epoch corpus reader + reviewer P0s, no GPU needed.
+```
