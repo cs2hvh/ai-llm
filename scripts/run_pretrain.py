@@ -710,6 +710,16 @@ def main() -> int:
              "large enough for a stable mean estimate.",
     )
     p.add_argument(
+        "--per-source-val-loss",
+        action="store_true",
+        help="In addition to aggregate val_loss/val_ppl, report per-source "
+             "val loss bucketed by the source_id of each LABEL token (e.g., "
+             "fineweb_edu, github_code_clean, mc4_zh). Requires the data "
+             "path to be the packed-corpus reader (synthetic-data and "
+             "tokenize-on-the-fly paths don't carry source provenance). "
+             "Phase 1.2 (P0-1, 2026-05-15).",
+    )
+    p.add_argument(
         "--reset-data-position-on-resume",
         action="store_true",
         help="On checkpoint resume, force the data_position cursor back to "
@@ -818,6 +828,11 @@ def main() -> int:
     # None and the end-of-run emit logic is a no-op.
     decon_report: DecontaminationReport | None = None
 
+    # Packed-corpus reader handle for Phase 1.2 per-source eval. Set only
+    # when the packed-corpus path is active (synthetic + on-the-fly paths
+    # don't carry source provenance, so per-source eval can't be built).
+    packed_corpus_reader: Any = None
+
     if args.synthetic_data:
         # Smoke path: bypass tokenizer + HF entirely. Use the model's
         # context_length directly — synthetic batches have shape
@@ -869,6 +884,7 @@ def main() -> int:
         pad_id = tokenizer.token_to_id(SpecialTokens.PAD)
 
         reader = PackedCorpusReader(args.packed_corpus_root)
+        packed_corpus_reader = reader  # expose for Phase 1.2 per-source eval
         if reader.sequence_length != packed_seq_len:
             raise ValueError(
                 f"packed corpus sequence_length {reader.sequence_length} != "
@@ -1349,56 +1365,109 @@ def main() -> int:
     # FSDP train steps.
     eval_fn = None
     if args.eval_every is not None:
-        from myllm.training.eval_hook import take_held_out_batches
         log.info(
             "eval_hook_enabling",
             eval_every=args.eval_every,
             n_held_out_batches=args.eval_n_batches,
             fsdp=bool(args.fsdp),
+            per_source=bool(args.per_source_val_loss),
         )
-        held_out, batch_iter = take_held_out_batches(batch_iter, args.eval_n_batches)
-        if held_out:
-            if args.fsdp:
-                # FSDP-safe path: dedicated forward-only eval_step that
-                # declares the same in_shardings as train_step but does
-                # NOT donate. State is invariant across eval_step calls,
-                # so the live training state is safe to pass straight in.
-                from myllm.training.eval_step import make_eval_step
-                from myllm.training.eval_hook import (
-                    make_validation_loss_eval_from_eval_step,
-                )
+        # Phase 1.2 (P0-1): per-source val loss requires the packed-corpus
+        # path (synthetic + on-the-fly tokenisation don't carry source
+        # provenance). Refuse politely if --per-source-val-loss was asked
+        # but the data path can't provide it.
+        if args.per_source_val_loss and packed_corpus_reader is None:
+            log.warning(
+                "per_source_val_loss_skipped",
+                reason="--per-source-val-loss requires --packed-corpus-root; "
+                       "synthetic / on-the-fly data has no DocSpan source-ids",
+            )
+
+        if args.per_source_val_loss and packed_corpus_reader is not None:
+            # Build held-out batches annotated with per-token source-ids.
+            # Held-out sequences are taken off the TOP of the corpus; the
+            # training iterator skips them via the data_position cursor
+            # advance — but since reader is random-access we can read them
+            # directly without consuming the training stream.
+            from myllm.training.eval_step import make_eval_step
+            from myllm.training.eval_hook import (
+                build_per_source_held_out,
+                make_per_source_validation_loss_eval_from_eval_step,
+            )
+            held_out, src_arrays, src_vocab = build_per_source_held_out(
+                packed_corpus_reader,
+                n_sequences=args.eval_n_batches * micro_batch,
+                micro_batch_size=micro_batch,
+            )
+            if held_out:
                 eval_step_fn = make_eval_step(
                     model=model,
                     z_loss_coef=model_cfg.z_loss_coef,
                     ignore_index=pad_id,
                     use_chunked_ce=args.use_chunked_ce,
                     chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+                    return_per_token_nll=True,
                     state_shardings=state_shardings,
                     batch_sharding=batch_sharding_for_train_step,
                 )
-                eval_fn = make_validation_loss_eval_from_eval_step(
-                    eval_step_fn, held_out, label="val",
+                eval_fn = make_per_source_validation_loss_eval_from_eval_step(
+                    eval_step_fn, held_out, src_arrays, src_vocab, label="val",
                 )
                 log.info(
                     "eval_hook_attached",
                     n_batches=len(held_out),
-                    path="eval_step (FSDP-safe forward-only)",
+                    path="per-source (eval_step + DocSpan source-ids)",
+                    sources=sorted(src_vocab.keys()),
                 )
             else:
-                # DP-replicated path: the legacy train_step_fn reuse is
-                # still fine here (no donation in that mode).
-                from myllm.training.eval_hook import make_validation_loss_eval
-                eval_fn = make_validation_loss_eval(train_step_fn, held_out, label="val")
-                log.info(
-                    "eval_hook_attached",
-                    n_batches=len(held_out),
-                    path="train_step (legacy, DP-replicated)",
+                log.warning(
+                    "eval_hook_skipped",
+                    reason="per-source held-out builder returned 0 batches",
                 )
         else:
-            log.warning(
-                "eval_hook_skipped",
-                reason="data iterator produced 0 held-out batches",
+            # Legacy aggregate-only path. Same as 1.5 introduced.
+            from myllm.training.eval_hook import take_held_out_batches
+            held_out, batch_iter = take_held_out_batches(
+                batch_iter, args.eval_n_batches,
             )
+            if held_out:
+                if args.fsdp:
+                    from myllm.training.eval_step import make_eval_step
+                    from myllm.training.eval_hook import (
+                        make_validation_loss_eval_from_eval_step,
+                    )
+                    eval_step_fn = make_eval_step(
+                        model=model,
+                        z_loss_coef=model_cfg.z_loss_coef,
+                        ignore_index=pad_id,
+                        use_chunked_ce=args.use_chunked_ce,
+                        chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+                        state_shardings=state_shardings,
+                        batch_sharding=batch_sharding_for_train_step,
+                    )
+                    eval_fn = make_validation_loss_eval_from_eval_step(
+                        eval_step_fn, held_out, label="val",
+                    )
+                    log.info(
+                        "eval_hook_attached",
+                        n_batches=len(held_out),
+                        path="eval_step (FSDP-safe forward-only)",
+                    )
+                else:
+                    from myllm.training.eval_hook import make_validation_loss_eval
+                    eval_fn = make_validation_loss_eval(
+                        train_step_fn, held_out, label="val",
+                    )
+                    log.info(
+                        "eval_hook_attached",
+                        n_batches=len(held_out),
+                        path="train_step (legacy, DP-replicated)",
+                    )
+            else:
+                log.warning(
+                    "eval_hook_skipped",
+                    reason="data iterator produced 0 held-out batches",
+                )
 
     final_state = train_loop(
         train_step_fn=train_step_fn,

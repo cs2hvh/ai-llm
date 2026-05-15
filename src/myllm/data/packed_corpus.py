@@ -655,6 +655,41 @@ class PackedCorpusReader:
         seg_ids = self.get_segment_ids(sequence_id)
         return tokens, seg_ids
 
+    def get_per_token_source_ids(
+        self,
+        sequence_id: int,
+        source_vocab: dict[str, int],
+    ) -> np.ndarray:
+        """Return a ``[sequence_length]`` int32 array mapping each token
+        position to ``source_vocab[span.source_id]``.
+
+        Positions not covered by any DocSpan get the sentinel ``-1``
+        (boundary / padding — matches the segment_ids convention).
+
+        Used by Phase 1.2 (per-source val loss): held-out batches are
+        annotated with these arrays so that the per-token NLL surfaced
+        by ``make_eval_step(return_per_token_nll=True)`` can be bucketed
+        by source for the model card's per-source perplexity table.
+
+        Args:
+            sequence_id: which packed sequence to annotate.
+            source_vocab: mapping ``source_name -> int_id``. Sources not
+                in the vocab are silently treated as ``-1`` (the same
+                sentinel as uncovered positions). Caller is responsible
+                for building a complete vocab from the corpus manifest.
+        """
+        spans = self.get_provenance(sequence_id)
+        source_ids = np.full(self.sequence_length, -1, dtype=np.int32)
+        for span in spans:
+            src_int = source_vocab.get(span.source_id, -1)
+            if src_int < 0:
+                continue
+            start = max(0, span.token_start_in_sequence)
+            end = min(self.sequence_length, span.token_end_in_sequence)
+            if end > start:
+                source_ids[start:end] = src_int
+        return source_ids
+
     def shard_manifest(self, shard_id: int) -> ShardManifest:
         path = self.root / f"shard-{shard_id:06d}" / "manifest.json"
         if not path.exists():
