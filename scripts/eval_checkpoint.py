@@ -243,10 +243,18 @@ def main() -> int:
     ckpt_mgr = CheckpointManager(
         CheckpointConfig(root=str(local_root), keep_last_n=1, r2_prefix=None)
     )
-    restored = ckpt_mgr.restore(step, template=template_state)
+    # G6 reshard: build sharding for current devices so we can restore
+    # checkpoints saved on a different topology (e.g., DP=4 -> DP=1).
+    devices = jax.devices()
+    if len(devices) == 1:
+        sharding = jax.sharding.SingleDeviceSharding(devices[0])
+    else:
+        mesh = jax.sharding.Mesh(devices, axis_names=("data",))
+        sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    restored = ckpt_mgr.restore(step, template=template_state, sharding=sharding)
     trainable_vars = restored["trainable_variables"]
     non_trainable_vars = restored["non_trainable_variables"]
-    log.info("checkpoint_restored_ok", step=step)
+    log.info("checkpoint_restored_ok", step=step, n_devices=len(devices))
 
     # ---------------------------------------------------------------- #
     # 6. Build the batch iterator from the packed corpus. We mirror the

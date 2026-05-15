@@ -146,8 +146,20 @@ def build_and_restore(checkpoint_path: Path, model_config_path: Path):
         r2_prefix=None,
     )
     ckpt_mgr = CheckpointManager(ckpt_cfg)
-    log.info("restoring_checkpoint", path=str(checkpoint_path))
-    restored = ckpt_mgr.restore(step, template=template)
+
+    # G6 reshard support: the checkpoint may have been saved on a different
+    # device topology than what's available now (e.g., DP=4 H200 -> 1xH100
+    # inference). Build a sharding for the current devices so orbax can
+    # reshape arrays accordingly.
+    devices = jax.devices()
+    if len(devices) == 1:
+        sharding = jax.sharding.SingleDeviceSharding(devices[0])
+    else:
+        mesh = jax.sharding.Mesh(devices, axis_names=("data",))
+        sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    log.info("restoring_checkpoint", path=str(checkpoint_path),
+             n_devices=len(devices), sharding=type(sharding).__name__)
+    restored = ckpt_mgr.restore(step, template=template, sharding=sharding)
 
     return (
         model,

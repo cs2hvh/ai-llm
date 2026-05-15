@@ -108,7 +108,8 @@ class CheckpointManager:
                 error=str(e),
             )
 
-    def restore(self, step: int, template: dict[str, Any] | None = None) -> dict[str, Any]:
+    def restore(self, step: int, template: dict[str, Any] | None = None,
+                sharding: Any | None = None) -> dict[str, Any]:
         """Restore the state saved at ``step``.
 
         Args:
@@ -120,6 +121,25 @@ class CheckpointManager:
                 2026-05-12). Without it, Orbax returns a plain dict and
                 ``state["opt_state"].inner_states`` would fail at the
                 next ``optimizer.update()`` call.
+            sharding: optional ``jax.sharding.Sharding`` to apply to every
+                array leaf in the restored state. Required when the
+                device topology at restore time differs from the topology
+                used at save time (G6 reshard support). Without it,
+                Orbax errors with "sharding passed to deserialization
+                should be specified ... Got None" when topologies
+                disagree. Pass ``SingleDeviceSharding`` for single-GPU
+                inference, or ``NamedSharding(mesh, PartitionSpec())``
+                for replicated DP. Same-mesh resume during training
+                doesn't need this — the template's array leaves already
+                have shardings matching the live devices.
+
+        G6 fix (2026-05-14 — was deferred from 2026-05-12 audit):
+            Cross-mesh restore (e.g., DP=4 checkpoint -> DP=1 inference
+            pod) failed with the above orbax error. The fix is to pass
+            ``restore_args=`` with explicit per-array shardings, built
+            via ``jax.tree.map`` over the template. Scalars (step,
+            lr_recovery_multiplier, data_position) get default
+            ``RestoreArgs()`` since they don't need sharding.
 
         B1 fix (2026-05-12 audit):
             muP uses ``optax.multi_transform`` whose state is a
@@ -135,14 +155,35 @@ class CheckpointManager:
         if not (target / "manifest.json").exists():
             raise CheckpointError(f"no complete checkpoint at step {step}")
         try:
-            if template is not None:
+            if template is not None and sharding is not None:
+                # G6 reshard path — explicit per-leaf sharding via restore_args.
+                import jax
+                import orbax.checkpoint as ocp
+
+                def _make_restore_args(leaf):
+                    # jax.Array / numpy array leaves: pass sharding + dtype + shape
+                    if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+                        return ocp.ArrayRestoreArgs(
+                            sharding=sharding,
+                            dtype=leaf.dtype,
+                            shape=tuple(leaf.shape),
+                        )
+                    # Python scalars (step, multiplier, data_position): default
+                    return ocp.RestoreArgs()
+
+                restore_args = jax.tree.map(_make_restore_args, template)
+                state = self._orbax.restore(
+                    target / "state", item=template, restore_args=restore_args,
+                )
+            elif template is not None:
                 state = self._orbax.restore(target / "state", item=template)
             else:
                 state = self._orbax.restore(target / "state")
         except Exception as e:
             raise CheckpointError(f"orbax restore failed at step {step}: {e}") from e
         log.info("checkpoint_restored", step=step, path=str(target),
-                 used_template=template is not None)
+                 used_template=template is not None,
+                 used_sharding=sharding is not None)
         return state
 
     def latest_complete_step(self) -> int | None:
