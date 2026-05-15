@@ -14,7 +14,9 @@ dist/
 .ipynb_checkpoints/
 
 # Local artifacts (push to object storage instead)
-artifacts/
+# Anchored to root only — sub-`artifacts/` folders (e.g. pilots/*/artifacts/)
+# are intentionally tracked as small metadata snapshots.
+/artifacts/
 *.safetensors
 *.gguf
 *.ckpt

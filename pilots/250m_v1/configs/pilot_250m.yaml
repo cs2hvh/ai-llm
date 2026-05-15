@@ -1,0 +1,129 @@
+# Pilot model config — ~249M params. Phase 2.
+#
+# v1 (2026-05-10): revised after architecture review against Llama 3.2 1B,
+# SmolLM2 1.7B, Qwen 2.5 1.5B configs. See docs/governance/model_card_v1.md
+# (current architecture, auto-rendered from configs).
+# v2 (2026-05-11): switched lr_schedule cosine -> WSD per playbook
+# alignment; pointed tokenizer at the production v2 SentencePiece-Unigram
+# artifact (R2-hosted); updated expected_pod to B200 as the preferred
+# Phase-2 SKU.
+
+name: myllm-pilot-250m-v1
+arch: llama_decoder
+
+# Tokenizer — the production v2 SPM-Unigram artifact (131,072 vocab with
+# byte-fallback). Loaded from R2 at training time; SHA-256 verified
+# against `manifests/tokenizer_v1.sha256` before training starts.
+tokenizer:
+  r2_key: tokenizer/myllm-spm-unigram-131k-v2.json
+  vocab_size: 131072
+  byte_fallback: true
+
+# Architecture
+layers: 16
+hidden_dim: 768
+ffn_dim: 3072            # 4x hidden
+num_heads: 12
+num_kv_heads: 4          # GQA 3:1
+head_dim: 64
+vocab_size: 131072
+tie_embeddings: true
+
+# 2026-05-13: bumped from 4096 to 8192 so the pilot reuses the SAME
+# corpus (seq_len=8193) that Stage 2 / Stage 3 base v1 will use. The
+# original 4096 was a "keep sweep fast" wind-tunnel-era choice; for a
+# single pilot run the extra compute is worth not having to maintain a
+# parallel pilot-only corpus build. muP transfer is across width, not
+# context, so no LR retuning is needed.
+context_length: 8192
+context_extension_target: 8192  # already at native target; no YaRN extension needed for pilot
+
+# Position
+position: rope
+rope_base: 130000.0      # bumped from 10000 (long-context-friendly)
+
+# Norm + activation
+norm: rmsnorm
+norm_eps: 1.0e-5
+activation: swiglu
+
+# Init
+init_std: 0.02
+# 2026-05-12 senior review: must match base_1b for muP HP transfer validity.
+# Previously false (infra rehearsal-only); a Proxy A/B sweep with the pilot
+# in this config would NOT transfer HPs correctly because the init topology
+# differs from base. Flipping to true so the transfer chain
+# (wind_tunnel -> pilot -> base) is consistent.
+scaled_init_for_residuals: true
+
+# Stability
+z_loss_coef: 1.0e-4
+qk_norm: true            # 2026-05-11 audit: flipped from false→true to match
+                         # base + wind_tunnel configs. muP HP transfer requires
+                         # consistent qk_norm across the wind_tunnel → pilot →
+                         # base chain (LR sensitivity differs by ~10-30% with
+                         # QK-norm on/off, exceeds muP's ±10% transfer tolerance).
+
+# muP HP transfer (2026-05-12 senior review pushback).
+#
+# Without this block, the model uses standard parameterization and any HP
+# sweep we run as "Proxy A/B" is NOT a muP transfer experiment — it's a
+# standard-init sweep, which costs us the zero-shot HP transfer guarantee
+# to base. Shared base_width=256 with wind_tunnel.yaml + wind_tunnel_b.yaml
+# + base_1b.yaml; width multiplier here = hidden_dim/256 = 768/256 = 3.0.
+mup:
+  base_width: 256
+  apply_attn_output_mult: true
+  apply_ffn_output_mult: true
+  apply_lm_head_output_mult: true
+
+# Training
+optimizer:
+  type: adamw
+  beta1: 0.9
+  beta2: 0.95
+  weight_decay: 0.1
+  eps: 1.0e-8
+
+lr_schedule:
+  type: wsd                # Warmup-Stable-Decay (SmolLM2 / MiniCPM standard)
+  peak_lr: 3.0e-4
+  end_lr_ratio: 0.1
+  warmup_steps: 2000
+  decay_fraction: 0.15     # last 15% of total_steps is the decay phase
+
+batch:
+  # 2026-05-13: bumped sequence_length 4096->8192 to match the new corpus
+  # build (seq_len=8193). global_tokens is informational/aspirational —
+  # the actual per-device micro_batch is set in the data yaml (currently
+  # 8 in pretrain_mix_pilot.yaml). At ctx=8192 + micro_batch=8 + 2 GPUs
+  # DP = 131K tokens/step. step count = target_tokens / 131K.
+  # Use --micro-batch-override at launch to dial it up if H200 memory
+  # permits (a 250M model at ctx=8192 fits ~50+ micro_batch comfortably).
+  global_tokens: 4194304     # informational; not enforced
+  sequence_length: 8192
+
+grad_clip_global_norm: 1.0
+mixed_precision: bfloat16
+
+# Token budget (v1: bumped per architecture review)
+target_tokens_min: 30_000_000_000     # 30B - smoke
+target_tokens_baseline: 50_000_000_000   # 50B - default
+target_tokens_stretch: 100_000_000_000   # 100B - if gates need more signal
+
+# Checkpointing
+checkpoint_every_steps: 1000
+keep_last_n: 3
+keep_every_n_steps: 5000
+
+# Compute target (planning)
+# Two viable Phase-2 setups (pick at launch time based on availability):
+#   A) 1x B200 (180GB) — preferred; simpler infra, no FSDP needed for 250M.
+#      Throughput ~120-150K tok/s; 50B tokens ≈ 100 hr ≈ $500 at $4.99/hr.
+#   B) 8x H100 SXM — faster wall-clock; needs FSDP. ~25 hr ≈ $560 at $22.32/hr.
+expected_pod: 1x_B200
+expected_hours_baseline: 110     # 1x B200, 50B tokens, BF16
+expected_cost_usd_baseline: 550   # 1x B200 @ $4.99/hr × 110 hr
+expected_pod_fallback: 8x_H100_SXM
+expected_hours_fallback: 25
+expected_cost_usd_fallback: 560

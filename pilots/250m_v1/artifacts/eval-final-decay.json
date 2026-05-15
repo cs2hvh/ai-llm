@@ -1,0 +1,7 @@
+{
+  "val_loss": 2.7303503938019276,
+  "val_ppl": 15.338260509848434,
+  "n_batches": 32,
+  "checkpoint": "/workspace/ckpt/pilot-250m-v1-decay/step-000171990",
+  "skip_batches": 0
+}
