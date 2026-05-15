@@ -681,6 +681,82 @@ class TestResumeCursor:
         )
         assert peek_data_position_from_checkpoint(d) == 0
 
+    # ----------------------------------------------------------------- #
+    # P0-3 fix (Phase 1.4, 2026-05-15): strict mode for production runs.
+    #
+    # The legacy fail-open behavior silently returns 0 when a checkpoint
+    # manifest is present but missing the data_position field — causing
+    # the data iterator to silently re-feed already-trained sequences to
+    # a model that just restored deep weights. Strict mode raises
+    # ResumeIntegrityError on this case while preserving the fail-open
+    # behavior for the legitimate "no checkpoint yet" scenarios.
+    # ----------------------------------------------------------------- #
+    def test_peek_strict_does_not_raise_when_no_checkpoint_dir(self, tmp_path):
+        """Case A: no checkpoint directory → fresh start, no error in
+        strict mode either."""
+        from myllm.data.packed_corpus import peek_data_position_from_checkpoint
+        assert peek_data_position_from_checkpoint(
+            tmp_path / "absent", strict=True
+        ) == 0
+
+    def test_peek_strict_does_not_raise_when_no_step_dirs(self, tmp_path):
+        """Case B: directory exists but no step manifests → fresh start,
+        no error."""
+        from myllm.data.packed_corpus import peek_data_position_from_checkpoint
+        d = tmp_path / "ckpt-empty"
+        d.mkdir()
+        assert peek_data_position_from_checkpoint(d, strict=True) == 0
+
+    def test_peek_strict_raises_when_data_position_missing(self, tmp_path):
+        """Case C: real checkpoint manifest present but
+        ``extra.data_position`` is missing. THIS is the silent-corruption
+        case. strict=True must raise ResumeIntegrityError."""
+        from myllm.data.packed_corpus import (
+            peek_data_position_from_checkpoint,
+            ResumeIntegrityError,
+        )
+        d = tmp_path / "ckpt-stale"
+        sd = d / "step-000000050"
+        sd.mkdir(parents=True)
+        (sd / "manifest.json").write_text(
+            '{"step": 50, "extra": {"reason": "rolling"}}'
+        )
+        with pytest.raises(ResumeIntegrityError, match="missing 'extra.data_position'"):
+            peek_data_position_from_checkpoint(d, strict=True)
+
+    def test_peek_strict_passes_when_data_position_present(self, tmp_path):
+        """Happy path: strict mode + manifest has data_position → returns it."""
+        from myllm.data.packed_corpus import peek_data_position_from_checkpoint
+        d = tmp_path / "ckpt-good"
+        sd = d / "step-000000100"
+        sd.mkdir(parents=True)
+        (sd / "manifest.json").write_text(
+            '{"step": 100, "extra": {"data_position": 42}}'
+        )
+        assert peek_data_position_from_checkpoint(d, strict=True) == 42
+
+    def test_peek_strict_only_checks_latest_step(self, tmp_path):
+        """If an older step has data_position but the LATEST step doesn't,
+        strict mode should still raise (because the resume target is
+        the latest, not the older one)."""
+        from myllm.data.packed_corpus import (
+            peek_data_position_from_checkpoint,
+            ResumeIntegrityError,
+        )
+        d = tmp_path / "ckpt-mixed"
+        # Older: has data_position
+        (d / "step-000000050").mkdir(parents=True)
+        (d / "step-000000050" / "manifest.json").write_text(
+            '{"step": 50, "extra": {"data_position": 1000}}'
+        )
+        # Latest: missing
+        (d / "step-000000100").mkdir(parents=True)
+        (d / "step-000000100" / "manifest.json").write_text(
+            '{"step": 100, "extra": {"reason": "rolling"}}'
+        )
+        with pytest.raises(ResumeIntegrityError):
+            peek_data_position_from_checkpoint(d, strict=True)
+
 
 # --------------------------------------------------------------------------- #
 # Actual share computation

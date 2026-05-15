@@ -734,6 +734,18 @@ def main() -> int:
              "Sequence IDs and data_position remain monotonically "
              "increasing across epochs, so resume is bitwise-exact.",
     )
+    p.add_argument(
+        "--production",
+        action="store_true",
+        help="Enable fail-closed safety guards for production training runs. "
+             "Currently triggers: (a) strict resume safety — refuse to "
+             "resume from a checkpoint that's missing the data_position "
+             "field (would otherwise silently re-feed already-trained data "
+             "to the model; P0-3 reviewer fix). More guards can be added "
+             "here as Stage 2/3 prep items land. Smoke tests and dev runs "
+             "should leave this off for the more permissive default "
+             "behavior.",
+    )
     args = p.parse_args()
 
     configure_logging()
@@ -875,7 +887,13 @@ def main() -> int:
         # off-by-one (e.g., data_position=128 / 33 = 3 instead of the
         # correct 128 / 32 = 4) so every resume re-consumed the last
         # already-trained-on sequence, silently corrupting training.
-        resumed_data_position = peek_data_position_from_checkpoint(args.checkpoint_root)
+        # P0-3 fix: in production mode, fail-closed if a real checkpoint
+        # exists but is missing the data_position field (would silently
+        # re-feed already-trained data to the model otherwise).
+        resumed_data_position = peek_data_position_from_checkpoint(
+            args.checkpoint_root,
+            strict=args.production,
+        )
         if args.reset_data_position_on_resume:
             # 2026-05-14: Stage 1.5 decay-only pass after corpus exhaustion.
             # Load weights from the final checkpoint but re-iterate the

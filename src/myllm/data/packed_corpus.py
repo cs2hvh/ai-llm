@@ -974,7 +974,11 @@ def sequence_id_from_data_position(data_position: int, sequence_length: int) -> 
     return int(data_position) // int(sequence_length)
 
 
-def peek_data_position_from_checkpoint(checkpoint_root: str | Path) -> int:
+def peek_data_position_from_checkpoint(
+    checkpoint_root: str | Path,
+    *,
+    strict: bool = False,
+) -> int:
     """Return the persisted ``data_position`` from the latest complete
     checkpoint under ``checkpoint_root``, or 0 if no checkpoint exists.
 
@@ -984,11 +988,37 @@ def peek_data_position_from_checkpoint(checkpoint_root: str | Path) -> int:
 
     The loop now writes ``data_position`` into the checkpoint manifest's
     ``extra`` block on every save (loop.py); older checkpoints predating
-    that change will return 0 with no warning here — the caller can log
-    if it wants.
+    that change will fall into the missing-field branch below.
+
+    P0-3 fix (2026-05-15 reviewer flag): three "return 0" branches mean
+    very different things and were previously indistinguishable, hiding
+    a silent-corruption bug:
+
+      Case A: ``checkpoint_root`` doesn't exist on disk.
+              -> Legitimately fresh run. Return 0.
+      Case B: Directory exists but has no valid ``step-XXXX/manifest.json``
+              files (incomplete writes, empty dir, etc.).
+              -> Treated as "no prior checkpoint to resume". Return 0.
+      Case C: Latest manifest exists BUT lacks ``extra.data_position``.
+              -> DANGEROUS. Means we're about to resume model weights
+              from this checkpoint but lose the data-iterator cursor,
+              silently re-feeding the model data it already saw.
+
+    ``strict=False`` (default): preserves the legacy "log a warning and
+    return 0" behavior for case C. Used by smoke tests + the original
+    pilot runs.
+
+    ``strict=True``: raises ``ResumeIntegrityError`` for case C. Use this
+    in production launches (wired via ``--production`` flag in
+    ``scripts/run_pretrain.py``). Cases A and B still return 0 since
+    they represent legitimate fresh-start scenarios.
+
+    Returns the data_position cursor (always non-negative). Raises
+    ``ResumeIntegrityError`` only in case C with ``strict=True``.
     """
     root = Path(checkpoint_root)
     if not root.exists():
+        # Case A: no checkpoint root → fresh start.
         return 0
     candidates: list[tuple[int, Path]] = []
     for d in sorted(root.glob("step-*")):
@@ -1001,12 +1031,45 @@ def peek_data_position_from_checkpoint(checkpoint_root: str | Path) -> int:
         except (ValueError, KeyError, OSError):
             continue
     if not candidates:
+        # Case B: no valid completed step manifests → fresh start.
         return 0
-    # Latest by step.
+
     candidates.sort(key=lambda x: x[0])
-    latest_manifest = _read_json(candidates[-1][1])
+    latest_step, latest_manifest_path = candidates[-1]
+    latest_manifest = _read_json(latest_manifest_path)
     extra = latest_manifest.get("extra", {}) or {}
-    return int(extra.get("data_position", 0))
+    if "data_position" in extra:
+        # Happy path: explicit field present.
+        return int(extra["data_position"])
+
+    # Case C: latest manifest exists but data_position is missing.
+    # This means we'd silently re-iterate the corpus from offset 0
+    # while restoring the model from a deeply-trained checkpoint.
+    if strict:
+        raise ResumeIntegrityError(
+            f"checkpoint at {latest_manifest_path.parent} (step {latest_step}) "
+            f"is missing 'extra.data_position' — refusing to resume in strict mode. "
+            f"This usually means the checkpoint predates the 2026-05-12 data-position-"
+            f"persistence fix. Either re-train from scratch or pass "
+            f"--reset-data-position-on-resume to acknowledge the data cursor will "
+            f"start fresh at 0 while model weights resume."
+        )
+    log.warning(
+        "checkpoint_missing_data_position",
+        step=latest_step,
+        manifest=str(latest_manifest_path),
+        msg="data_position field missing from manifest's extra block. "
+            "Returning 0 (legacy fail-open behavior). Pass strict=True / "
+            "--production to fail-closed instead.",
+    )
+    return 0
+
+
+class ResumeIntegrityError(RuntimeError):
+    """Raised by peek_data_position_from_checkpoint(strict=True) when a
+    checkpoint exists but lacks the data_position cursor. Silent
+    restart-from-0 would silently re-feed already-trained data to the
+    model. P0-3 fix from the 2026-05-12 reviewer audit."""
 
 
 # --------------------------------------------------------------------------- #
