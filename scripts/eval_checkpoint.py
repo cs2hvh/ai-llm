@@ -78,6 +78,7 @@ from scripts.run_pretrain import (  # noqa: E402
 )
 
 import jax  # noqa: E402
+import numpy as np  # noqa: E402
 
 from myllm.data.packed_corpus import (  # noqa: E402
     PackedCorpusReader,
@@ -164,6 +165,16 @@ def main() -> int:
         default=None,
         help="If set, write {val_loss, val_ppl, n_batches, checkpoint, "
              "skip_batches} to this path on completion.",
+    )
+    p.add_argument(
+        "--per-source-val-loss",
+        action="store_true",
+        help="In addition to aggregate val_loss/val_ppl, bucket per-token "
+             "NLL by DocSpan.source_id and report per-source val_loss + "
+             "val_ppl. Phase 1.2 (2026-05-15) wired this for the in-"
+             "training eval hook; Round C1 (2026-05-16) extends it to "
+             "the post-hoc CLI so we can backfill the reviewer packet's "
+             "TBD per-source PPL table.",
     )
     args = p.parse_args()
 
@@ -289,6 +300,114 @@ def main() -> int:
 
     pair_iter = iter_packed_pairs(reader, start_sequence_id=0)
     batch_iter = batch_pairs(pair_iter, args.micro_batch, model_input_len)
+
+    # ---------------------------------------------------------------- #
+    # 6b. Per-source path (Round C1, 2026-05-16). Built held-out
+    #     batches annotated with per-token source_id; the bucketing
+    #     happens in Python around the JIT'd forward. We branch here
+    #     because the aggregate path can stream batches one at a time
+    #     from the long iterator, but the per-source path needs the
+    #     fixed (batches, source_id_arrays, vocab) triple up front.
+    # ---------------------------------------------------------------- #
+    if args.per_source_val_loss:
+        from myllm.training.eval_hook import build_per_source_held_out
+        from myllm.training.eval_step import make_eval_step
+
+        ps_batches, ps_src_arrays, ps_vocab = build_per_source_held_out(
+            reader,
+            n_sequences=args.n_batches * args.micro_batch,
+            micro_batch_size=args.micro_batch,
+        )
+        if not ps_batches:
+            log.error(
+                "per_source_held_out_empty",
+                n_sequences_requested=args.n_batches * args.micro_batch,
+            )
+            return 6
+        ps_eval_step = make_eval_step(
+            model,
+            z_loss_coef=model_cfg.z_loss_coef,
+            ignore_index=pad_id,
+            return_per_token_nll=True,
+        )
+        # Aggregate + per-source NLL accumulators.
+        ps_total_nll = 0.0
+        ps_total_w = 0.0
+        ps_src_nll = {name: 0.0 for name in ps_vocab}
+        ps_src_w = {name: 0.0 for name in ps_vocab}
+        ps_inv_vocab = {v: k for k, v in ps_vocab.items()}
+        for b_idx, (b, src_ids) in enumerate(zip(ps_batches, ps_src_arrays)):
+            metrics = ps_eval_step(
+                {"trainable_variables": trainable_vars,
+                 "non_trainable_variables": non_trainable_vars}, b,
+            )
+            nll = np.asarray(metrics["nll_per_token"], dtype=np.float64)
+            w = np.asarray(metrics["weight_per_token"], dtype=np.float64)
+            if not np.all(np.isfinite(nll)):
+                log.warning("ps_batch_skipped_nan", idx=b_idx)
+                continue
+            ps_total_nll += float((nll * w).sum())
+            ps_total_w += float(w.sum())
+            for src_int, src_name in ps_inv_vocab.items():
+                mask = (src_ids == src_int).astype(np.float64) * w
+                ps_src_nll[src_name] += float((nll * mask).sum())
+                ps_src_w[src_name] += float(mask.sum())
+            log.info(
+                "ps_eval_batch", idx=b_idx,
+                batch_loss=round(float((nll * w).sum() / max(w.sum(), 1.0)), 4),
+            )
+        if ps_total_w <= 0:
+            log.error("ps_no_finite_data", n=len(ps_batches))
+            return 7
+        ps_agg_loss = ps_total_nll / ps_total_w
+        try:
+            ps_agg_ppl = float(math.exp(ps_agg_loss))
+        except OverflowError:
+            ps_agg_ppl = float("inf")
+        per_source = {}
+        for name in sorted(ps_vocab):
+            sw = ps_src_w[name]
+            if sw <= 0:
+                continue
+            sl = ps_src_nll[name] / sw
+            per_source[name] = {
+                "val_loss": float(sl),
+                "val_ppl": float(math.exp(min(sl, 50.0))),
+                "n_tokens": float(sw),
+            }
+        # Pretty-print.
+        print("=" * 60)
+        print(f"checkpoint      : {checkpoint_dir}")
+        print(f"step            : {step}")
+        print(f"per_source      : YES")
+        print(f"n_batches       : {len(ps_batches)}")
+        print(f"micro_batch     : {args.micro_batch}")
+        print(f"val_loss (agg)  : {ps_agg_loss:.6f}")
+        print(f"val_ppl  (agg)  : {ps_agg_ppl:.4f}")
+        print(f"n_tokens (agg)  : {ps_total_w:.0f}")
+        print("-" * 60)
+        for name, m in per_source.items():
+            print(f"  {name:32s}  loss={m['val_loss']:.4f}  "
+                  f"ppl={m['val_ppl']:.4f}  n={int(m['n_tokens'])}")
+        print("=" * 60)
+        if args.output_json:
+            out_path = Path(args.output_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "val_loss": float(ps_agg_loss),
+                        "val_ppl": float(ps_agg_ppl),
+                        "n_batches": int(len(ps_batches)),
+                        "n_tokens": float(ps_total_w),
+                        "checkpoint": str(checkpoint_dir),
+                        "per_source": per_source,
+                    },
+                    indent=2,
+                ) + "\n"
+            )
+            log.info("ps_eval_json_written", path=str(out_path))
+        return 0
 
     # ---------------------------------------------------------------- #
     # 7. Forward-only eval step. NO data_position, NO opt_state — only
