@@ -48,7 +48,7 @@ What you're being asked to weigh in on today: post-pilot results, post-pilot eng
 | Model size | 250M params (matches base for muP transfer) |
 | Architecture | Llama-style decoder, 16 layers, hidden 768, GQA 3:1, RMSNorm, QK-Norm, RoPE base 130k, SwiGLU, tied embeddings, context 8192 |
 | Vocab | 131,072 (SentencePiece-Unigram with byte fallback) |
-| Hardware | 4× H200 SXM (RunPod), FSDP/ZeRO-3 sharded |
+| Hardware | 4× H200 SXM (RunPod). **DP-replicated state** — `--fsdp` was NOT used (250M fits in HBM at DP). FSDP/ZeRO-3 stack is proven separately via gauntlets G1-G4 + L2/L3 canaries on 2× H200 SXM (2026-05-13). |
 | Optimizer | AdamW + muP `multi_transform`, fp32 moments, peak LR 3e-4 |
 | Schedule | WSD (Warmup-Stable-Decay), peak 3e-4 |
 | Precision | bf16 mixed + z-loss (coef 1e-4) |
@@ -181,7 +181,7 @@ Mostly unchanged from May-12; flagging what's been validated and what's still on
 ```yaml
 layers:              16
 hidden_dim:          768       # base_width 256 × width_mult 3.0 (muP)
-ffn_dim:             2048
+ffn_dim:             3072      # 4 × hidden
 num_heads:           12
 num_kv_heads:        4         # GQA 3:1
 head_dim:            64
@@ -201,7 +201,7 @@ gradient_checkpointing: true   # per-DecoderBlock
 
 ### 4.2 muP HP-transfer plan (still on faith for 1B)
 
-`base_width=256, width_mult=3.0` at 250M; at 1B we keep `base_width=256, width_mult=6.0` (hidden 1536, FFN 4096). All other HP (peak LR 3e-4, weight decay, etc.) carry over via muP scaling rules. The wind-tunnel sweep (Proxy A → Proxy B → 250M pilot) validated muP transfer at the 4M → 250M scale. **1B is the next data point I don't have.**
+`base_width=256, width_mult=3.0` at 250M (hidden 768). At 1B we use `base_width=256, width_mult=8.0` — hidden 2048, FFN 8192, num_heads 32, GQA 4:1, head_dim 64, ~1.24B params total. This matches the Llama 3.2 1B proven shape; see [`docs/mup_design.md`](../mup_design.md) §52 and [`configs/base_1b.yaml`](../../configs/base_1b.yaml). All other HP (peak LR 3e-4, weight decay, etc.) carry over via muP scaling rules. The wind-tunnel sweep (Proxy A → Proxy B → 250M pilot) validated muP transfer at the 4M → 250M scale. **1B is the next data point I don't have.**
 
 ### 4.3 WSD schedule + Stage 1.5
 

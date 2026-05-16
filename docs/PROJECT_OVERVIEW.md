@@ -367,7 +367,7 @@ def train_step(state, batch):
     new_trainable = jnp.where(is_finite, candidate, old)
     new_opt_state = jnp.where(is_finite, new_opt_state, state["opt_state"])
 
-    # 4. SHARDING (planned, FSDP)
+    # 4. SHARDING (FSDP shipped 2026-05-13; commits A-G; gauntlet G1-G4 PASS)
     new_trainable = with_sharding_constraint(new_trainable, param_sharding)
 
     return new_state, metrics

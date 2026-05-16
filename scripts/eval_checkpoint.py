@@ -77,6 +77,8 @@ from scripts.run_pretrain import (  # noqa: E402
     load_yaml,
 )
 
+import jax  # noqa: E402
+
 from myllm.data.packed_corpus import (  # noqa: E402
     PackedCorpusReader,
     iter_packed_pairs,
@@ -295,8 +297,6 @@ def main() -> int:
     #    broke the in-training hook can't reach this path because
     #    nothing here grows unboundedly with training step count.
     # ---------------------------------------------------------------- #
-    import jax  # noqa: E402
-
     def _eval_loss(trainable, non_trainable, batch):
         segment_ids = batch.get("segment_ids")
         call_kwargs = {}

@@ -12,15 +12,21 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "harshit.hv", email = "harshit.hv@samatva.com" }]
 dependencies = [
     "keras>=3.7,<4.0",
-    "jax>=0.4.30,<0.5",
-    "jaxlib>=0.4.30,<0.5",
+    # 2026-05-16: pin JAX exactly. Restore-path semantics drifted across
+    # Orbax 0.6 -> 0.7 (shape= kwarg removed, scalar leaves now need
+    # ArrayRestoreArgs(sharding=...) not bare RestoreArgs()). Three G6
+    # regressions in one day from a JAX minor bump. The next bump must
+    # be deliberate (update tests/test_orbax_api_compat.py first).
+    "jax==0.4.38",
+    "jaxlib==0.4.38",
     "numpy>=2.0,<3.0",
     "tokenizers>=0.20,<0.22",
     "sentencepiece>=0.2,<0.3",
     "datasets>=3.0,<4.0",
     "transformers>=4.46,<5.0",
     "optax>=0.2,<0.3",
-    "orbax-checkpoint>=0.6,<0.8",
+    "orbax-checkpoint==0.7.0",
+    "tensorstore==0.1.83",  # transitive of orbax; pin explicitly so a future orbax minor doesn't drift it
     "wandb>=0.18,<0.20",
     "runpod>=1.7,<2.0",
     "pyyaml>=6.0,<7.0",
@@ -52,7 +58,7 @@ tf = [
 # 2026-05-12: added after 5xH200 SXM pod's default install pulled the
 # CPU-only jaxlib and JAX fell back to TFRT_CPU_0.
 cuda = [
-    "jax[cuda12]>=0.4.30,<0.5",
+    "jax[cuda12]==0.4.38",
 ]
 
 [tool.hatch.build.targets.wheel]

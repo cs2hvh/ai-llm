@@ -255,8 +255,10 @@ def main() -> int:
     p.add_argument(
         "--templates-dir",
         default=str(_GOVERNANCE),
-        help="Directory containing model_card_v1_template.md + "
-        "data_card_v1_template.md.",
+        help="Directory containing model_card_v1.md + data_card_v1.md. "
+        "These files carry the AUTO blocks; rendering rewrites the AUTO "
+        "regions in place (or writes a suffixed copy if --output-suffix "
+        "is set).",
     )
     p.add_argument(
         "--output-dir",
@@ -268,7 +270,7 @@ def main() -> int:
         default="",
         help="Suffix on output filenames before the .md extension. "
         "E.g. '_pilot' → 'model_card_v1_pilot.md'. Default writes back "
-        "to the template file in-place.",
+        "to the source file in-place (the AUTO block regions only).",
     )
     p.add_argument(
         "--check",
@@ -289,8 +291,8 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     targets = [
-        ("model_card_v1_template.md", f"model_card_v1{args.output_suffix}.md"),
-        ("data_card_v1_template.md", f"data_card_v1{args.output_suffix}.md"),
+        ("model_card_v1.md", f"model_card_v1{args.output_suffix}.md"),
+        ("data_card_v1.md", f"data_card_v1{args.output_suffix}.md"),
     ]
 
     diffs: list[str] = []

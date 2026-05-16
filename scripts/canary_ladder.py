@@ -134,23 +134,47 @@ def main() -> int:
             source_share_tolerance=args.source_share_tolerance,
         ))
 
-    # L3 — optional, in-process.
+    # L3 — optional, in-process. Prefer the packed-corpus variant whenever
+    # a packed corpus is supplied: that's the production resume path
+    # run_pretrain.py actually uses. The synthetic variant only exercises
+    # the synthetic data iterator + state hashing, not the real reader
+    # cursor + manifest peek.
     if args.include_l3:
         from myllm.canary import StageResult, CheckResult
-        try:
-            from scripts.canary_l3_resume import run_l3_check
-            l3 = run_l3_check()
-            stages.append(StageResult(stage="L3", checks=[l3]))
-        except ModuleNotFoundError as e:
-            stages.append(StageResult(
-                stage="L3",
-                checks=[CheckResult(
-                    name="l3_forced_kill_resume",
-                    passed=False,
-                    summary=f"import failed: {e}",
-                    fix_hint="Ensure keras + jax installed; KERAS_BACKEND=jax.",
-                )],
-            ))
+        if args.packed_corpus_root is not None:
+            l3_name = "l3_forced_kill_resume_packed"
+            try:
+                from scripts.canary_l3_resume_packed import (
+                    run_l3_packed_check as _run_l3,
+                )
+            except ModuleNotFoundError as e:
+                _run_l3 = None
+                stages.append(StageResult(
+                    stage="L3",
+                    checks=[CheckResult(
+                        name=l3_name,
+                        passed=False,
+                        summary=f"import failed: {e}",
+                        fix_hint="Ensure keras + jax installed; KERAS_BACKEND=jax.",
+                    )],
+                ))
+        else:
+            l3_name = "l3_forced_kill_resume"
+            try:
+                from scripts.canary_l3_resume import run_l3_check as _run_l3
+            except ModuleNotFoundError as e:
+                _run_l3 = None
+                stages.append(StageResult(
+                    stage="L3",
+                    checks=[CheckResult(
+                        name=l3_name,
+                        passed=False,
+                        summary=f"import failed: {e}",
+                        fix_hint="Ensure keras + jax installed; KERAS_BACKEND=jax.",
+                    )],
+                ))
+        if _run_l3 is not None:
+            stages.append(StageResult(stage="L3", checks=[_run_l3()]))
 
     # Output.
     if args.format == "json":
