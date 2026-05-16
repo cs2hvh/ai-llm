@@ -231,3 +231,49 @@ class TestLoopEvalIntegration:
         assert "eval/val_ppl" in last
         assert "eval/val_n_batches" in last
         assert abs(last["eval/val_loss"] - 2.5) < 1e-9
+
+    def test_eval_fn_does_not_see_data_position_in_state(self, tmp_path):
+        # 2026-05-16 hotfix regression: the loop pops `data_position` from
+        # state before calling eval_fn (mirroring the train_step path).
+        # This is necessary because the FSDP-safe `make_eval_step`'s JIT
+        # in_shardings is built from `state_shardings`, which intentionally
+        # excludes `data_position`. Without the pop, the state pytree
+        # arriving at eval_step has 6 keys but the JIT contract expects 5
+        # -> "different numbers of pytree children" ValueError on every
+        # eval cycle under --fsdp.
+        from myllm.training import loop as loop_module
+        train_step, init, batches, loop_cfg, ckpt_cfg = (
+            self._build_minimal_loop_inputs(n_steps=6)
+        )
+        ckpt_cfg = type(ckpt_cfg)(root=str(tmp_path / "ckpt"), keep_last_n=1)
+
+        seen_keys_per_call: list[set[str]] = []
+
+        def eval_fn(step: int, state: dict[str, Any]) -> dict[str, float]:
+            # Capture the set of state keys the eval call sees.
+            seen_keys_per_call.append(set(state.keys()))
+            return {"val_loss": 1.0}
+
+        final = loop_module.run(
+            train_step_fn=train_step,
+            initial_state=init,
+            data_iter=batches,
+            loop_config=loop_cfg,
+            checkpoint_config=ckpt_cfg,
+            eval_fn=eval_fn,
+        )
+        # eval was called at least once (eval_every=3, total_steps=6 -> step 3)
+        assert seen_keys_per_call, "eval_fn never invoked"
+        # The state arriving at eval_fn must NOT contain data_position —
+        # the loop pops it before the call. This is what makes the FSDP
+        # in_shardings contract (5 keys) compatible with the live state.
+        for keys in seen_keys_per_call:
+            assert "data_position" not in keys, (
+                f"eval_fn saw data_position in state ({keys}); the loop's "
+                f"pop-restore around eval is broken (regression of "
+                f"2026-05-16 hotfix)."
+            )
+        # After training completes, the loop must have restored
+        # data_position in the final state.
+        assert "data_position" in final
+

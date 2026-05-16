@@ -346,6 +346,15 @@ def run(
             and step_int > 0
             and step_int % loop_config.eval_every == 0
         ):
+            # 2026-05-16 hotfix: pop data_position from state before eval,
+            # restore after. Mirrors what we do around train_step_fn (the
+            # original int32-overflow fix from 9f442f7). Without this,
+            # eval_fn -> eval_step_fn's JIT in_shardings (5 keys, no
+            # data_position per the matching state_shardings) mismatches
+            # against the state pytree the loop hands in (6 keys with
+            # data_position). Caused "different numbers of pytree
+            # children" ValueError on every eval cycle under --fsdp.
+            eval_dpos = state.pop("data_position", 0)
             try:
                 eval_metrics = eval_fn(step_int, state)
             except Exception as e:  # noqa: BLE001
@@ -356,6 +365,8 @@ def run(
                     msg="eval_fn raised; continuing training",
                 )
                 eval_metrics = None
+            finally:
+                state["data_position"] = int(eval_dpos)
             if eval_metrics:
                 log.info("eval", step=step_int, **{
                     k: float(v) if isinstance(v, (int, float)) else v
