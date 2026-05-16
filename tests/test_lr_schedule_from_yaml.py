@@ -12,45 +12,17 @@ but anything custom would have been lost.
 
 The fix factored the schedule math into ``resolve_wsd_schedule_params``
 so it can be tested without JAX/Keras dependencies.
+
+2026-05-16 refactor: the helper moved from ``scripts/run_pretrain.py``
+to ``myllm.training.state_init`` so library code (myllm.infer.predict)
+can import it without the sys.path dance scripts use. Test now uses
+the clean import path; the old AST-extraction shim is gone.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# The function lives in scripts/, which isn't on sys.path normally.
-_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(_SCRIPTS))
-
-import importlib.util
-_spec = importlib.util.spec_from_file_location(
-    "run_pretrain_module", _SCRIPTS / "run_pretrain.py"
-)
-# Avoid loading the script as __main__ (it has heavy imports). Just import
-# the module and pull the helper out.
-_mod = importlib.util.module_from_spec(_spec)
-# Avoid the keras/jax imports at module-load by stubbing.
-# Actually we want to import this lazily — only on demand.
-
-def _get_resolver():
-    """Lazy import the helper. We can't just import the module because it
-    has heavy top-level keras imports."""
-    # Pull just the function via inspect on the source file.
-    import ast
-    src = (_SCRIPTS / "run_pretrain.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "resolve_wsd_schedule_params":
-            mod = ast.Module(body=[node], type_ignores=[])
-            ns: dict = {}
-            exec(compile(mod, "<extracted>", "exec"), ns)
-            return ns["resolve_wsd_schedule_params"]
-    raise RuntimeError("resolve_wsd_schedule_params not found in run_pretrain.py")
-
-
-resolve = _get_resolver()
+from myllm.training.state_init import resolve_wsd_schedule_params as resolve
 
 
 # --------------------------------------------------------------------------- #

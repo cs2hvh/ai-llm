@@ -112,6 +112,26 @@ def download_file(key: str, local_path: str | Path, bucket: str | None = None) -
     return str(local_path)
 
 
+def ensure_tokenizer_local(local_path: str, remote_key: str | None) -> str:
+    """Return a local path to the tokenizer; fetch from R2 if absent.
+
+    Moved here from scripts/run_pretrain.py during the 2026-05-16 refactor
+    so library code (e.g., myllm.infer.predict) can use it without the
+    sys.path dance scripts/ imports need.
+    """
+    p = Path(local_path)
+    if p.exists():
+        log.info("tokenizer_already_local", path=str(p))
+        return str(p)
+    if remote_key is None:
+        raise FileNotFoundError(
+            f"tokenizer not at {local_path} and remote_key not provided"
+        )
+    download_file(remote_key, p)
+    log.info("tokenizer_downloaded", path=str(p), remote_key=remote_key)
+    return str(p)
+
+
 @_RETRY
 def upload_bytes(data: bytes, key: str, bucket: str | None = None) -> str:
     bucket = bucket or _default_bucket()

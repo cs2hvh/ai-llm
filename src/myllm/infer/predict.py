@@ -22,22 +22,10 @@ load call materialises the model on device.
 """
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-# The library helpers we lift (ensure_tokenizer_local, init_model_and_optimizer,
-# initial_train_state) live in scripts/run_pretrain.py — not yet refactored
-# into src/myllm/. Add the repo root to sys.path so the `from scripts.X`
-# import below resolves regardless of where the caller imports us from.
-# (Calling scripts that live in scripts/ already have this path; library
-# code under src/myllm/ does not.) Long-term TODO: move the helpers into
-# src/myllm/ proper and drop this dance.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from myllm.utils import get_logger
 
@@ -105,13 +93,11 @@ def load_checkpoint_for_inference(
         CheckpointManager,
     )
     from myllm.training.optimizer import OptimizerConfig
-    # The training-side helpers live in scripts/; we import them lazily
-    # so the module loads cheaply when only the dataclass is needed.
-    from scripts.run_pretrain import (
-        ensure_tokenizer_local,
+    from myllm.training.state_init import (
         init_model_and_optimizer,
         initial_train_state,
     )
+    from myllm.utils.storage import ensure_tokenizer_local
 
     checkpoint_root = Path(checkpoint_root).resolve()
     if not checkpoint_root.exists():
