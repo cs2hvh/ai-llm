@@ -941,13 +941,23 @@ def main() -> int:
 
             # Scalars are replicated. device_put their initial values too
             # so the state dict is sharded-coherent.
+            #
+            # NOTE: ``data_position`` is intentionally NOT placed on device
+            # and NOT included in state_shardings below. The training loop
+            # pops it from state before each train_step_fn call (int32-
+            # overflow fix from commit 9f442f7) and restores it as a Python
+            # int afterward. Including it in state_shardings would cause a
+            # pytree-structure mismatch under --fsdp (in_shardings has 6
+            # keys; state arriving at JIT has 5). We carry data_position
+            # OUTSIDE the JIT'd state pytree throughout the loop. Bugfix
+            # 2026-05-16.
             step_repl = jax.device_put(state["step"], replicate_sharding)
             lrmult_repl = jax.device_put(
                 state["lr_recovery_multiplier"], replicate_sharding
             )
-            dpos_repl = jax.device_put(
-                state["data_position"], replicate_sharding
-            )
+            # Preserve data_position value as a plain Python int so the
+            # loop can use it on first iteration; never touches the device.
+            data_position_value = int(state.get("data_position", 0))
 
             state = {
                 "trainable_variables": trainable_sharded,
@@ -955,11 +965,13 @@ def main() -> int:
                 "opt_state": opt_state_sharded,
                 "step": step_repl,
                 "lr_recovery_multiplier": lrmult_repl,
-                "data_position": dpos_repl,
+                "data_position": data_position_value,
             }
 
             # Build the parallel sharding pytree for make_train_step's
-            # in_shardings contract.
+            # in_shardings contract. MUST NOT include data_position — the
+            # loop pops it before calling train_step_fn, so the JIT'd
+            # function never sees it.
             state_shardings = {
                 "trainable_variables": param_shardings,
                 "non_trainable_variables": jax.tree.map(
@@ -969,7 +981,6 @@ def main() -> int:
                 "opt_state": opt_state_shardings,
                 "step": replicate_sharding,
                 "lr_recovery_multiplier": replicate_sharding,
-                "data_position": replicate_sharding,
             }
             batch_sharding_for_train_step = data_sharding
 

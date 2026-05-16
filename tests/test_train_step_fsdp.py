@@ -289,3 +289,77 @@ class TestFSDPPathLossParity:
         # Value is preserved (the train_step doesn't modify data_position;
         # the loop owns that update)
         assert int(new_state["data_position"]) == 0
+
+    def test_fsdp_works_when_loop_pops_data_position_before_call(self):
+        # Regression for 2026-05-16 bug: run_pretrain.py's FSDP block had
+        # data_position in state_shardings, but the training loop pops it
+        # before each train_step_fn call (int32-overflow fix from commit
+        # 9f442f7). That caused:
+        #
+        #   ValueError: pytree structure error: different numbers of
+        #   pytree children at key path pjit in_shardings[0]
+        #   (state_shardings has 6 keys; state arriving at JIT has 5;
+        #   symmetric difference: data_position)
+        #
+        # Production fix: state_shardings under --fsdp must NOT include
+        # data_position. The loop carries it as a Python int outside the
+        # JIT'd state pytree. This test replicates the production call
+        # pattern: state has all keys except data_position; state_shardings
+        # matches exactly. Pre-fix this raised ValueError; post-fix it
+        # works cleanly.
+        try:
+            import optax
+        except ImportError:
+            pytest.skip("optax not installed")
+        import jax
+        import jax.numpy as jnp
+        from jax.sharding import NamedSharding, PartitionSpec as P
+        from myllm.training.mesh import make_param_shardings
+        from myllm.training.optimizer import make_optimizer_state_sharding
+
+        vocab = 64
+        cfg = _tiny_cfg(vocab_size=vocab)
+        model = build_model(cfg)
+        optimizer = optax.adamw(learning_rate=1e-3)
+        mesh = _mesh(4)
+        batch = _make_batch(seed=45, vocab=vocab, B=4, S=4)
+
+        # Initial state — NO data_position. Matches what run_pretrain.py's
+        # FSDP block produces after the 2026-05-16 fix.
+        state = _initial_state(model, optimizer)
+        # state has: trainable_variables, non_trainable_variables,
+        # opt_state, step, lr_recovery_multiplier. (5 keys, NO data_position.)
+        assert "data_position" not in state, "test scaffold drifted"
+
+        replicate = NamedSharding(mesh, P())
+        # state_shardings ALSO has no data_position — matches state structure.
+        state_shardings = {
+            "trainable_variables": make_param_shardings(
+                state["trainable_variables"], mesh,
+            ),
+            "non_trainable_variables": make_param_shardings(
+                state["non_trainable_variables"], mesh,
+            ),
+            "opt_state": make_optimizer_state_sharding(
+                optimizer, state["trainable_variables"], mesh,
+            ),
+            "step": replicate,
+            "lr_recovery_multiplier": replicate,
+        }
+        batch_sharding = NamedSharding(mesh, P("data"))
+        state = jax.tree.map(
+            lambda x, s: jax.device_put(x, s), state, state_shardings,
+        )
+        batch_p = {k: jax.device_put(v, batch_sharding) for k, v in batch.items()}
+
+        step_fn = make_train_step(
+            model, optimizer, z_loss_coef=1e-4,
+            state_shardings=state_shardings, batch_sharding=batch_sharding,
+        )
+        # Pre-fix: raised "different numbers of pytree children" ValueError.
+        # Post-fix: clean run.
+        new_state, metrics = step_fn(state, batch_p)
+        assert int(new_state["step"]) == 1
+        assert jnp.isfinite(metrics["loss"])
+        # data_position remains absent from JIT-managed state.
+        assert "data_position" not in new_state

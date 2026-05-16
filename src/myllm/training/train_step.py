@@ -89,8 +89,12 @@ def make_train_step(
     FSDP sharding (2026-05-13, Commit C of FSDP plan):
         state_shardings: optional pytree of ``NamedSharding`` matching
             the ``state`` structure (trainable_variables,
-            non_trainable_variables, opt_state, step, lr_recovery_multiplier,
-            data_position). Build via
+            non_trainable_variables, opt_state, step, lr_recovery_multiplier).
+            NOTE: must NOT include ``data_position`` — the training loop
+            pops it before each train_step_fn call (int32-overflow fix,
+            commit 9f442f7). Including it in state_shardings causes a
+            pytree-structure mismatch under --fsdp ("6 keys vs 5 keys"
+            ValueError from JAX's in_shardings check). Build via
             ``mesh.make_param_shardings(...)`` for trainables and
             ``optimizer.make_optimizer_state_sharding(...)`` for opt_state.
             When provided, the compiled train_step:
