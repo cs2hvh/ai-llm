@@ -67,7 +67,18 @@ def _load_benchmarks(names: list[str]) -> list:
 
 
 def _instantiate(name: str):
-    # Multilingual MCQ adapters (full Benchmark adapter path)
+    # Real adapter path — proper (prompt, target_answer) loading + per-
+    # benchmark score(). Round D6 / Layer 2 (2026-05-16) added mmlu-pro
+    # + gsm8k here; previously they fell through to the "non-empty
+    # output = success" prompt-loader scaffold which gave running
+    # accuracy 1.0 on every sample.
+    if name == "mmlu-pro":
+        from myllm.eval.benchmarks import MMLUProBenchmark
+        return MMLUProBenchmark()
+    if name == "gsm8k":
+        from myllm.eval.benchmarks import GSM8KBenchmark
+        return GSM8KBenchmark()
+    # Multilingual MCQ adapters (already-implemented full adapters).
     if name == "mmlu-prox":
         from myllm.eval.benchmarks import MMLUProXBenchmark
         return MMLUProXBenchmark()
@@ -77,13 +88,26 @@ def _instantiate(name: str):
     if name == "milu":
         from myllm.eval.benchmarks import MILUBenchmark
         return MILUBenchmark()
-    # Lightweight prompt-only loaders (most v1 gate benchmarks).
-    # Wrap them in a minimal Benchmark adapter.
+    # Remaining benchmarks still on the placeholder path — these need
+    # full adapters before they produce meaningful numbers:
+    #   - humaneval-plus / mbpp-plus: sandboxed code execution
+    #   - ifeval: programmatic per-instruction constraint checks
+    # Tracked as separate Round D6 follow-ups. For now the placeholder
+    # scaffold logs a warning so the operator knows the scores are not
+    # gate-grade.
     try:
         from myllm.data.prompt_loaders import PROMPT_LOADERS, load_prompts
     except ImportError:
         return None
     if name in PROMPT_LOADERS:
+        log.warning(
+            "scorecard_placeholder_scoring",
+            benchmark=name,
+            msg="this benchmark name still uses the 'non-empty output = "
+                "success' scaffold scorer; the produced score is NOT "
+                "meaningful. See src/myllm/eval/benchmarks/__init__.py "
+                "for the planned-next-PR list.",
+        )
         return _PromptLoaderBench(name, load_prompts)
     return None
 
