@@ -94,24 +94,40 @@ Loss descent was smooth. No real spikes outside the random-init warmup. The mid-
 | 152,000 | Stage 1.5 start | — | — | LR decay schedule begins (3e-4 → 3e-5 linear, 20K steps) |
 | 171,990 | **Stage 1.5 final** | **2.7303** | **15.34** | Δ from Stage 1 = −0.147 nats; pure decay-phase improvement |
 
-### 2.4 Per-source val loss (numbers TBD)
+### 2.4 Per-source val loss (measured 2026-05-16 on 1×H200)
 
-The per-source bucketing infrastructure landed yesterday as Phase 1.2 (commit `fbe9c72`). It buckets per-token NLL by the `DocSpan.source_id` of each label token. The numbers below are placeholders — a 5-min eval job on 1×H100 with `eval_checkpoint.py --per-source-val-loss` produces them. Bundled with the Phase 3 GPU session.
+Per-source bucketing infrastructure: Phase 1.2 (commit `fbe9c72`); extended to the post-hoc CLI by `00f4ad2`. Measured on the final Stage 1.5 checkpoint (`step-000171990`) over 64 batches × micro_batch 4 × seq 8192 = ~2.1M held-out tokens. Held-out is the first 256 sequences of the composed corpus; per-token NLL bucketed by `DocSpan.source_id` of each LABEL token (sentinel -1 for boundary/pad positions is excluded). Source JSON: [`s3://llm-data/scorecards/pilot-250m-v1-decay/pilot-250m-v1-decay-per-source.json`](../../pilots/250m_v1/R2_PATHS.md).
 
-| Source | Target share | Actual share | val_loss (Stage 1.5) | val_ppl |
-|---|---|---|---|---|
-| fineweb_edu | 44.0% | 44.15% | TBD | TBD |
-| github_code_clean | 18.0% | 18.06% | TBD | TBD |
-| open_web_math | 7.0% | 7.02% | TBD | TBD |
-| pes2o | 6.0% | 6.02% | TBD | TBD |
-| wikipedia_20231101_en | 6.0% | 6.02% | TBD | TBD |
-| pg19 | 5.0% | **4.67%** (capped) | TBD | TBD |
-| sangraha_verified_split_hin | 4.0% | 4.01% | TBD | TBD |
-| stack_exchange_preferences | 2.0% | 2.01% | TBD | TBD |
-| mc4_de | 2.0% | 2.01% | TBD | TBD |
-| mc4_ar / es / fr / zh | 1.5% each | 1.51% each | TBD | TBD |
+| Source | Target share | Actual share | val_loss | val_ppl | n_tokens |
+|---|---|---|---|---|---|
+| github_code_clean | 18.0% | 18.06% | **1.194** | **3.30** | 376,608 |
+| mc4_ar (Arabic) | 1.5% | 1.51% | 2.044 | 7.72 | 32,738 |
+| stack_exchange_preferences | 2.0% | 2.01% | 2.439 | 11.46 | 40,714 |
+| mc4_es (Spanish) | 1.5% | 1.51% | 2.642 | 14.04 | 32,712 |
+| open_web_math | 7.0% | 7.02% | 2.691 | 14.75 | 147,308 |
+| mc4_zh (Chinese) | 1.5% | 1.51% | 2.750 | 15.64 | 32,734 |
+| mc4_fr (French) | 1.5% | 1.51% | 2.852 | 17.33 | 32,710 |
+| mc4_de (German) | 2.0% | 2.01% | 3.039 | 20.88 | 40,866 |
+| pes2o (papers) | 6.0% | 6.02% | 3.103 | 22.26 | 122,010 |
+| fineweb_edu | 44.0% | 44.15% | 3.123 | 22.71 | 915,708 |
+| pg19 (books) | 5.0% | **4.67%** (capped) | 3.231 | 25.31 | 106,494 |
+| wikipedia_20231101_en | 6.0% | 6.02% | 3.294 | 26.96 | 131,034 |
+| sangraha_verified_split_hin (Hindi) | 4.0% | 4.01% | **3.721** | **41.32** | 81,472 |
+| **AGGREGATE** | 100% | 100% | **2.734** | **15.40** | 2,093,108 |
 
-**pg19 is the only source that missed share** — its corpus is finite (books, ~232M tokens) and got fully consumed. -0.33 pp drift, under the 2% L5 threshold. All other sources within ±0.06 pp of target.
+Aggregate val_loss 2.734 matches the pilot's final 2.7303 within 0.4% noise — sanity-checks the per-source path against the legacy aggregate eval.
+
+**Reads I'd flag**:
+
+1. **github_code_clean is dramatically the easiest source (PPL 3.30)**, ~7× lower than the aggregate. Code has more predictable local structure (whitespace, brackets, common keywords) than prose — this is expected for a 250M model. Doesn't necessarily mean the model can *generate good code* (HumanEval-class testing for that is Phase 3 work); it does mean the model has clearly committed parameters to code patterns.
+2. **Hindi (sangraha) is the weakest source by a wide margin (PPL 41.32)** — ~3× the aggregate. Predictable: sangraha is only 4% of the mix and Devanagari script is the highest-entropy tokenizer output we have. At Stage 2/3 with longer training and more Hindi data, this should narrow; at 5B tokens it's expected to be poor.
+3. **mc4_ar (Arabic) at PPL 7.72 is surprisingly low** for a 1.5% slice. Possible explanations: (a) Arabic has fairly regular morphology that's well-served by SPM-Unigram; (b) the held-out slice happens to overlap heavily with patterns seen in training; (c) tokenizer fragmentation makes Arabic easier on a per-token basis even if per-character it's still hard. Worth a follow-up at Stage 2 with a stratified (not head-of-corpus) held-out — see Round D3.
+4. **English-dense web (fineweb_edu) and Wikipedia are surprisingly middle-of-the-pack** (PPL 22.71 and 26.96). At a larger token budget these should drop into the single digits; at 5B tokens we're still in the early-perplexity regime.
+5. **pg19 (books) and wikipedia (factual prose) are the hardest English sources** — consistent with long-form coherent text being harder to predict than the shorter, more templated fineweb_edu chunks.
+
+**pg19 caveat**: only source that missed share, -0.33 pp under target. Corpus is finite (books, ~232M tokens) and got fully consumed. Under the 2% L5 threshold. All other sources within ±0.06 pp of target.
+
+**Held-out bias caveat**: the slice is the FIRST 256 sequences of the composed corpus, not a stratified sample across shards. If the composer's deficit-driven sampler over-weights early shards toward any source, per-source values get a small bias. Round D3 (stratified held-out) will tighten this for Stage 2.
 
 ### 2.5 Generation smoke (informal)
 
@@ -124,6 +140,20 @@ Pulled the final checkpoint (`step-000171990`) onto a 1×H100 pod and ran `scrip
 - Factual recall: weak (e.g. "the president of France is" → drifts; expected at this scale).
 
 This is informal; benchmark numbers (MMLU/MMLU-Pro/HumanEval/IFEval/MATH/MBPP+/MGSM/MMLU-ProX/Belebele) are Phase 3 work and need a benchmark run (~$50 of GPU).
+
+### 2.6 Scorecard run — attempted 2026-05-16, ABANDONED with known limitation
+
+Round B4 (commit `574dd8f`) wired the real checkpoint+template+sharding+forward_jit predict_fn into `scripts/build_release_scorecard.py` so the scorecard CLI is no longer a `NotImplementedError`. The 1×H200 attempt **decoded fine** — confirmed model load, generates output, no crashes — and after ~30 min got 100 samples through `mmlu-pro` with `running_accuracy: 1.0`.
+
+**The 1.0 accuracy is the SCORING POLICY that's broken, not the model.** `scripts/build_release_scorecard.py::_PromptLoaderBench.score()` returns `bool(prediction.strip())` — "any non-empty output is correct." That was the round-1 reviewer's "non-empty output = success" critique; we wired the predict_fn but kept the placeholder scorer. Every sample produces *something*, so every sample "passes."
+
+**Decision**: aborted the run rather than waste pod time on numbers that would be meaningless. Real scoring policies (MMLU-Pro letter extraction, GSM8K "#### N" parsing, HumanEval+/MBPP+ sandboxed code execution, IFEval programmatic checks) are tracked as Round D6 — ~2 days CPU work, then a ~$30 H100 re-run.
+
+For Stage 2 readiness, the per-source PPL in §2.4 is the operative quality signal until D6 lands. Specifically:
+- We do NOT have benchmark numbers to point at for the model card.
+- We DO have evidence that the model produces sensible-shaped output (informal §2.5) and committed parameters appropriately across sources (§2.4 — code << prose << Hindi, in line with expectations).
+
+This is honest scaffolding-not-product reporting. Net of the failed scorecard attempt: ~$8-12 wasted on the doomed run, partially offset by the working per-source data from the same pod session.
 
 ---
 
