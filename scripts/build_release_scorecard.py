@@ -123,17 +123,32 @@ class _PromptLoaderBench:
 
 def _build_predict_fn(args):
     """Build a predict_fn from the checkpoint. JAX-heavy; only called
-    when we actually need to evaluate."""
-    # Placeholder for now — checkpoint-load + greedy-decode is the
-    # heavy lift that lands in a follow-up commit. The scaffold can
-    # be exercised with --use-mock-predict for testing.
+    when we actually need to evaluate.
+
+    Round B4 (2026-05-16): real predict_fn lands here via
+    ``myllm.infer.predict.build_greedy_predict_fn``. ``--use-mock-predict``
+    is preserved for scaffold-validation runs that don't need a real
+    model.
+    """
     if getattr(args, "use_mock_predict", False):
         # Mock returns "A" for everything — gives 25% accuracy on MMLU-style.
         return lambda prompt: "A"
-    raise NotImplementedError(
-        "Real predict_fn (checkpoint load + greedy decode) is the next "
-        "follow-up. For now run with --use-mock-predict to exercise the "
-        "scorecard machinery."
+    if not args.checkpoint_root:
+        raise ValueError(
+            "Real predict_fn requires --checkpoint-root. Pass "
+            "--use-mock-predict to exercise the scorecard machinery with "
+            "a constant-output mock instead."
+        )
+    from pathlib import Path
+
+    from myllm.infer.predict import build_greedy_predict_fn
+
+    return build_greedy_predict_fn(
+        model_config_path=Path(args.model_config),
+        tokenizer_path=Path(args.tokenizer_path),
+        checkpoint_root=Path(args.checkpoint_root),
+        checkpoint_step=args.checkpoint_step,
+        max_new_tokens=int(getattr(args, "max_new_tokens", 80)),
     )
 
 

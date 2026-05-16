@@ -28,6 +28,7 @@ without touching the others.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -661,6 +662,20 @@ def main() -> int:
              "Required when --decay-phase-config is set."
     )
     p.add_argument(
+        "--allow-cross-tokenizer-distill",
+        action="store_true",
+        help="Disable the fail-closed tokenizer-SHA gate on the distillation "
+             "path (2026-05-16 P0). The current top-K logit KD assumes "
+             "teacher and student share a tokenizer vocabulary so that "
+             "teacher_topk_indices are meaningful in the student logit space "
+             "(scripts/cache_teacher_logits.py:163 clamps + "
+             "src/myllm/training/loss.py:279 gathers student logits at "
+             "teacher indices). For cross-tokenizer teachers (DeepSeek/Olmo) "
+             "this is invalid. Default: launcher refuses to start. Use this "
+             "flag ONLY if you've pivoted to a tokenizer-agnostic distillation "
+             "method (e.g., hidden-state distill) and know what you're doing."
+    )
+    p.add_argument(
         "--init-std-override",
         type=float,
         default=None,
@@ -1157,6 +1172,30 @@ def main() -> int:
         cache_root = _Path(args.distillation_cache_root)
         readers = []
         weights = []
+
+        # B1 fail-closed gate (2026-05-16 P0 from re-audit). The current
+        # top-K logit distillation gathers student logits at teacher
+        # cache's `teacher_topk_indices` (loss.py:279) under the implicit
+        # assumption that student and teacher tokenizers share a vocab
+        # indexing. For DeepSeek-V4-Pro / Olmo-3-32B teachers this is
+        # false; the resulting "KL" would be computed across mismatched
+        # logit positions and is meaningless. Refuse to launch unless
+        # student tokenizer SHA matches every teacher cache's recorded
+        # SHA, OR the operator explicitly opts out via
+        # --allow-cross-tokenizer-distill (after pivoting to a
+        # tokenizer-agnostic distill method).
+        if packed_corpus_reader is None:
+            raise RuntimeError(
+                "Distillation (--decay-phase-config) requires "
+                "--packed-corpus-root so the student tokenizer SHA can be "
+                "verified against each teacher cache manifest. "
+                "Synthetic / on-the-fly tokenisation can't provide the "
+                "tokenizer_sha256 stamp the gate needs."
+            )
+        student_tokenizer_sha = (
+            packed_corpus_reader.manifest.tokenizer_sha256
+        )
+
         for t in teachers_spec:
             teacher_id = t["id"]
             manifest_path = cache_root / f"{teacher_id}_manifest.json"
@@ -1165,6 +1204,52 @@ def main() -> int:
                     f"teacher cache manifest not found: {manifest_path}. "
                     f"Run scripts/cache_teacher_logits.py to generate it first."
                 )
+            # Tokenizer-SHA compatibility check (B1 fail-closed gate).
+            try:
+                with open(manifest_path) as f:
+                    teacher_manifest = json.load(f)
+                teacher_tokenizer_sha = teacher_manifest.get("tokenizer_sha256")
+            except (OSError, ValueError) as e:
+                raise RuntimeError(
+                    f"could not parse teacher manifest {manifest_path}: {e}"
+                ) from e
+            if teacher_tokenizer_sha is None:
+                raise RuntimeError(
+                    f"teacher manifest {manifest_path} is missing "
+                    f"`tokenizer_sha256`. Re-run cache_teacher_logits.py "
+                    f"with the current cache format."
+                )
+            if teacher_tokenizer_sha != student_tokenizer_sha:
+                if args.allow_cross_tokenizer_distill:
+                    log.warning(
+                        "distillation_tokenizer_mismatch_allowed",
+                        teacher_id=teacher_id,
+                        teacher_sha=teacher_tokenizer_sha[:16],
+                        student_sha=student_tokenizer_sha[:16],
+                        msg="--allow-cross-tokenizer-distill set; proceeding. "
+                            "The top-K logit KD path assumes shared vocab "
+                            "indexing — make sure you're using a "
+                            "tokenizer-agnostic distill method or you'll "
+                            "compute meaningless gradients.",
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Distillation tokenizer mismatch: teacher "
+                        f"{teacher_id!r} cache was built with tokenizer "
+                        f"sha256={teacher_tokenizer_sha[:16]}..., but the "
+                        f"packed corpus (student) uses "
+                        f"sha256={student_tokenizer_sha[:16]}.... The "
+                        f"current top-K logit KD path "
+                        f"(loss.py:kl_div_topk_loss) gathers student "
+                        f"logits at teacher_topk_indices, which is only "
+                        f"meaningful when both vocabularies share an "
+                        f"indexing. Either (a) rebuild the teacher cache "
+                        f"with a teacher that shares the student's "
+                        f"tokenizer, or (b) pivot to a tokenizer-agnostic "
+                        f"distill method (hidden-state distill, synthetic-"
+                        f"target generation) and pass "
+                        f"--allow-cross-tokenizer-distill to acknowledge."
+                    )
             readers.append(TeacherCacheReader(teacher_id, manifest_path, cache_root))
             weights.append(float(t.get("weight", 1.0)))
         teacher_weights = tuple(weights)

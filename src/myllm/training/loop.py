@@ -402,7 +402,21 @@ def _recover_from_spike(
     loop_config: LoopConfig,
     recovery_count: int,
 ) -> tuple[dict[str, Any], Iterator[dict[str, Any]], int]:
-    """Execute the rollback recovery. Returns (new_state, new_iter, new_count)."""
+    """Execute the rollback recovery. Returns (new_state, new_iter, new_count).
+
+    B2 fixes (2026-05-16 P0 from re-audit):
+      1. ``ckpt.restore`` now gets a ``template=`` built from the live
+         state pytree. Without it, opt_state's MultiTransformState
+         namedtuple comes back as a plain dict and the next
+         optimizer.update() fails on ``state.inner_states`` (B1 audit
+         fix from 2026-05-12 was missed on this restore path).
+      2. ``data_position`` now advances by the number of tokens
+         actually skipped during the recovery skip-batches loop.
+         Previously the skip dropped batches from the iterator
+         WITHOUT updating ``data_position``, so a checkpoint saved
+         after recovery had a stale cursor and any future resume
+         would re-read the skipped batches.
+    """
     spike_step = state["step"]
     log.warning(
         "hard_spike_initiating_recovery",
@@ -429,7 +443,11 @@ def _recover_from_spike(
             f"hard spike at step {spike_step}; no pre-spike checkpoint to restore"
         )
     rollback_to = max(candidates)
-    restored = ckpt.restore(rollback_to)
+    # B2 fix part 1: pass template so opt_state namedtuple round-trips.
+    # Same pattern as the resume path in run(); use only the persisted
+    # keys present in the live state.
+    restore_template = {k: state[k] for k in _PERSIST_KEYS if k in state}
+    restored = ckpt.restore(rollback_to, template=restore_template)
     new_state = {**state, **restored, "step": rollback_to}
 
     # 3. Halve the recovery multiplier (compounds across recoveries).
@@ -438,14 +456,29 @@ def _recover_from_spike(
     new_state["lr_recovery_multiplier"] = new_mult
 
     # 4. Skip a chunk of batches so the offending data range isn't replayed.
+    #    B2 fix part 2: track skipped tokens and advance data_position
+    #    by that amount. Without this, the data cursor stays at the
+    #    rollback checkpoint's value while the iterator moves forward,
+    #    desyncing the persisted cursor from the actual data stream
+    #    position. Any later resume would re-feed the skipped tokens.
     skipped = 0
+    skipped_tokens = 0
     for _ in range(loop_config.recovery_skip_batches):
         try:
-            next(data_iter)
+            batch = next(data_iter)
             skipped += 1
+            # batch["input_ids"] is [B, S]; .size is total tokens.
+            # Works for numpy + jax arrays (both have .size).
+            arr = batch.get("input_ids") if isinstance(batch, dict) else None
+            if arr is not None and hasattr(arr, "size"):
+                skipped_tokens += int(arr.size)
         except StopIteration:
             log.warning("data_iter_exhausted_during_skip", skipped=skipped)
             break
+    if skipped_tokens > 0:
+        new_state["data_position"] = (
+            int(new_state.get("data_position", 0)) + skipped_tokens
+        )
 
     # 5. Reset watchdog so post-restore noise doesn't immediately re-trigger.
     watchdog.reset()
@@ -456,6 +489,8 @@ def _recover_from_spike(
         new_lr_mult=new_mult,
         previous_lr_mult=prev_mult,
         skipped_batches=skipped,
+        skipped_tokens=skipped_tokens,
+        new_data_position=int(new_state.get("data_position", 0)),
     )
 
     return new_state, data_iter, recovery_count + 1
