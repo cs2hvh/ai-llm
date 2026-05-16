@@ -22,10 +22,22 @@ load call materialises the model on device.
 """
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# The library helpers we lift (ensure_tokenizer_local, init_model_and_optimizer,
+# initial_train_state) live in scripts/run_pretrain.py — not yet refactored
+# into src/myllm/. Add the repo root to sys.path so the `from scripts.X`
+# import below resolves regardless of where the caller imports us from.
+# (Calling scripts that live in scripts/ already have this path; library
+# code under src/myllm/ does not.) Long-term TODO: move the helpers into
+# src/myllm/ proper and drop this dance.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from myllm.utils import get_logger
 
