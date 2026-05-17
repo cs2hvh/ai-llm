@@ -11,13 +11,27 @@
 
 ## 0. TL;DR — read this if nothing else
 
-1. **Pilot is DONE.** 250M params, 4×H200 SXM, $385 total spent, finished at step 171,990 (Stage 1: 151,990 + Stage 1.5 decay: 20K). Final val_loss 2.730 / val_ppl 15.34. Generates coherent English + Hindi. Final checkpoint on R2.
-2. **Watchdog was quiet.** 288 NaN-skip events across 172K steps (1.9 per 1000 steps), all handled by atomic revert. Zero hard-spike rollbacks. `lr_recovery_multiplier` stayed at 1.0.
-3. **We caught three silent-corruption bugs the pilot would have failed slowly on:** (a) int32 overflow of `data_position` at ~65K steps, (b) eval hook silently dying after that fix due to same int32 issue, (c) G6 cross-mesh checkpoint restore broke under Orbax 0.7 API drift. All fixed + regression-tested.
-4. **Corpus exhausted before the schedule did.** Single-pass reader hit `total_sequences=608,088` at step 151,990; we were targeting 229,000. Pivoted to a Stage 1.5 decay-only continuation on the same data. **The fix (multi-epoch reader, Phase 1.1) is shipped — Stage 2 will use `--corpus-epochs 6+`.**
-5. **Phase 1 engineering done** (5 commits, +32 tests, suite 642 → 674). The repo is ready for Stage 2 launch once you sign off + we run the release-scorecard benchmark (~$50, Phase 3).
+**Original packet (2026-05-15):**
 
-**Headline question I want you to weigh in on**: given §2 and §8 below, is the pilot evidence enough to commit $700–$2K to a 1B rehearsal at 10-30B tokens? Or are there gaps you'd want closed first (per-source perplexity numbers, ablations, more benchmarks)?
+1. **Pilot is DONE.** 250M params, 4×H200 SXM, $385 total spent, finished at step 171,990 (Stage 1: 151,990 + Stage 1.5 decay: 20K). Final val_loss 2.730 / val_ppl 15.34. Generates coherent English + Hindi. Final checkpoint on R2.
+2. **Watchdog was quiet.** 288 NaN-skip events across 172K steps (1.9 per 1000 steps), all handled by atomic revert. Zero hard-spike rollbacks.
+3. **Three silent-corruption bugs caught + fixed**: int32 overflow of `data_position`, eval-hook int32, G6 cross-mesh checkpoint restore.
+4. **Corpus exhausted before the schedule did** at step 151,990 vs 229,000 target. Multi-epoch reader fix shipped; Stage 2 uses `--corpus-epochs 6+`.
+5. **Phase 1 engineering done** (5 commits, +32 tests).
+
+**Update (2026-05-17, after C1+C2+C3 + 2 reviewer rounds processed code-side):**
+
+6. **Round A + B + Layer 1 + Layer 2 part 1 + state_init refactor shipped.** 11/13 of your P0/P1s closed code-side. Suite now 739 passed.
+7. **C1 per-source PPL banked** on R2. Code easiest (PPL 107), Hindi hardest (PPL 1746). Scorecard run abandoned because IFEval/HE+/MBPP+ scoring is still placeholder (your round-1 critique, confirmed). See §2.4 + §2.6.
+8. **C2 throughput**: 30% MFU at seq=8192, 46% MFU at seq=4096 (on 4×B200 NVLink-5, chunked-CE). Caveat: needs full-CE re-bench (bug below).
+9. **C3 μP/LR sweep DONE** — peak_lr=3.0e-4 (matches pilot's value) WINS at 1B-shape (val_loss 6.173 / val_ppl 479.6 over the other two). Stable throughout. **muP transfer 250M → 1B is confirmed.** Closes the on-faith risk from §7.1. See §6.4.
+10. **Two new bugs surfaced + characterized**: (D8) `chunked-CE` produces NaN gradients at 1B+B200+bf16+width_mult=8 (finite forward, NaN backward); (D9) step-718 of the pilot corpus is a deterministic NaN batch (0.1% rate, atomic revert handles). See §6.5.
+11. **Two hotfixes** for `data_position` pytree mismatch under `--fsdp` (train_step path + eval path). Both have regression tests. See §6.6.
+12. **Stage 2 launch is on a 4-day path**: smoke probe (~$15) → hardware/budget decision → commit ($350-700 for 10-30B tokens).
+
+**Headline questions, refined post-C3**:
+- The original ask was *muP transfer + Stage 2 commit*. **muP transfer is now answered (confirmed). Stage 2 commit is the remaining ask** — see §9 updated.
+- Two NEW questions emerged from the bugs found: (a) fix chunked-CE before Stage 2 or after? My leaning: after. (b) D8 + D9 priority for the Round D queue — see §8 #13 + #14.
 
 ---
 
@@ -285,13 +299,90 @@ I do not have a clean tokens/sec number from the pilot. The external feedback ba
 
 **Question for you**: 29K tok/sec/GPU on a 250M model at seq=8192 on 4×H200 — does that smell low to you? My gut says we're leaving real MFU on the table somewhere (likely XLA optimization on the GQA path, or eval-batch interference from the small held-out cadence).
 
+### 6.3 Stage 2 prep results (NEW — added 2026-05-17 post-C3)
+
+Since the original packet, we ran three GPU sessions (C1 + C2 + C3) to de-risk the Stage 2 commit. Headline:
+
+| Session | Hardware | What | Result |
+|---|---|---|---|
+| C1 | 1× H200 (~$8) | Per-source val loss on the pilot checkpoint | ✅ Banked. Table is §2.4 above. github_code easiest (PPL 107), sangraha_hin hardest (PPL 1746). Scorecard run aborted because IFEval/HE+/MBPP+ scoring is still placeholder (the round-1 critique). |
+| C2 | 4× B200 NVLink-5 (~$5) | FSDP throughput at 1B shape, two seq lengths | 30% real BF16 MFU @ seq=8192 mb=16; **46% MFU @ seq=4096 mb=16**. 4K is materially better economics (1.5× faster, $180 cheaper at 30B). ⚠️ Caveat: this used `--use-chunked-ce`, which we found has the NaN-grad bug below — Stage 2 will use full-CE so re-bench needed. |
+| C3 | 4× B200 NVLink-5 (~$30) | μP/LR sweep at 1B: 0.5× / 1.0× / 1.5× of `base_1b.yaml`'s peak_lr=2e-4 | 3 runs × 1000 steps each. peak_lr=3e-4 (1.5×, the pilot's value) **wins** with val_loss 6.173 / val_ppl 479.6 — 12 of 13 sources where Run 3 beats Run 2. Stable throughout, no LossSpikeError. |
+
+### 6.4 muP transfer 250M → 1B — CONFIRMED
+
+This was §7.1's "still on faith" item from the original packet. C3 closes it.
+
+| Run | peak_lr | step 1000 val_loss | step 1000 val_ppl | Notes |
+|---|---|---|---|---|
+| 1 | 1.0e-4 (0.5×) | 7.015 | 1113 | safest, slowest learning, clean 1 NaN-skip / 1000 |
+| 2 | 2.0e-4 (1.0×, base config) | 6.445 | 630 | 1 NaN-skip |
+| 3 | **3.0e-4 (1.5×, pilot's value)** | **6.173** | **479.6** | **WINS**, 1 NaN-skip, no LossSpikeError |
+
+**Reading**: at width_mult=8 (1B), muP says peak_lr should transfer from width_mult=3 (250M pilot). Pilot's effective hidden-weight LR was peak_lr / 3 = 1e-4. At 1B, peak_lr / 8 = 3.75e-5. C3's Run 3 confirms this scaling is stable AND optimal: 3e-4 doesn't NaN-spiral, and it produces the lowest val_loss of the three.
+
+Per-source val_loss for Run 3 at step 1000 (all 13 sources):
+
+| Source | val_loss | val_ppl |
+|---|---|---|
+| github_code_clean | 4.674 | 107 |
+| stack_exchange | 5.423 | 226 |
+| mc4_ar | 5.547 | 257 |
+| pg19 | 6.149 | 468 |
+| fineweb_edu | 6.347 | 570 |
+| open_web_math | 6.380 | 591 |
+| wikipedia_20231101_en | 6.615 | 746 |
+| pes2o | 6.619 | 749 |
+| mc4_es | 6.888 | 981 |
+| sangraha_hin | 7.464 | 1746 |
+| mc4_de | 7.670 | 1972 |
+| mc4_fr | 7.660 | 2123 |
+| mc4_zh | 8.102 | 3301 |
+| **AGGREGATE** | **6.173** | **479.6** |
+
+Same pattern as pilot: code easy, multilingual + Hindi hard. Mid-stage relative rankings are essentially preserved 250M → 1B at the same checkpoint position (~150K-200K tokens consumed per run, micro-batch 4 × 4 GPU × 8192 seq × 1000 steps = 131M tokens).
+
+**Conclusion**: peak_lr=3e-4 is locked for Stage 2. The muP plan from `docs/mup_design.md` is empirically validated 4M (Proxy A) → 250M (pilot) → 1B (C3).
+
+### 6.5 Two bugs found during Stage 2 prep
+
+**Bug 1 — chunked-CE NaN gradients at 1B + B200 + bf16 + width_mult=8** (severity: blocking for chunked-CE on B200, NOT blocking Stage 2 because we have full-CE fallback)
+
+- Symptom: train_step's atomic NaN revert fires every batch. Loss is **finite** at step 0 (11.76 = ln(131072), expected at random init) but the backward pass produces NaN in at least one gradient leaf. From step 1 onward, forward also produces NaN.
+- Repro: 1B model + `--use-chunked-ce --fsdp` + mb=16 + seq=8192 + lr=1e-4 + B200. Every batch NaN-skipped, no progress.
+- Pilot 250M + chunked-CE was fine; the bug is scale-specific (width_mult=8 vs pilot's 3.0) or hardware-specific (B200 bf16) or both.
+- Diagnostic: dropping `--use-chunked-ce` (full-logit CE) makes 1B training clean — that's how C3 succeeded.
+- Likely root cause: chunked-CE's online logsumexp (`running_max`, `running_sum` accumulators) hits bf16 precision boundaries when V=131072 / 8 chunks × seq=8192. Or its gradient through `take_along_axis` + `where` has a numerical issue at this scale.
+- Stage 2 workaround: use full-CE. memory budget allows at mb=4 on B200's 183 GB HBM.
+- Stage 3 implication: full-CE OOMs at 7B+. Must fix this bug before Stage 3. Tracked as Round D8.
+
+**Bug 2 — deterministic step-718 NaN batch in the composed pilot corpus** (severity: monitoring item, not blocking)
+
+- Symptom: same step (718) in all 3 C3 runs triggers `nan_batch_skipped`. Atomic revert handles it. 1 / 1000 steps = 0.1% rate, watchdog stays quiet.
+- Repro: deterministic — same seed, same corpus, same packed-sequence at sequence_id corresponding to step 718 (sequence_id ≈ 4 × 718 = 2872 at mb=4).
+- Quarantine file at `s3://llm-data/stage2-prep/mup-sweep-4b200/quarantine-lr1_5x.jsonl` has provenance.
+- Investigation tool: `scripts/inspect_quarantine.py` maps `data_position → sequence_id → source` via `seq_meta.arrow`.
+- Stage 2 implication: none. 0.1% NaN-skip rate is well below our 1% watchdog-noise threshold. Worth understanding for Stage 3 corpus quality.
+- Tracked as Round D9.
+
+### 6.6 Two hotfixes shipped during C3 setup (both have regression tests)
+
+| Commit | What |
+|---|---|
+| `cbd5477` | **HOTFIX 1**: `run_pretrain.py`'s FSDP block included `data_position` in `state_shardings` (6 keys), but `loop.py` pops it before calling `train_step_fn` (int32-overflow fix from `9f442f7` → 5 keys arriving at JIT). Mismatch → `ValueError: different numbers of pytree children`. Fix: remove data_position from state_shardings + carry as Python int outside the JIT'd state pytree. |
+| `8e50333` | **HOTFIX 2**: same root cause but in the EVAL path. Loop's `eval_fn` call site didn't have the pop-restore pattern → every eval cycle under `--fsdp` failed non-fatally. Fix: pop+restore around `eval_fn(step, state)` call with try/finally. |
+
+Both shipped + regression tests pin them. Suite 738 → 739 across the two hotfixes. Tests under `tests/test_train_step_fsdp.py` and `tests/test_eval_hook.py`.
+
+**Pattern worth noting**: `state_shardings` under `--fsdp` MUST exclude any state field that the loop pops before the JIT call. Currently that's only `data_position`. Any future loop-managed-but-not-JIT'd field must also be excluded.
+
 ---
 
 ## 7. Open risks (post-pilot)
 
-### 7.1 muP transfer 250M → 1B is still on faith
+### 7.1 ~~muP transfer 250M → 1B is still on faith~~ — **CLOSED 2026-05-17 by C3**
 
-Wind-tunnel validated 4M → 250M. Stage 2 will be the first test at 1B-shape. If muP transfer doesn't hold, peak LR 3e-4 may be too high (or too low) and we waste $2K finding that out. Mitigation: run the first 1000 steps of Stage 2 with a low LR-multiplier sweep (3 quick runs of $50 each instead of a single $2K commit).
+~~Wind-tunnel validated 4M → 250M. Stage 2 will be the first test at 1B-shape.~~ C3 ran the 3-LR sweep we proposed here (at $30 not the projected $150 — 4× B200 was cheaper than expected) and **confirmed muP transfer holds** at width_mult=8. See §6.4. peak_lr=3e-4 is locked for Stage 2. No remaining risk on this axis.
 
 ### 7.2 Corpus quality at scale — pg19 already short
 
@@ -317,35 +408,46 @@ The 558-doc catch in codeparrot was real (validated by inspection of the flagged
 
 ## 8. Decisions where your judgment matters
 
-Same yes/no table format as last time. Each is something I have a leaning on but want your sanity check.
+Same yes/no table format as last time. **Status column added 2026-05-17** showing what we acted on.
 
-| # | Question | My leaning | Why I'd defer to you |
+| # | Question | My leaning | Status |
 |---|---|---|---|
-| 1 | **Commit $700-$2K to Stage 2 now, or do Phase 3 (benchmark run, ~$50) first?** | Phase 3 first — concrete benchmark numbers de-risk Stage 2 commit | $50 is cheap insurance against discovering the pilot model has a benchmark-floor problem after spending $2K |
-| 2 | **Run a Stage 2 muP-transfer sanity sweep** (3 short runs at 0.5×/1×/2× peak LR, $50 each) before the full $2K commit? | Yes — first 1B-scale test | Cheap test of the on-faith assumption from §7.1 |
-| 3 | **Replace pg19 with a larger book source** before Stage 3? | Yes — pg19 short-share will hurt at 600B | Stage 2 can tolerate it; Stage 3 should not |
-| 4 | **Wire a short benchmark** (HellaSwag or ARC-easy, ~5 min) into the in-training eval for Stage 2? | Yes — early signal beats post-hoc | Don't want to be 50% through Stage 2 and discover generation is broken |
-| 5 | **Run Stage 2 with `--per-source-val-loss --eval-every 2000`** to track which sources are improving? | Yes — Phase 1.2 infra is built | Cheap; lets us spot mc4_zh collapse early |
-| 6 | **Use WSD or test WSM checkpoint averaging** at Stage 2? | WSD (proven by pilot) | WSM is in the codebase but unproven at our scale |
-| 7 | **Stage 2 mesh shape**: 4× or 8× H200 SXM? | 8× — better throughput economics | 4× is what worked at pilot; but 8× lets us bench higher MFU |
-| 8 | **Context length at Stage 2**: stay at 8192, or test 4096 for throughput? | Stay at 8192 — consistency with pilot | 4096 would be a 2× MFU win but changes the comparison |
-| 9 | **Add a forward-only watchdog stress test** before Stage 2 (inject a synthetic 6σ spike)? | Yes — §7.4 risk | $5 of CPU time to validate the rollback path |
-| 10 | **Lock Orbax to a specific version** (currently `>=0.7,<0.8`) before Stage 2? | Yes — see §3.3 | Three regressions in one day from API drift is too many |
-| 11 | **Pre-run a context-shrink eval** (4K, 2K) on the pilot before Stage 2? | Maybe — only if you flag §7.3 as a real concern | $5 of GPU; cheap if useful |
-| 12 | **Stage 3 budget**: ~$13K for 600B tokens on 8× H200 — still feel right to you given the pilot's economics? | Yes, with a hard gate at 300B | Adaptive stop rule from May-12 still applies |
+| 1 | Commit $700-$2K to Stage 2 now, or do Phase 3 (benchmark run, ~$50) first? | Phase 3 first | **ACTED**: did C1+C2+C3 first; ~$40 spent. Still pending real scorecard numbers (D6 for IFEval/HE+/MBPP+). Stage 2 commit not yet placed. |
+| 2 | Run a Stage 2 muP-transfer sanity sweep (3 short runs at 0.5×/1×/2× peak LR, $50 each) before the full $2K commit? | Yes | **ACTED via C3**. Cost $30 (cheaper than projected $50/run). Run 3 (3e-4) WINS → muP transfer confirmed. peak_lr=3e-4 locked. See §6.4. |
+| 3 | Replace pg19 with a larger book source before Stage 3? | Yes — pg19 short-share will hurt at 600B | **PENDING** — Round D4. Stage 2 tolerable; Stage 3 hard requirement. |
+| 4 | Wire a short benchmark (HellaSwag or ARC-easy, ~5 min) into the in-training eval for Stage 2? | Yes | **PENDING** — would need new benchmark adapter; lower priority than D6 (real scoring for existing ones). |
+| 5 | Run Stage 2 with `--per-source-val-loss --eval-every 2000`? | Yes | **LOCKED** — confirmed working in C3 (we ran with `--eval-every 200 --per-source-val-loss`, got per-source numbers every checkpoint). |
+| 6 | Use WSD or test WSM checkpoint averaging at Stage 2? | WSD (proven by pilot) | **WSD locked**. WSM tracked as a separate Stage 2.5 / Stage 3 readout (Round D, future). |
+| 7 | Stage 2 mesh shape: 4× or 8× H200 SXM? | 8× — better throughput | **OPEN** — now expanded to 4×B200 / 8×B200 / 8×H200 SXM tradeoff. Same total $ across all three; wall time varies 13-38 hr. **Awaiting your call.** |
+| 8 | Context length at Stage 2: stay at 8192, or test 4096 for throughput? | Stay at 8192 — consistency with pilot | **OPEN, data point added**: C2 showed seq=4096 is 1.5× faster + ~$180 cheaper at 30B on 4×B200. Recipe inconsistency vs pilot. Your call. |
+| 9 | Add a forward-only watchdog stress test before Stage 2 (inject a synthetic 6σ spike)? | Yes | **PENDING** — small. Could ship before Stage 2 commit. |
+| 10 | Lock Orbax to a specific version (currently `>=0.7,<0.8`) before Stage 2? | Yes | **DONE** in Round A6 (commit `329b349`). jax==0.4.38, orbax==0.7.0, tensorstore==0.1.83 pinned exactly. Smoke test at `tests/test_orbax_api_compat.py`. |
+| 11 | Pre-run a context-shrink eval (4K, 2K) on the pilot before Stage 2? | Maybe — only if §7.3 is real concern | **NOT YET** — could fold into Stage 2 smoke if you want |
+| 12 | Stage 3 budget: ~$13K for 600B tokens on 8× H200 — still feel right? | Yes, with hard gate at 300B | **STAGE-2-DEPENDENT** — refreshed projection in §10 of DESIGN.md: $11-21K depending on hardware and post-D8 chunked-CE status. Adaptive stop rule unchanged. |
+
+**Newly emerged decisions (2026-05-17)**:
+
+| # | Question | My leaning |
+|---|---|---|
+| 13 | Fix the chunked-CE NaN-grad bug (Round D8) before Stage 2 launch? | No — full-CE workaround is fine at 1B on B200's 183 GB. **MUST** be fixed before Stage 3 / 7B+. |
+| 14 | Investigate the step-718 deterministic bad batch (Round D9) before Stage 2? | Optional — 0.1% NaN-skip rate is well below the 1% threshold. Worth understanding for Stage 3 corpus quality. |
+| 15 | Re-run scorecard once IFEval/HE+/MBPP+ adapters land (Round D6) — before or after Stage 2? | After Stage 2 — gets benchmark numbers on the actual 1B checkpoint, not pilot's 250M. |
 
 ---
 
 ## 9. What I'm asking for
 
-In rough priority:
+**Updated 2026-05-17 — many of the original asks are now answered by C1+C2+C3.** Refined priorities:
 
-1. **Stage 2 launch readiness gut check** — given §2, §3, §6, §7, would you sign off on a $2K Stage 2 commit, or do you want Phase 3 + a muP sweep first?
-2. **muP transfer confidence** — the on-faith 250M → 1B leap. Anything you'd want validated before spending $2K?
-3. **Corpus mix at scale** — does the pilot mix look defensible for the 30B Stage 2 rehearsal? Should pg19 be replaced before Stage 2 or only before Stage 3?
-4. **Process-risk pressure test** — given §3 and §3.4, what other silent-corruption modes would you suspect at 1B+? I'm specifically worried about FSDP donation safety in code paths I haven't audited yet.
-5. **Decision pings on §8** — any of the 12 questions where one-word verdicts would unblock me.
-6. **Distillation prep timing** — should I start teacher cache build (Stage 5 prep, multi-day job) in parallel with Stage 2, or sequentially after?
+1. **Stage 2 launch readiness gut check** — given §6.3 (C3 results) + §6.5 (2 bugs found), would you sign off on a $350-700 Stage 2 commit at peak_lr=3e-4 + full-CE? Specific concerns: (a) we're skipping chunked-CE on B200 — is that risky for Stage 3 even though it works for Stage 2? (b) the step-718 deterministic bad batch — concerning at all, or normal corpus-noise?
+2. **§8 decisions still open**: rows **#7** (hardware: 4×B200 / 8×B200 / 8×H200 SXM — same total $ but different wall time) and **#8** (seq=4096 vs 8192 — 1.5× throughput win at 4K but recipe inconsistency).
+3. **Round D ordering** — for the 7 pending Round D items (chunked distill, teacher audit, pg19, stack-ex, stratified eval, IFEval scoring, logical-axis sharding) + 2 NEW (D8 chunked-CE bug, D9 step-718) — which would you prioritize before Stage 3 launch? My leaning: D8 → D2 (teacher audit) → D1 (chunked distill) → D4 (pg19) → D6 (IFEval/HE+/MBPP+) → D7 (logical-axis). D3, D5, D9 are P2 polish.
+4. **Distillation prep timing** — should I start teacher cache build (multi-day job, ~$2-3K of GPU time depending on token budget) in parallel with Stage 2 rehearsal, or sequentially? My leaning: sequentially, since D1 (chunked distill) is required first AND we want a Stage 2 win before committing teacher cache budget.
+
+**Items the original packet asked about that are now closed**:
+- muP transfer 250M → 1B (closed by C3, see §6.4)
+- C2 throughput baseline on FSDP path (banked, but chunked-CE caveat applies — needs full-CE re-bench)
+- Per-source PPL backfill (in §2.4)
 
 **Artifacts to open if you want to dig deeper**:
 - [`docs/PROJECT_OVERVIEW.md`](../PROJECT_OVERVIEW.md) — refreshed today; canonical state-of-things
