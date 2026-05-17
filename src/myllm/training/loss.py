@@ -192,10 +192,13 @@ def chunked_cross_entropy_with_z_loss(
         chunk_logits = chunk_logits * output_mult_t
         # Lift to fp32 for the reductions. This is the load-bearing cast for D8.
         chunk_logits_f32 = ops.cast(chunk_logits, accum_dtype)
-        # Gemma-2-style final-logit softcap, applied per-chunk on the fp32
-        # logits BEFORE the online logsumexp + label gather. Math-identical
-        # to softcapping the full [B,S,V] logits because softcap is purely
-        # elementwise. None = disabled.
+        # Final-logit softcap, applied per-chunk on the fp32 logits BEFORE
+        # the online logsumexp + label gather. Math-identical to softcapping
+        # the full [B,S,V] logits because softcap is purely elementwise.
+        # Production default is 30.0 (Gemma 2 origin arXiv 2408.00118;
+        # Gemma 4 still ships final_logit_softcapping=30.0 even though it
+        # dropped the attention-logit softcap in Gemma 3 in favor of
+        # QK-norm). None = disabled.
         if final_logit_softcap is not None:
             cap = ops.cast(final_logit_softcap, accum_dtype)
             chunk_logits_f32 = cap * ops.tanh(chunk_logits_f32 / cap)

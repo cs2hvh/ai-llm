@@ -62,17 +62,33 @@ qk_norm: true   # R3 from 2026-05-11 dossier: now industry default at 1B+
                 # for spike-robustness on long pretrain runs. See
                 # src/myllm/model/layers.py post-RoPE q_norm/k_norm.
 
-# 2026-05-17 (post-review): Gemma-2-style soft-caps on the attention QK
-# logits and the final logits (arXiv 2408.00118 verified values). Bounds
-# extreme values into [-c, +c] before the softmax / logsumexp can saturate
-# on repetitive/low-entropy spans (the mechanism behind D9's step-718 NaN).
+# 2026-05-17 (post-review v2 — Gemma 3/4 verification correction):
 #
-# - attn_logit_softcap forces the manual attention path (jax.nn DPA in
-#   JAX 0.4.38 can't apply softcap inline on cuDNN). ~5-10% wall-time tax
-#   at seq=8192. Belt-and-suspenders defense for the long pretrain.
-# - final_logit_softcap is cheap (one elementwise tanh per chunk).
-attn_logit_softcap: 50.0
-final_logit_softcap: 30.0
+# Initial post-review change set attn_logit_softcap=50 + final_logit_softcap=30
+# verbatim from the Gemma 2 paper (arXiv 2408.00118). On follow-up WebFetch
+# verification of newer Gemma releases:
+#
+#   - Gemma 3 technical report (arXiv 2503.19786) explicitly says:
+#       "we replace the soft-capping of Gemma 2 with QK-norm."
+#     Gemma 3 configs ship attn_logit_softcapping=null, final=null,
+#     query_pre_attn_scalar=168 (scaled-softmax pattern).
+#
+#   - Gemma 4 (released 2026-04-02) config retains
+#     final_logit_softcapping=30.0 but has NO attn_logit_softcapping.
+#
+#   - Llama 4 (iRoPE + scaled softmax), Mistral Large 3: no softcap.
+#
+# We already ship qk_norm=true (R3, line 60 above) — the Gemma 3+ replacement
+# for attention-logit softcap. Doubling up with attn_logit_softcap also
+# forces the manual attention path (~5-10% wall-time tax at seq=8192)
+# without any verified additional stability benefit at our scale.
+#
+# Decision: keep the code path (still useful as an opt-in debug/fallback
+# knob — see src/myllm/model/layers.py GroupedQueryAttention.logit_softcap)
+# but DEFAULT IT OFF here, in line with Gemma 3/4 / Llama 4 / Mistral 3
+# practice. final_logit_softcap=30.0 stays — Gemma 4 still ships it.
+attn_logit_softcap: null   # off; QK-norm covers this in Gemma 3+ practice
+final_logit_softcap: 30.0  # kept; matches Gemma 4 default
 
 # muP HP transfer (2026-05-12 senior review pushback).
 #

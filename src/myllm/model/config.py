@@ -67,18 +67,28 @@ class ModelConfig(BaseModel):
     z_loss_coef: float = 1.0e-4
     qk_norm: bool = False
 
-    # Gemma-2-style soft-cap on attention QK logits and final logits:
+    # Soft-cap on attention QK logits and final logits:
     #   y = softcap * tanh(x / softcap)
-    # Bounds extreme values so the softmax can't saturate on a pathological
-    # input (e.g. repetition / low-entropy spans like the step-718 Stack
-    # Exchange single-doc seq that triggered D9). Gemma 2 paper
-    # (arXiv 2408.00118) uses 50.0 for self-attention and 30.0 for the final
-    # layer.
+    # Bounds extreme values so the softmax can't saturate on pathological
+    # inputs (e.g. repetition / low-entropy spans).
     #
-    # `None` = disabled (preserves the cuDNN-FlashAttention fast path which
-    # cannot apply softcap on JAX 0.4.38). Setting any non-None value forces
-    # the manual attention path for the QK softcap. The final-logit softcap
-    # is always cheap (one elementwise tanh).
+    # Lineage (verified 2026-05-17):
+    #   - Gemma 2 (arXiv 2408.00118): attn_softcap=50, final_softcap=30.
+    #   - Gemma 3 (arXiv 2503.19786): "we replace the soft-capping of
+    #     Gemma 2 with QK-norm." attn_logit_softcapping=null. We already
+    #     ship qk_norm=true, so attn_logit_softcap is redundant for us.
+    #   - Gemma 4 (2026-04-02): retains final_logit_softcapping=30.0;
+    #     dropped attn_logit_softcapping.
+    #
+    # `None` = disabled (preserves the cuDNN-FlashAttention fast path
+    # which cannot apply softcap on JAX 0.4.38). Setting any non-None
+    # value on attn_logit_softcap forces the manual attention path
+    # (5-10% wall-time tax at seq=8192). The final-logit softcap is
+    # always cheap (one elementwise tanh).
+    #
+    # Production defaults (see configs/base_1b.yaml):
+    #   attn_logit_softcap=None (off — QK-norm replaces it per Gemma 3+)
+    #   final_logit_softcap=30.0 (matches Gemma 4)
     attn_logit_softcap: float | None = None
     final_logit_softcap: float | None = None
 

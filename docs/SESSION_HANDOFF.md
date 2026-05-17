@@ -173,8 +173,8 @@ Three open knobs (reviewer recommendation baked in where available):
 | Loss path | full-CE (locked until chunked-CE fix) | Locked by Bug 1 |
 | LR | 3.0e-4 (locked by C3) | Locked |
 | `end_lr_ratio` | 0.0 (D2Z, was 0.1) | **CHANGED 2026-05-17** per Bergsma 2502.15938 |
-| Final-logit softcap | 30.0 (was None) | **ADDED 2026-05-17** per Gemma 2 (arXiv 2408.00118) |
-| Attn-logit softcap | 50.0 (was None) | **ADDED 2026-05-17** per Gemma 2; forces manual attn path (5-10% wall tax at seq=8192) |
+| Final-logit softcap | 30.0 (was None) | **KEPT 2026-05-17** — Gemma 4 (2026-04-02) still ships `final_logit_softcapping=30.0` |
+| Attn-logit softcap | None (correction 2026-05-17) | **OFF by default**. Initial post-review pass set 50.0 from Gemma 2. Follow-up Gemma 3/4 verification showed Gemma 3 explicitly replaced this with QK-norm (we already have qk_norm=true). Code path retained as opt-in. |
 | micro_batch | 4 (locked by full-CE memory budget) | Locked |
 | `--corpus-epochs` | 6 (locked by Stage 2 token budget vs 5B corpus) | Locked |
 | `--production` | yes | Locked |
@@ -384,6 +384,34 @@ were partial / overstated.
 | DeepSeek-V4-Pro-Base "operationally bad for distilling 1B" | Cross-tokenizer (uses `encoding_dsv4`, not SP-Unigram) — verified. FP4 MoE — verified. But our `docs/teacher_distillation_strategy.md` already uses **offline top-K logit caching** ($4,100 budgeted), not online inference. Reviewer hadn't read that doc. Still: cross-tokenizer KD at our scale is unproven; consider Olmo-3-1125-32B (Apache-2.0, 5.5T pretrain — reviewer said 5.9T, off by 0.4T) as primary. |
 | Bergsma "60% compute savings" | At 610M scale vs cosine-to-10%, not generic. Real but smaller win at 1B. |
 | MuonClip "standard safety net" | Verified-but-overstated. Only one production deployment (Kimi K2). |
+
+### Follow-up correction 2026-05-17 (post-Gemma-3/4 verification)
+
+Initial commit `d56e1e0` set `attn_logit_softcap=50.0` and
+`final_logit_softcap=30.0` taken verbatim from Gemma 2 paper. User asked:
+"Gemma 4 is out — are we still on Gemma 2 values?" Per the
+"verify-before-locking" rule we re-checked via WebFetch against current
+HF model cards / arXiv:
+
+- **Gemma 3 technical report (arXiv 2503.19786)** says verbatim: *"we
+  replace the soft-capping of Gemma 2 with QK-norm."* Gemma 3 configs
+  ship `attn_logit_softcapping: null`, `final_logit_softcapping: null`,
+  with a scaled-softmax pattern (`query_pre_attn_scalar=168`) instead.
+- **Gemma 4 (released 2026-04-02)** config: `final_logit_softcapping: 30.0`
+  retained; `attn_logit_softcapping` field absent entirely.
+- **Llama 4** (iRoPE + scaled softmax) and **Mistral Large 3** also do
+  not use softcap.
+
+We already ship `qk_norm: true` (the Gemma 3+ replacement for attn
+softcap). Doubling up with `attn_logit_softcap` forces the manual
+attention path (~5-10% wall-time tax at seq=8192) without any verified
+additional stability benefit at our scale.
+
+**Action**: flipped `attn_logit_softcap` to `null` in `base_1b.yaml`
+(kept the code path as an opt-in debug knob). `final_logit_softcap`
+stays at `30.0` — Gemma 4 retains it. The 3 attention-softcap unit
+tests in `tests/test_model.py` still pass because they construct a
+config that explicitly sets `attn_logit_softcap=50.0`.
 
 ### What we shipped this session as a direct result
 
