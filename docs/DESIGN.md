@@ -64,7 +64,7 @@ run by a solo lead at enterprise-grade quality on commodity GPU pods.
 
 **Active bugs** (under investigation):
 - **D8**: `chunked_cross_entropy_with_z_loss` produces NaN gradients at 1B + B200 + bf16 + width_mult=8 despite finite forward loss.
-- **D9**: Step-718 of the composed pilot corpus deterministically NaN's the gradient (0.1% rate, atomic revert handles).
+- **D9**: ~~Investigation pending~~ — **DONE 2026-05-17**. Step-718 NaN traced to a single abnormally-long Stack Exchange entry filling seq_id 2871. Atomic revert handles; not Stage 2 blocking. Full writeup: [design/d9_step718_investigation.md](design/d9_step718_investigation.md). Action: roll into Round D5 (Stack Exchange schema fix).
 
 ---
 
@@ -882,7 +882,7 @@ Two reviewer rounds processed code-side: Round A (6 quick wins) + Round B (4 Sta
 | D6 | Real scoring policies for IFEval/HE+/MBPP+ | 1-2 days | Layer 2 only did MMLU-Pro + GSM8K |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Replace shape-heuristic with named-axis-role rules (more predictable mesh behavior) |
 | **D8 (NEW)** | **chunked-CE NaN-grad at 1B+B200+bf16** | 1-2 days CPU + GPU repro | Investigate online logsumexp accumulator precision at this scale |
-| **D9 (NEW)** | **step-718 deterministic bad batch** | ~2 hr CPU | Read `quarantine-lr1_5x.jsonl` → identify source + sequence_id |
+| **D9** | ~~step-718 deterministic bad batch~~ — **DONE** 2026-05-17 | 1 hr CPU | Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). |
 
 ---
 
