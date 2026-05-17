@@ -63,7 +63,7 @@ run by a solo lead at enterprise-grade quality on commodity GPU pods.
 | Suite | 739 passed, 1 skipped |
 
 **Active bugs** (under investigation):
-- **D8**: `chunked_cross_entropy_with_z_loss` produces NaN gradients at 1B + B200 + bf16 + width_mult=8 despite finite forward loss.
+- **D8**: ~~Investigation pending~~ — **CPU audit DONE 2026-05-17**. `chunked_cross_entropy_with_z_loss` produces NaN gradients at 1B + B200 + bf16 + width_mult=8 despite finite forward loss. CPU repro of the algorithm did NOT reproduce — bug is GPU/B200-specific (Blackwell tensor cores, XLA-CUDA fusion, or FSDP reduce-scatter at bf16). Stage 2 workaround: use full-CE. Full writeup: [design/d8_chunked_ce_audit.md](design/d8_chunked_ce_audit.md). GPU repro pending hardware (~$5).
 - **D9**: ~~Investigation pending~~ — **DONE 2026-05-17**. Step-718 NaN traced to a single abnormally-long Stack Exchange entry filling seq_id 2871. Atomic revert handles; not Stage 2 blocking. Full writeup: [design/d9_step718_investigation.md](design/d9_step718_investigation.md). Action: roll into Round D5 (Stack Exchange schema fix).
 
 ---
@@ -881,7 +881,7 @@ Two reviewer rounds processed code-side: Round A (6 quick wins) + Round B (4 Sta
 | D5 | Stack Exchange `question + chosen_response` | 2 hr | Current loader uses question-only (wastes the answer) |
 | D6 | Real scoring policies for IFEval/HE+/MBPP+ | 1-2 days | Layer 2 only did MMLU-Pro + GSM8K |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Replace shape-heuristic with named-axis-role rules (more predictable mesh behavior) |
-| **D8 (NEW)** | **chunked-CE NaN-grad at 1B+B200+bf16** | 1-2 days CPU + GPU repro | Investigate online logsumexp accumulator precision at this scale |
+| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16~~ — **CPU audit DONE** 2026-05-17 | 1 hr CPU done; GPU repro pending | CPU disproved pure-algorithm hypothesis; bug is B200/CUDA-specific. Stage 2 uses full-CE. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). |
 | **D9** | ~~step-718 deterministic bad batch~~ — **DONE** 2026-05-17 | 1 hr CPU | Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). |
 
 ---

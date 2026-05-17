@@ -115,6 +115,7 @@ Banked at `s3://llm-data/stage2-prep/benchmarks-4b200/`:
 - Pilot 250M + chunked-CE worked fine; the bug is scale-specific (width_mult=8 vs pilot's 3.0) or hardware-specific (B200 bf16 vs H200) or both.
 - Diagnostic: dropping `--use-chunked-ce` (full-logit CE) makes the training work cleanly. mb=4 + full-CE + FSDP on 4× B200 fits comfortably in 183 GB.
 - Likely root cause: chunked-CE's online logsumexp (`running_max`, `running_sum` accumulators) hits bf16 precision boundaries when V=131072 / 8 chunks × seq=8192. Or its gradient through `take_along_axis` + `where` has a numerical issue at this scale.
+- **CPU audit done 2026-05-17** ([`docs/design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md)): minimal CPU repro of the chunked-CE algorithm in bf16 at muP output_mult=1/8 produces **finite** gradients matching full-CE to 2.98e-7. Pure-algorithm hypothesis is disproved. Bug is B200/CUDA-specific (Blackwell tensor cores, XLA op fusion on CUDA, or FSDP reduce-scatter at bf16). GPU repro on B200 deferred (~$5, ~1 hr).
 - **Stage 2 implication**: must use full-CE on B200 (memory budget allows at mb=4). Pre-Stage-3 we need a chunked-CE fix because at 7B+ full-CE OOMs.
 - **Tracked as Round D investigation item.**
 
@@ -154,9 +155,9 @@ Suite: 738 → 739 passed across these two commits. Both regression tests would 
 
 ### Immediately (CPU-side, no GPU)
 
-1. **Backfill reviewer packet §6** with the C3 sweep table + muP transfer conclusion. Add §6.5 "Bugs found during Stage 2 prep" documenting chunked-CE + step-718.
-2. **Investigate step-718 quarantine** offline. Download `quarantine-lr1_5x.jsonl` from R2, run `scripts/inspect_quarantine.py`, identify the source + sequence_id. Likely just a malformed sequence or specific token pattern. Inform Round D corpus-fixes.
-3. **Investigate chunked-CE bug** (CPU repro of NaN-grad is hard without GPU, but we can audit `src/myllm/training/loss.py:chunked_cross_entropy_with_z_loss`). Hypothesize root cause + write a minimal fix. Track for next Stage 2 attempt.
+1. ~~**Backfill reviewer packet §6**~~ — **DONE 2026-05-17** (commit `5653251`). §6.3-6.6 added, §7.1 closed, §8 status column + Qs #13-15, §9 refreshed.
+2. ~~**Investigate step-718 quarantine**~~ — **DONE 2026-05-17** (commit `e696add`). Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md).
+3. ~~**Investigate chunked-CE bug**~~ — **CPU audit DONE 2026-05-17**. Algorithm clean in bf16 on CPU (grad finite, agreement with full-CE 2.98e-7). Bug is B200/CUDA-specific. GPU repro deferred (~$5, post-Stage-2). See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md).
 
 ### Stage 2 launch decision (need user input)
 
@@ -186,8 +187,8 @@ Three open knobs:
 | D5 | Stack Exchange schema fix | 2 hr | Pending |
 | D6 (in progress) | Real scoring policies — MMLU-Pro+GSM8K done; IFEval/HE+/MBPP+ pending | 1-2 days | Partial |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Pending |
-| **D8 (NEW)** | **chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8** | 1-2 days CPU + GPU repro | **Pending** |
-| **D9 (NEW)** | **step-718 bad-batch investigation** via quarantine.jsonl + corpus inspection | ~2 hr CPU | **Pending** |
+| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8~~ — **CPU audit DONE** 2026-05-17 | 1 hr CPU done; GPU repro pending | **CPU audit shipped** → [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). Bug is B200-specific. |
+| **D9** | ~~step-718 bad-batch investigation via quarantine.jsonl + corpus inspection~~ — **DONE** 2026-05-17 (e696add) | ~2 hr CPU done | **Done** → [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). Root cause folds into D5. |
 
 ---
 
@@ -233,8 +234,8 @@ Still deferred:
 | Chunked distillation memory savings in decay | Pending Round D1 |
 | Stratified per-source held-out | Pending Round D3 |
 | Logical-axis FSDP sharding rules | Pending Round D7 |
-| **chunked-CE NaN-grad at 1B+B200** | **Pending Round D8 (NEW)** |
-| **step-718 deterministic bad batch** | **Pending Round D9 (NEW)** |
+| **chunked-CE NaN-grad at 1B+B200** | **D8 CPU audit DONE 2026-05-17** — algorithm fine on CPU, bug is B200-specific (see [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md)). GPU repro pending. |
+| **step-718 deterministic bad batch** | **D9 DONE 2026-05-17 (e696add)** — Stack Exchange single-doc; folds into D5 (see [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md)). |
 
 ---
 
