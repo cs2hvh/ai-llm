@@ -1,6 +1,6 @@
 # MyLLM — Post-Pilot Review Packet (2026-05-15)
 
-**Reader**: Senior AI researcher (ex-Mistral et al.) — you, who reviewed the May-12 pre-pilot packet ([`docs/review/PROJECT_REVIEW_2026-05-12.md`](PROJECT_REVIEW_2026-05-12.md))
+**Reader**: Senior AI researcher (ex-Mistral et al.) — you, who reviewed the May-12 pre-pilot packet ([`docs/archive/PROJECT_REVIEW_2026-05-12.md`](../archive/PROJECT_REVIEW_2026-05-12.md))
 **Author**: harshit.hv (solo lead) + Claude as build partner
 **Status**: Stage 1 pilot **COMPLETE**. Stage 2 (1B rehearsal) is the next paid decision. Phase 1 engineering queue done.
 **Ask**: full-scope post-mortem review — pilot results, what we caught, architecture confidence going to 1B, corpus mix at scale, process risk. Same instruction as last time: please push back on anything that looks wrong. No need to be polite about it.
@@ -349,7 +349,7 @@ In rough priority:
 
 **Artifacts to open if you want to dig deeper**:
 - [`docs/PROJECT_OVERVIEW.md`](../PROJECT_OVERVIEW.md) — refreshed today; canonical state-of-things
-- [`docs/SESSION_HANDOFF_2026-05-14.md`](../SESSION_HANDOFF_2026-05-14.md) — operational handoff; §13/§14/§15 are the post-pilot timeline
+- [`docs/SESSION_HANDOFF.md`](../SESSION_HANDOFF.md) — operational handoff; §13/§14/§15 are the post-pilot timeline
 - [`pilots/250m_v1/`](../../pilots/250m_v1/) — pilot time-capsule folder. R2_PATHS.md is the durable artifact inventory.
 - [`pilots/250m_v1/RESULTS.md`](../../pilots/250m_v1/RESULTS.md) — pilot results sheet
 - [`pilots/250m_v1/TIMELINE.md`](../../pilots/250m_v1/TIMELINE.md) — minute-by-minute pilot timeline

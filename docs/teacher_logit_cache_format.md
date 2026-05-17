@@ -158,7 +158,7 @@ losses, (c) MoE inference overhead for DeepSeek-V4-Pro.
 
 ## Canary-first plan
 
-Per the 2026-05-12 reviewer Q&A (`docs/reviewer_qa_2026-05-12.md` §2):
+Per the 2026-05-12 reviewer Q&A (`docs/archive/reviewer_qa_2026-05-12.md` §2):
 
 1. **Phase 3 canary**: 1 teacher (DeepSeek-V4-Pro-Base) × 20B tokens.
    Run matched A/B (CE-only baseline vs CE+KL) and check 8 gates including

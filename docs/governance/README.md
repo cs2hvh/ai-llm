@@ -57,7 +57,8 @@ The templates here are SCAFFOLDING — they capture the structure but most numbe
 8. ⏳ OWASP Agentic Top 10 mitigation matrix (for the eventual tool-use SFT phase)
 9. ✅ `scripts/render_governance_cards.py` — auto-renders model/data card AUTO-blocks from live configs (2026-05-12, P2 work)
 
-## External reviews driving this scaffolding
+## External reviews driving this scaffolding (archived)
 
-- `docs/MyLLM_Repo_Technical_Review_2026-05-12.docx` — colleague's code review (P0 bug list)
-- `docs/external_review_2026-05-12_enterprise.md` — colleague's friend's enterprise strategy review (governance + serving + frontier comparison)
+- `docs/archive/MyLLM_Repo_Technical_Review_2026-05-12.docx` — colleague's code review (P0 bug list)
+- `docs/archive/external_review_2026-05-12_enterprise.md` — colleague's friend's enterprise strategy review (governance + serving + frontier comparison)
+- `docs/review/POST_PILOT_REVIEW_2026-05-15.md` — current post-pilot reviewer packet

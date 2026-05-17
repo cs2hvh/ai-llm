@@ -1,10 +1,12 @@
 # Session Handoff (current — last refreshed 2026-05-17)
 
-> Filename keeps the `2026-05-14` suffix for auto-memory continuity, but
-> this doc is **the live handoff for the next session**. Older pilot
-> narrative lives in `pilots/250m_v1/TIMELINE.md`; verified architecture
-> in `docs/PROJECT_OVERVIEW.md`; pilot artifacts inventory in
-> `pilots/250m_v1/R2_PATHS.md`.
+> **The live handoff for the next session.** Renamed from
+> `SESSION_HANDOFF_2026-05-14.md` during the 2026-05-17 docs cleanup —
+> filename no longer carries a date. Older pilot narrative lives in
+> `pilots/250m_v1/TIMELINE.md`; design + algorithms in
+> [`DESIGN.md`](DESIGN.md); pilot artifacts inventory in
+> `pilots/250m_v1/R2_PATHS.md`. For project entry-point orientation,
+> see [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) (slim index).
 
 ---
 

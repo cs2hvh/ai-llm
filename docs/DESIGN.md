@@ -966,12 +966,12 @@ Adaptive stop rule kicks in at 300B floor (~$5.5K spent) before any further comm
 
 ## Appendix A — Where things live (file pointers)
 
-See [SESSION_HANDOFF §6](SESSION_HANDOFF_2026-05-14.md#6-where-things-live) for the canonical file-pointer table. Highlights:
+See [SESSION_HANDOFF §6](SESSION_HANDOFF.md#6-where-things-live) for the canonical file-pointer table. Highlights:
 
 - **`pilots/250m_v1/`** — frozen pilot artifacts (configs, results, R2 paths, command log)
 - **`docs/PROJECT_OVERVIEW.md`** — canonical state (refreshed periodically)
 - **`docs/review/POST_PILOT_REVIEW_2026-05-15.md`** — reviewer packet
-- **`docs/SESSION_HANDOFF_2026-05-14.md`** — live handoff for next session
+- **`docs/SESSION_HANDOFF.md`** — live handoff for next session
 - **`src/myllm/training/state_init.py`** — model+optimizer+state construction (recently refactored from scripts/)
 - **`src/myllm/infer/predict.py`** — shared checkpoint load + greedy decode
 - **`src/myllm/eval/benchmarks/`** — real benchmark adapters

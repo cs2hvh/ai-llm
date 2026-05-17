@@ -99,6 +99,7 @@ Held-out gates planned for v1:
 
 ## References
 
-- Project handoff: [project_handoff_2026-05-11.md](../project_handoff_2026-05-11.md)
-- Teacher strategy: [teacher_distillation_strategy.md](../teacher_distillation_strategy.md)
-- External technical reviews: `docs/MyLLM_Repo_Technical_Review_2026-05-12.docx` + `docs/external_review_2026-05-12_enterprise.md`
+- Live session handoff: [../SESSION_HANDOFF.md](../SESSION_HANDOFF.md)
+- Design reference: [../DESIGN.md](../DESIGN.md)
+- Teacher strategy: [../teacher_distillation_strategy.md](../teacher_distillation_strategy.md)
+- External technical reviews (archived): `docs/archive/MyLLM_Repo_Technical_Review_2026-05-12.docx` + `docs/archive/external_review_2026-05-12_enterprise.md`

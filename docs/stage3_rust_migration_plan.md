@@ -524,10 +524,10 @@ Session A continues working on the main branch (Stage 1 pilot, Stage 2 prep, rev
 
 - **Branching**: per-phase feature branch `rust/phase-N-<topic>` off `main`. Open the PR early as a draft so Session A can see what's coming.
 - **Sync point**: rebase against `main` daily during active development; whenever Session A reports a touched file in CLAUDE_COLLAB that overlaps the implementer's branch, rebase immediately.
-- **Conflict-likely files** Session A may touch: `src/myllm/data/build.py`, `dedupe.py`, `decontamination.py`, `filters.py`, `scripts/build_packed_corpus.py`. Session A should AVOID changing these on main during the migration unless absolutely necessary; if they must, document the change in `docs/CLAUDE_COLLAB.md` so the implementer sees it on the next sync.
+- **Conflict-likely files** Session A may touch: `src/myllm/data/build.py`, `dedupe.py`, `decontamination.py`, `filters.py`, `scripts/build_packed_corpus.py`. Session A should AVOID changing these on main during the migration unless absolutely necessary; if they must, document the change in `docs/archive/CLAUDE_COLLAB.md` so the implementer sees it on the next sync.
 - **Conflict-unlikely files** Session A is likely to touch: `src/myllm/training/*`, `scripts/run_pretrain.py`, `configs/*`. Implementer should AVOID these.
 - **Merge**: at the end of each phase. Session A or user reviews + merges. The `_USE_NATIVE` shim means each phase landing is non-breaking (Python fallback still works).
-- **Live doc**: `docs/CLAUDE_COLLAB.md` "Rust migration" subsection should reflect current phase + ETA + blockers.
+- **Live doc**: `docs/archive/CLAUDE_COLLAB.md` "Rust migration" subsection should reflect current phase + ETA + blockers.
 
 ---
 
@@ -600,4 +600,4 @@ Sourced from 3 parallel research agents on 2026-05-13 + 5-agent v0.2 cross-verif
 
 ## END
 
-Reviewer + user: §6 (Locked decisions) and §11 (Open questions) are the ack-required surface. Once Q1 / Q3 / Q4 / Q5 are answered, implementer claims Phase 0+ in `docs/CLAUDE_COLLAB.md` and begins.
+Reviewer + user: §6 (Locked decisions) and §11 (Open questions) are the ack-required surface. Once Q1 / Q3 / Q4 / Q5 are answered, implementer claims Phase 0+ in `docs/archive/CLAUDE_COLLAB.md` and begins.
