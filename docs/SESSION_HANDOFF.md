@@ -24,6 +24,7 @@
 8. Suite: **739 passed, 1 skipped**. All commits pushed (HEAD = `8e50333`).
 9. **Stage 2 readiness**: peak_lr locked at 3e-4; hardware/seq/budget decision pending.
 10. **DO NOT** commit Stage 2 GPU spend before a short full-CE throughput smoke (mb=4, no chunked-CE) — chunked-CE C2 numbers don't apply.
+11. **External review processed 2026-05-17** ([§7](#7-external-review-2026-05-17-and-actions-taken)). Verified via 3 parallel WebFetch agents (peer 1B specs, Muon evidence, teacher availability + Gemma softcap values). Took 7 P0 recs as CPU-side work this session: README/config staleness fixed, WSD decay-to-zero (D2Z) locked, chunked-CE fp32 logsumexp (D8 mitigation), Gemma 2 softcaps (50 attn / 30 final) wired end-to-end, watchdog precise-6σ test, D8 GPU repro script ready for $5 B200 hour. Stage 2 plan now adopts reviewer's **8×B200 + seq=4K + 20B tokens + D2Z** recommendation.
 
 ---
 
@@ -155,26 +156,33 @@ Suite: 738 → 739 passed across these two commits. Both regression tests would 
 
 ### Immediately (CPU-side, no GPU)
 
-1. ~~**Backfill reviewer packet §6**~~ — **DONE 2026-05-17** (commit `5653251`). §6.3-6.6 added, §7.1 closed, §8 status column + Qs #13-15, §9 refreshed.
-2. ~~**Investigate step-718 quarantine**~~ — **DONE 2026-05-17** (commit `e696add`). Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md).
-3. ~~**Investigate chunked-CE bug**~~ — **CPU audit DONE 2026-05-17**. Algorithm clean in bf16 on CPU (grad finite, agreement with full-CE 2.98e-7). Bug is B200/CUDA-specific. GPU repro deferred (~$5, post-Stage-2). See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md).
+1. ~~**Backfill reviewer packet §6**~~ — **DONE 2026-05-17** (commit `5653251`).
+2. ~~**Investigate step-718 quarantine**~~ — **DONE 2026-05-17** (commit `e696add`). Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md).
+3. ~~**Investigate chunked-CE bug**~~ — **CPU audit DONE 2026-05-17** (commit `0e5080d`). Algorithm clean on CPU; bug is B200-specific. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md).
+4. ~~**Process external review 2026-05-17**~~ — **DONE 2026-05-17**. Verified via 3 parallel WebFetch agents. Took 7 P0 recs CPU-side: README fix + WSD D2Z + chunked-CE fp32 logsumexp (D8 mitigation) + Gemma 2 softcaps (50/30) wired + watchdog 6σ test + D8 GPU repro script. See §7 below.
 
 ### Stage 2 launch decision (need user input)
 
-Three open knobs:
+Three open knobs (reviewer recommendation baked in where available):
 
-| Decision | Options | Tradeoff |
+| Decision | Options | My lean (post-review) |
 |---|---|---|
-| Hardware | 4× B200 / 8× B200 / 8× H200 SXM | More GPUs = less wall, similar $; mesh stays power-of-two |
-| Seq length | 4096 / 8192 | 4K is cheaper + faster but inconsistent with pilot; corpus is at 8K |
-| Token budget | 10B / 20B / 30B | 30B is the "real" rehearsal; 10B is "does it train" check |
+| Hardware | 4× B200 / **8× B200** / 8× H200 SXM | **8×B200** — same total $, half wall-time vs 4×B200; B200 proven by C3 |
+| Seq length | **4096** / 8192 | **4096** — reviewer math: ~67% faster per token; long-context recoverable in Stage 3 via θ-scaling |
+| Token budget | 10B / **20B** / 30B | **20B** — "real" rehearsal; 30B is +50% cost for marginal extra signal |
 | Loss path | full-CE (locked until chunked-CE fix) | Locked by Bug 1 |
 | LR | 3.0e-4 (locked by C3) | Locked |
+| `end_lr_ratio` | 0.0 (D2Z, was 0.1) | **CHANGED 2026-05-17** per Bergsma 2502.15938 |
+| Final-logit softcap | 30.0 (was None) | **ADDED 2026-05-17** per Gemma 2 (arXiv 2408.00118) |
+| Attn-logit softcap | 50.0 (was None) | **ADDED 2026-05-17** per Gemma 2; forces manual attn path (5-10% wall tax at seq=8192) |
 | micro_batch | 4 (locked by full-CE memory budget) | Locked |
 | `--corpus-epochs` | 6 (locked by Stage 2 token budget vs 5B corpus) | Locked |
 | `--production` | yes | Locked |
 
-**Recommended path**: short full-CE smoke first (2-3K steps, ~$15-20 on 4× B200) to measure actual throughput at production batch shape, THEN commit to full 10-30B run.
+**Recommended Stage 2 path** (post-review):
+1. **D8 GPU repro** first (~$5, ~30 min on 1×B200): `python scripts/d8_gpu_repro.py --mode disable-remat`. If it clears, root cause = openxla/xla #17922; re-enable chunked-CE for Stage 2. If not, stay on full-CE workaround.
+2. Short **full-CE throughput smoke** at seq=4K, mb=4, 8×B200, ~2K steps (~$15-20) to lock MFU at production shape with all new flags (softcaps + D2Z + fp32 logsumexp).
+3. Commit to **20B Stage 2 rehearsal** (~$160-230) once smoke is clean.
 
 ### Round D — Stage 3 prep + investigations (parallel with Stage 2)
 
@@ -187,8 +195,12 @@ Three open knobs:
 | D5 | Stack Exchange schema fix | 2 hr | Pending |
 | D6 (in progress) | Real scoring policies — MMLU-Pro+GSM8K done; IFEval/HE+/MBPP+ pending | 1-2 days | Partial |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Pending |
-| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8~~ — **CPU audit DONE** 2026-05-17 | 1 hr CPU done; GPU repro pending | **CPU audit shipped** → [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). Bug is B200-specific. |
+| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8~~ — **CPU audit DONE**, **fp32-logsumexp mitigation SHIPPED**, GPU repro script READY 2026-05-17 | 1 hr CPU done; $5 B200 hour pending | CPU audit + fp32-logsumexp + GPU repro driver shipped. Run `scripts/d8_gpu_repro.py --mode disable-remat` to test openxla/xla #17922 hypothesis. |
 | **D9** | ~~step-718 bad-batch investigation via quarantine.jsonl + corpus inspection~~ — **DONE** 2026-05-17 (e696add) | ~2 hr CPU done | **Done** → [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). Root cause folds into D5. |
+| **D10 (NEW)** | Muon optimizer port (hybrid: Muon for ≥2D hidden weights, AdamW for embeddings/head/scalars) + MuonClip | 2 days code + $10 GPU smoke | Pending — biggest single quality lever per verified review. Per Moonshot 2502.16982 (~2× compute efficiency vs AdamW) + Kimi K2 2507.20534 (1T params, 15.5T tokens, zero loss spike). Recommended pre-Stage-2.5. |
+| **D11 (NEW)** | Apple Cut-Cross-Entropy `custom_vjp` (arXiv 2411.09009) for LM head | 1-2 days | Pending — would kill the D8 bug class AND restore chunked-CE's memory benefit at 7B+. Required pre-Stage-3. |
+| **D12 (NEW)** | Architecture revision for Stage 3: deeper-thinner (24-28L / hidden 1792 / FFN 3×) + depth-μP via spectral (arXiv 2603.00541) | 1-2 weeks + fresh wind-tunnel sweep | Pending — backed by MobileLLM-Pro's verified +7.9% on 3-cat avg over Llama 3.2 1B. Stage 3 prep, NOT Stage 2 blocker. |
+| **D13 (NEW)** | Gopher repetition filters in corpus pipeline (`frac_chars_in_dup_5_10grams > 0.20`, byte-entropy ≥ 3.5 bits/byte) | 1 day CPU | Pending — folds with D5 Stack-Exchange schema rebuild. Would have prevented D9 at the data layer. |
 
 ---
 
@@ -327,7 +339,69 @@ KERAS_BACKEND=jax python scripts/generate.py \
 
 ---
 
-## 7. Recent commits worth orienting against
+## 7. External review 2026-05-17 and actions taken
+
+A comprehensive external review landed 2026-05-17. Per our durable "verify
+before locking" rule, every load-bearing factual claim was cross-checked
+via 3 parallel WebFetch verification agents (peer 1B specs + tokens, Muon
+evidence, teacher availability + Gemma softcap values). Net: about 70% of
+the review's recommendations were correct and applicable, 20% were already
+done (reviewer reading a stale snapshot from pre-2026-05-17 docs), and 10%
+were partial / overstated.
+
+### Reviewer claims pushed back on (stale-snapshot reads)
+
+| Claim | Why wrong |
+|---|---|
+| `DESIGN.md` missing | Exists as `docs/DESIGN.md` (40 KB, commit `6fff980` 2026-05-17). |
+| D5/D8/D9 labels not in repo | Present throughout `DESIGN.md`, this file, `design/d8_*` `design/d9_*`. Reviewer was reading archived `Phase A/B/B1–B9` labels from `docs/archive/`. |
+| RoPE θ=130k; raise to 500k as P0 | `configs/base_1b.yaml:55` is already `500000.0`. |
+| muP transfer "CONFIRMED is overstated" | README was stale; the 2026-05-16 C3 sweep (peak_lr=3e-4 wins monotonically across 1B-shape on 4×B200) closes it. README now fixed. |
+| "MyLLM's d/L=128 matched only by Llama 3.2 1B" | Wrong. OLMo 2 1B is also 16L / hidden 2048 / d/L=128, non-distilled, 4T tokens. Verified from `allenai/OLMo-2-0425-1B` card. |
+
+### Reviewer claims verified literally (took the recommendation)
+
+| Recommendation | Verified source | Status |
+|---|---|---|
+| Llama 3.2 1B = 9T + distilled from 8B/70B | Meta card "Up to 9T tokens"; "logits from Llama 3.1 8B and 70B" | Re-frames our project goal: target OLMo 2 1B / Gemma 3 1B tier (verified-reachable), not Llama 3.2 1B tier |
+| Gemma 2 attn-softcap=50, final-softcap=30 | arXiv 2408.00118 verbatim | **WIRED** end-to-end (config + attention + final-logit + chunked-CE) + 3 unit tests + on by default in `base_1b.yaml` |
+| WSD decay-to-zero (Bergsma 2502.15938) | arXiv "Straight to Zero" verbatim, 60% compute savings at 610M | `end_lr_ratio: 0.0` in `base_1b.yaml` |
+| chunked-CE bf16 logsumexp unstable (jax-ml/jax #13529) | GitHub issue: "worse for bf16 but also noticeable in float32" | **MITIGATED**: accumulators run in fp32; matmul stays bf16. Bf16 regression test added at `tests/test_loss.py::test_chunked_bf16_hidden_uses_fp32_logsumexp`. |
+| openxla/xla #17922 = remat copy-ops cause grad NaN post JAX 0.4.30 | GitHub issue + PR #18152 fix | We pin jax==0.4.38 → highly relevant. `scripts/d8_gpu_repro.py --mode disable-remat` ready to test this hypothesis on $5 of B200. |
+| Stage 2 = 8×B200 + seq=4K + 20B tokens | Reviewer's throughput math holds (4K is ~67% faster per token) | Plan updated; needs final user sign-off. |
+| Watchdog 6σ stress test | Reviewer Q9 | New test `test_precise_6sigma_threshold_fires` injects spike at base+6.5σ and verifies rollback fires. |
+| Muon optimizer hybrid (2D hidden → Muon, scalars/embed/head → AdamW) | Moonshot 2502.16982 (2× compute); Kimi K2 2507.20534 (1T params, 15.5T tokens, zero spikes); KellerJordan/Muon canonical pattern | **Tracked as D10**. Recommended for Stage 2.5 / pre-Stage-3. Single biggest unrealized quality lever. |
+| Apple CCE custom_vjp (arXiv 2411.09009) | 24 GB → 1 MB loss memory on Gemma 2B | **Tracked as D11**. Would kill D8 bug class. |
+| Architecture deeper-thinner (24-28L / hidden 1792 / FFN 3×) | MobileLLM ICML 2024 "deeper and thinner models generally outperform"; MobileLLM-Pro +7.9% 3-cat avg over Llama 3.2 1B | **Tracked as D12**. Stage 3 prep, NOT Stage 2 blocker — needs fresh depth-μP sweep. |
+| Gopher repetition filters (Stage 2 corpus) | RedPajama-v2 quality signals | **Tracked as D13**. Folds with D5 Stack-Exchange schema rebuild. |
+
+### Reviewer claims partial / nuanced
+
+| Claim | What we found |
+|---|---|
+| Qwen3 0.6B/1.7B = 36T tokens | 36T is the **family corpus**, not per-model. Sizes downstream may see 10-30T. |
+| MobileLLM-Pro +7.9% over Llama 3.2 1B "on reasoning" | The +7.9% is a 3-category average (reasoning + knowledge + long-context retrieval), not pure reasoning. Still meaningful. |
+| DeepSeek-V4-Pro-Base "operationally bad for distilling 1B" | Cross-tokenizer (uses `encoding_dsv4`, not SP-Unigram) — verified. FP4 MoE — verified. But our `docs/teacher_distillation_strategy.md` already uses **offline top-K logit caching** ($4,100 budgeted), not online inference. Reviewer hadn't read that doc. Still: cross-tokenizer KD at our scale is unproven; consider Olmo-3-1125-32B (Apache-2.0, 5.5T pretrain — reviewer said 5.9T, off by 0.4T) as primary. |
+| Bergsma "60% compute savings" | At 610M scale vs cosine-to-10%, not generic. Real but smaller win at 1B. |
+| MuonClip "standard safety net" | Verified-but-overstated. Only one production deployment (Kimi K2). |
+
+### What we shipped this session as a direct result
+
+1. `README.md` stale lines fixed (test count, muP status, recent work).
+2. `configs/base_1b.yaml`: `peak_lr 2e-4 → 3.0e-4` (C3-locked), `end_lr_ratio 0.1 → 0.0` (D2Z), `attn_logit_softcap: 50.0`, `final_logit_softcap: 30.0`.
+3. `src/myllm/training/loss.py`: chunked-CE accumulators cast to fp32 (D8 mitigation per jax #13529); softcap parameter wired through.
+4. `src/myllm/model/config.py`: `attn_logit_softcap` + `final_logit_softcap` config fields.
+5. `src/myllm/model/layers.py`: `GroupedQueryAttention.logit_softcap` (forces manual path when set; applies `cap*tanh(scores/cap)` pre-mask).
+6. `src/myllm/model/transformer.py`: final-logit softcap on full-logit path.
+7. `src/myllm/training/{train_step,eval_step}.py` + `scripts/run_pretrain.py`: thread softcap from config.
+8. `tests/test_loss.py`: 2 new tests (softcap-matches-reference, softcap-clips-extremes) + 1 bf16 regression test.
+9. `tests/test_model.py`: 3 new tests (softcap forward finite, final-cap bounds, softcap+qk_norm+segment compose).
+10. `tests/test_watchdog_recovery.py`: precise-6σ-threshold edge case test.
+11. `scripts/d8_gpu_repro.py`: 4-mode B200 repro driver — `baseline`, `disable-remat`, `fsdp`, `fp32-cce` — ready for $5 hour of B200 time.
+
+---
+
+## 8. Recent commits worth orienting against
 
 ```
 8e50333  fix: data_position pytree mismatch in EVAL path under --fsdp (hotfix 2/2)
@@ -354,7 +428,7 @@ Everything pushed to origin/main. HEAD = `8e50333`.
 
 ---
 
-## 8. Contact
+## 9. Contact
 
 - **Lead**: harshit.hv@samatva.com (solo)
 - **Auto-memory pointer**: `/root/.claude/projects/-root/memory/MEMORY.md`

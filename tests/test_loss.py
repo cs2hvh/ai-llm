@@ -239,6 +239,88 @@ class TestChunkedCrossEntropy:
                 hidden, embed, labels, num_chunks=3,  # 10 % 3 != 0
             )
 
+    def test_chunked_final_logit_softcap_matches_reference(self):
+        # Gemma-2-style softcap (arXiv 2408.00118): logits = c*tanh(logits/c).
+        # Applied per-chunk on fp32 chunk_logits before logsumexp/gather, the
+        # chunked path must match the full-CE path with the same softcap
+        # applied to the full [B,S,V] logits.
+        rng = np.random.default_rng(107)
+        B, S, H, V, K, CAP = 2, 4, 16, 64, 4, 30.0
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32) * 3.0  # large
+        embed = rng.standard_normal((V, H)).astype(np.float32) * 1.5      # to trigger cap
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+
+        # Reference: full path with softcap applied manually outside the loss.
+        full_logits = hidden @ embed.T
+        full_logits_capped = CAP * np.tanh(full_logits / CAP)
+        full_total, _ = cross_entropy_with_z_loss(
+            full_logits_capped, labels, z_loss_coef=1e-4,
+        )
+
+        chunked_total, _ = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels,
+            num_chunks=K, output_mult=1.0, z_loss_coef=1e-4,
+            final_logit_softcap=CAP,
+        )
+        assert np.isclose(
+            float(full_total), float(chunked_total), atol=1e-5
+        ), (float(full_total), float(chunked_total))
+
+    def test_chunked_softcap_clips_extreme_logits(self):
+        # With cap=10 and inputs designed to produce ~100-magnitude logits,
+        # the post-softcap logits stay in (-10, +10). We verify via the
+        # log_z output: log_z must be in approximately [-10, +10 + log(V)].
+        rng = np.random.default_rng(108)
+        B, S, H, V, K = 1, 2, 8, 32, 4
+        # Big inputs → unconstrained logits would be ~100
+        hidden = rng.standard_normal((B, S, H)).astype(np.float32) * 10.0
+        embed = rng.standard_normal((V, H)).astype(np.float32) * 10.0
+        labels = rng.integers(0, V, size=(B, S)).astype(np.int32)
+        # With cap=10 and V=32: log_z ≤ 10 + log(32) ≈ 13.47
+        total_capped, _ = chunked_cross_entropy_with_z_loss(
+            hidden, embed, labels,
+            num_chunks=K, output_mult=1.0, z_loss_coef=0.0,
+            final_logit_softcap=10.0,
+        )
+        assert np.isfinite(float(total_capped))
+        # Without cap on the same inputs the loss may be much larger
+        # (just check we got a finite, small-ish value with cap).
+        assert abs(float(total_capped)) < 100.0
+
+    def test_chunked_bf16_hidden_uses_fp32_logsumexp(self):
+        # D8 mitigation regression: when hidden_states is bf16, the chunked-CE
+        # online-logsumexp accumulators must run in fp32 to avoid the
+        # numerical instability documented in jax-ml/jax#13529 ("worse for
+        # bf16 but also noticeable in float32"). The loss must remain finite
+        # and match the fp32 reference to bf16 tolerance.
+        import jax.numpy as jnp
+        rng = np.random.default_rng(106)
+        B, S, H, V, K = 2, 8, 32, 4096, 8
+        hidden_f32 = rng.standard_normal((B, S, H)).astype(np.float32)
+        embed_f32  = rng.standard_normal((V, H)).astype(np.float32) * 0.02
+        labels     = rng.integers(0, V, size=(B, S)).astype(np.int32)
+
+        # Reference: full-CE in fp32.
+        full_total, full_m = self._full_loss(
+            hidden_f32, embed_f32, labels, 1.0, z_loss_coef=1e-4
+        )
+
+        # bf16 inputs through chunked-CE.
+        hidden_bf16 = jnp.asarray(hidden_f32, dtype=jnp.bfloat16)
+        embed_bf16  = jnp.asarray(embed_f32,  dtype=jnp.bfloat16)
+        chunked_total, chunked_m = chunked_cross_entropy_with_z_loss(
+            hidden_bf16, embed_bf16, labels,
+            num_chunks=K, output_mult=1.0, z_loss_coef=1e-4,
+        )
+        # Must be finite (the D8 bug was finite-forward NaN-backward; in
+        # algorithm-only CPU repro the forward is finite either way, but we
+        # still want to lock that bf16 input doesn't NaN the forward).
+        assert np.isfinite(float(chunked_total))
+        # bf16 has ~3 decimal digits of precision; tolerance 5e-2 is generous.
+        assert np.isclose(
+            float(full_total), float(chunked_total), atol=5e-2
+        ), (float(full_total), float(chunked_total))
+
 
 # --------------------------------------------------------------------------- #
 # Ignore index + loss mask

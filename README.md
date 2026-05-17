@@ -15,7 +15,7 @@ pip install -r requirements.txt
 # Smoke-test the environment (no GPU needed):
 python scripts/smoke_test_env.py
 
-# Run the unit + integration test suite (~7s, 370 tests):
+# Run the unit + integration test suite (~7s):
 python -m pytest
 ```
 
@@ -39,7 +39,7 @@ configs/          YAML configs per phase (wind_tunnel, pilot_250m, base_1b,
                   decay_phase_distillation, data/pretrain_mix)
 scripts/          one-shot CLIs (run_pretrain, wind_tunnel_sweep,
                   build_decontamination_index, render_governance_cards, ...)
-tests/            unit + integration tests (370 passing)
+tests/            unit + integration tests (full pytest suite passing)
 docs/             phase runbooks + governance + external reviews
 docs/governance/  EU AI Act / ISO 42001 / NIST AI RMF / DPDP artifacts
 artifacts/        local artifacts (gitignored — push to R2 instead)
@@ -54,34 +54,24 @@ artifacts/        local artifacts (gitignored — push to R2 instead)
 - **Decontamination**: 13-gram xxhash64 index over 11 v1-gate benchmarks (MMLU-ProX/Pro, Belebele, MILU, HumanEval+, MBPP+, GSM8K, MATH, MGSM, BBH, IFEval).
 - **Tokenizer**: SentencePiece Unigram, 131k vocab, NFKC + Metaspace + byte_fallback.
 
-## Current status (2026-05-12)
+## Current status (2026-05-17)
 
 | Phase | Status |
 |---|---|
 | 0 — bootstrap, RunPod orchestration smoke | ✅ done |
 | 1 — production tokenizer (131k SPM-Unigram) | ✅ shipped |
-| 2 — wind-tunnel sweep (Proxy A 67M + Proxy B 300M) | 🟡 sweep terminated; muP transfer validation pending Proxy B |
-| 3 — pilot 250M | ⏳ pending B2 (offline packed corpus) |
-| 4 — base 1B "internal v1" at 1T tokens | ⏳ pending Phase 3 |
+| 2 — wind-tunnel sweep (Proxy A 67M + Proxy B 300M) | ✅ closed by **C3 μP/LR sweep at 1B-shape** (peak_lr=3e-4 wins monotonically across 3-LR sweep on 4×B200) — **muP transfer 250M → 1B CONFIRMED 2026-05-16** |
+| 3 — pilot 250M | ✅ done. val_loss 2.7303 / val_ppl 15.34. Stage 1 + Stage 1.5 decay |
+| 4 — base 1B Stage 2 rehearsal (10-30B tokens) | 🔄 ready, hardware/budget decision pending |
+| 4 — base 1B Stage 3 base run (~600B-1T tokens) | ⏳ blocked on Stage 2 |
 | 5 — post-training (SFT/DPO/safety) | ⏳ |
 | 6 — serving + quantization (GGUF) | ⏳ |
 
-### Recent work (latest first)
+### Where to read next
 
-- **2026-05-12** — Reviewer Q&A locked B2 design (uint32 tokens, 512M-token shards, simple seek index, sharded CPU workers w/ Rust tokenizers). See [`docs/reviewer_qa_2026-05-12.md`](docs/reviewer_qa_2026-05-12.md).
-- **2026-05-12** — Red tests for the 4 "full-scale-only bug" coverage gaps + quarantine graceful-degradation fix. See [`docs/full_scale_bug_coverage_2026-05-12.md`](docs/full_scale_bug_coverage_2026-05-12.md). 370 tests passing.
-- **2026-05-12** — P2 governance: decontamination extended to 11 benchmarks; auto-render of model_card/data_card from live configs (`scripts/render_governance_cards.py`).
-- **2026-05-12** — Phase B re-audit fixes: state-dict preservation in `train_step`, data_position advancement in stable phase, micro_batch resolver, WSM merge template.
-- **2026-05-12** — Teacher plan v2 locked: DeepSeek-V4-Pro-Base (MIT) + Olmo-3-32B (Apache-2.0). Mistral + Qwen3.6 dropped after license/modality verification. See [`docs/teacher_distillation_strategy.md`](docs/teacher_distillation_strategy.md).
-- **2026-05-12** — Phase B batch 1: Orbax template-aware restore (B1), decay-phase activation + α-annealing (B7/B8), quarantine writer (B6), governance scaffolding (B9).
-- **2026-05-12** — Phase A: 6 P0 integration bugs fixed (atomic NaN-skip, segment_ids end-to-end, sequence-length resolver, alpha-from-batch, token-weighted mixture sampling, bf16 teacher-cache dtype fix).
+- [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md) — live current state + plan ahead
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture + algorithms reference (with Mermaid diagrams)
+- [`docs/review/POST_PILOT_REVIEW_2026-05-15.md`](docs/review/POST_PILOT_REVIEW_2026-05-15.md) — current reviewer packet
+- [`docs/archive/`](docs/archive/) — historical reviews, pre-pilot plans, old handoffs
 
-See [`docs/project_handoff_2026-05-11.md`](docs/project_handoff_2026-05-11.md) for the full context dump (handoff brief).
-
-## External reviews (audit trail)
-
-- [`docs/MyLLM_Repo_Technical_Review_2026-05-12.docx`](docs/MyLLM_Repo_Technical_Review_2026-05-12.docx) — first colleague's code review
-- [`docs/external_review_2026-05-12_enterprise.md`](docs/external_review_2026-05-12_enterprise.md) — enterprise strategy review
-- [`docs/reviewer_qa_2026-05-12.md`](docs/reviewer_qa_2026-05-12.md) — follow-up Q&A locking B2 design choices
-
-Per the "verify-before-locking" rule, every external claim that influenced a code or config change has been WebFetch-verified before the lock.
+Per the "verify-before-locking" rule, every external claim that influenced a code or config change is WebFetch-verified before the lock.

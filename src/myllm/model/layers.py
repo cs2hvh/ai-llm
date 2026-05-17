@@ -140,6 +140,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         qk_norm: bool = False,
         norm_eps: float = 1.0e-5,
         output_mult: float = 1.0,
+        logit_softcap: float | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -167,6 +168,16 @@ class GroupedQueryAttention(keras.layers.Layer):
         # so signal magnitude is invariant to model width. See
         # `docs/mup_design.md` §"Change 1".
         self.output_mult = output_mult
+        # Gemma-2-style soft-cap on attention QK logits:
+        #   scores = softcap * tanh(scores / softcap)
+        # Bounds extreme attention scores so the softmax can't saturate on
+        # pathological inputs (e.g. repetition / low-entropy spans). None =
+        # disabled (lets the cuDNN-FlashAttention fast path stay in use).
+        # Setting any non-None value forces the manual attention path
+        # because jax.nn.dot_product_attention (JAX 0.4.38) does not expose
+        # logits_soft_cap on the cuDNN backend. ~5-10% wall-time tax at
+        # seq=8192; budget vs production-default OFF.
+        self.logit_softcap = logit_softcap
 
     def build(self, input_shape):
         init = keras.initializers.RandomNormal(stddev=self.init_std)
@@ -252,7 +263,14 @@ class GroupedQueryAttention(keras.layers.Layer):
                 same_seg, causal_b[None, :, :]
             )[:, None, :, :]                               # [b, 1, s, s]
 
-        if _JAX_DPA is not None:
+        # When logit_softcap is set, force the manual path: cuDNN FlashAttention
+        # via jax.nn.dot_product_attention (JAX 0.4.38) does NOT expose
+        # logits_soft_cap. The manual path applies softcap directly on scores
+        # before the mask + softmax. Slower at long seq but mathematically
+        # equivalent to Gemma 2's softcap-FA kernel.
+        use_fast_path = _JAX_DPA is not None and self.logit_softcap is None
+
+        if use_fast_path:
             # JAX fast path: fused FlashAttention via jax.nn.dot_product_attention.
             # Input format is [B, S, N, H]; no transpose needed.
             if bool_mask is not None:
@@ -265,11 +283,17 @@ class GroupedQueryAttention(keras.layers.Layer):
                 out = _JAX_DPA(q, k, v, is_causal=True, scale=self.scale)
             # out: [b, s, num_heads, head_dim]
         else:
-            # Manual fallback (works on any backend; same math).
+            # Manual fallback (works on any backend; same math). Also taken
+            # whenever logit_softcap is set.
             q = ops.transpose(q, (0, 2, 1, 3))
             k = ops.transpose(k, (0, 2, 1, 3))
             v = ops.transpose(v, (0, 2, 1, 3))
             scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * self.scale
+            if self.logit_softcap is not None:
+                # Gemma 2 softcap: scores = c * tanh(scores / c). Squashes
+                # extreme values into [-c, +c] before the mask + softmax.
+                cap = ops.cast(self.logit_softcap, scores.dtype)
+                scores = cap * ops.tanh(scores / cap)
             if bool_mask is not None:
                 add_mask = ops.where(
                     bool_mask,
@@ -311,6 +335,7 @@ class GroupedQueryAttention(keras.layers.Layer):
             "qk_norm": self.qk_norm,
             "norm_eps": self.norm_eps,
             "output_mult": self.output_mult,
+            "logit_softcap": self.logit_softcap,
         }
 
 
@@ -406,6 +431,7 @@ class DecoderBlock(keras.layers.Layer):
             qk_norm=config.qk_norm,
             norm_eps=config.norm_eps,
             output_mult=attn_out_mult,
+            logit_softcap=config.attn_logit_softcap,
             name="attn",
         )
         self.ffn_norm = RMSNorm(config.hidden_dim, config.norm_eps, name="ffn_norm")

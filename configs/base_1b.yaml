@@ -62,6 +62,18 @@ qk_norm: true   # R3 from 2026-05-11 dossier: now industry default at 1B+
                 # for spike-robustness on long pretrain runs. See
                 # src/myllm/model/layers.py post-RoPE q_norm/k_norm.
 
+# 2026-05-17 (post-review): Gemma-2-style soft-caps on the attention QK
+# logits and the final logits (arXiv 2408.00118 verified values). Bounds
+# extreme values into [-c, +c] before the softmax / logsumexp can saturate
+# on repetitive/low-entropy spans (the mechanism behind D9's step-718 NaN).
+#
+# - attn_logit_softcap forces the manual attention path (jax.nn DPA in
+#   JAX 0.4.38 can't apply softcap inline on cuDNN). ~5-10% wall-time tax
+#   at seq=8192. Belt-and-suspenders defense for the long pretrain.
+# - final_logit_softcap is cheap (one elementwise tanh per chunk).
+attn_logit_softcap: 50.0
+final_logit_softcap: 30.0
+
 # muP HP transfer (2026-05-12 senior review pushback).
 #
 # This block lands HPs found at the wind_tunnel (hidden=384, base_width=256)
@@ -86,8 +98,11 @@ optimizer:
 
 lr_schedule:
   type: wsd                # Warmup-Stable-Decay (matches pilot + playbook U5)
-  peak_lr: 2.0e-4
-  end_lr_ratio: 0.1
+  peak_lr: 3.0e-4          # 2026-05-17: locked by C3 μP/LR sweep at 1B-shape
+                           #   (pilot was 3e-4; C3 swept 1e-4/2e-4/3e-4 — 3e-4 wins)
+  end_lr_ratio: 0.0        # 2026-05-17: D2Z per Bergsma et al. 2502.15938
+                           #   ("Straight to Zero" — 60% compute savings at 610M
+                           #   vs cosine-to-10%). Was 0.1.
   warmup_steps: 2000
   decay_fraction: 0.15     # last 15% of total_steps is the decay phase
 

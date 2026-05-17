@@ -199,3 +199,48 @@ def test_segment_mask_with_qk_norm_works_together():
     assert diff < 1.0e-4, (
         f"segment mask broken with qk_norm enabled: max diff {diff:.6g}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Gemma-2-style soft-caps (post-review 2026-05-17)
+# --------------------------------------------------------------------------- #
+def _tiny_cfg_with_softcaps(attn_cap: float | None, final_cap: float | None):
+    cfg = ModelConfig.from_yaml(CONFIGS / "tiny_test.yaml")
+    return cfg.model_copy(update={
+        "attn_logit_softcap": attn_cap,
+        "final_logit_softcap": final_cap,
+    })
+
+
+def test_attn_logit_softcap_forward_pass_finite():
+    """Building with attn_logit_softcap=50 must produce finite logits."""
+    cfg = _tiny_cfg_with_softcaps(attn_cap=50.0, final_cap=None)
+    model = build_model(cfg)
+    ids = ops.cast(keras.random.uniform((2, 16), maxval=cfg.vocab_size), "int32")
+    logits = model(ids)
+    assert tuple(ops.shape(logits)) == (2, 16, cfg.vocab_size)
+    assert bool(ops.all(ops.isfinite(logits)))
+
+
+def test_final_logit_softcap_bounds_output():
+    """With final_logit_softcap=c, all returned logits must lie in (-c, +c)."""
+    cap = 5.0
+    cfg = _tiny_cfg_with_softcaps(attn_cap=None, final_cap=cap)
+    model = build_model(cfg)
+    ids = ops.cast(keras.random.uniform((2, 16), maxval=cfg.vocab_size), "int32")
+    logits = model(ids)
+    lo = float(ops.min(logits))
+    hi = float(ops.max(logits))
+    # tanh saturates at ±1 → softcap output bounded by (-c, +c).
+    assert lo > -cap - 1e-3 and hi < cap + 1e-3, (lo, hi, cap)
+
+
+def test_softcaps_compose_with_qk_norm_and_segment_mask():
+    """All three stability features compose without breaking forward pass."""
+    base = _tiny_cfg_with_softcaps(attn_cap=50.0, final_cap=30.0)
+    cfg = base.model_copy(update={"qk_norm": True})
+    model = build_model(cfg)
+    ids = ops.cast(keras.random.uniform((2, 4), maxval=cfg.vocab_size), "int32")
+    segs = ops.array([[0, 0, 1, 1], [0, 0, 1, 1]], dtype="int32")
+    logits = model(ids, segment_ids=segs)
+    assert bool(ops.all(ops.isfinite(logits)))

@@ -48,6 +48,11 @@ def make_train_step(
     teacher_weights: tuple[float, ...] | None = None,
     use_chunked_ce: bool = False,
     chunked_ce_num_chunks: int = 8,
+    # Gemma-2-style final-logit softcap (arXiv 2408.00118). None = off.
+    # When set (e.g. 30.0), the chunked-CE path applies cap*tanh(x/cap)
+    # per chunk; the full-logit path applies it inside the model. See
+    # ModelConfig.final_logit_softcap.
+    final_logit_softcap: float | None = None,
     # FSDP sharding contract (2026-05-13). Optional; when None, the
     # train_step compiles as before (DP-replicated state). When set, the
     # JIT specifies in_shardings, donate_argnums=(0,) for in-place state
@@ -171,6 +176,7 @@ def make_train_step(
                 ignore_index=ignore_index,
                 z_loss_coef=z_loss_coef,
                 loss_mask=loss_mask,
+                final_logit_softcap=final_logit_softcap,
             )
             # Pad metrics so downstream logging (which expects kl/alpha)
             # matches the distillation-path shape.

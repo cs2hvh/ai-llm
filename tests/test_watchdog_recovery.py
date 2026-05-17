@@ -98,6 +98,45 @@ def test_clean_run_no_recovery(ckpt_dir):
     assert int(final["step"]) == 50
 
 
+def test_precise_6sigma_threshold_fires(ckpt_dir):
+    """Reviewer Q9 (post-pilot 2026-05-15): inject a synthetic 6σ spike
+    calibrated to land just above hard_sigma=6 and verify the watchdog
+    fires + rollback runs. The 50× spike in
+    `test_hard_spike_triggers_rollback` is much further than 6σ; this
+    case locks the EXACT threshold isn't accidentally off-by-one.
+    """
+    base, std = 2.0, 0.05  # matches _stable_losses noise
+    # Run 50 warmup steps to populate the watchdog window, then inject a
+    # loss at base + 6.5σ. With base 2.0 + std 0.05 → spike at 2.325.
+    spike = base + 6.5 * std
+    losses = _stable_losses(50, base=base, seed=11) + [spike] + _stable_losses(50, seed=12)
+    step_fn = _make_train_step_returning(losses)
+
+    final = train_loop(
+        train_step_fn=step_fn,
+        initial_state=_initial_state(),
+        data_iter=_data_iter(200),
+        loop_config=LoopConfig(
+            total_steps=70,
+            log_every=10,
+            checkpoint_every=10,
+            recovery_skip_batches=2,
+            recovery_lr_decay=0.5,
+            max_recoveries=3,
+        ),
+        checkpoint_config=CheckpointConfig(root=ckpt_dir),
+        watchdog=LossSpikeWatchdog(
+            window=100, min_observations=30, soft_sigma=3.0, hard_sigma=6.0
+        ),
+    )
+    # A spike at 6.5σ must cross hard_sigma=6.0 → recovery fires →
+    # lr_recovery_multiplier <= 0.5.
+    assert final["lr_recovery_multiplier"] <= 0.5 + 1e-6, (
+        f"6.5σ spike did NOT trigger rollback. final lr_mult="
+        f"{final['lr_recovery_multiplier']}"
+    )
+
+
 def test_hard_spike_triggers_rollback(ckpt_dir):
     """Stable loss for many steps, then a 50x spike. Verify rollback runs."""
     losses = _stable_losses(60, seed=2) + [1000.0] + _stable_losses(200, seed=3)

@@ -63,8 +63,8 @@ run by a solo lead at enterprise-grade quality on commodity GPU pods.
 | Suite | 739 passed, 1 skipped |
 
 **Active bugs** (under investigation):
-- **D8**: ~~Investigation pending~~ — **CPU audit DONE 2026-05-17**. `chunked_cross_entropy_with_z_loss` produces NaN gradients at 1B + B200 + bf16 + width_mult=8 despite finite forward loss. CPU repro of the algorithm did NOT reproduce — bug is GPU/B200-specific (Blackwell tensor cores, XLA-CUDA fusion, or FSDP reduce-scatter at bf16). Stage 2 workaround: use full-CE. Full writeup: [design/d8_chunked_ce_audit.md](design/d8_chunked_ce_audit.md). GPU repro pending hardware (~$5).
-- **D9**: ~~Investigation pending~~ — **DONE 2026-05-17**. Step-718 NaN traced to a single abnormally-long Stack Exchange entry filling seq_id 2871. Atomic revert handles; not Stage 2 blocking. Full writeup: [design/d9_step718_investigation.md](design/d9_step718_investigation.md). Action: roll into Round D5 (Stack Exchange schema fix).
+- **D8**: ~~Investigation pending~~ — **CPU audit + fp32-logsumexp MITIGATION shipped 2026-05-17**. Chunked-CE accumulators now run in fp32 (matmul stays in bf16) per verified jax-ml/jax #13529 ("worse for bf16 but noticeable in float32"). External review (2026-05-17) surfaced openxla/xla #17922 — "[Regression] Gradient explodes after upgrading to JAX 0.4.33 from 0.4.30" with root cause = remat pass copy-insertion — as the most likely real root cause given we pin jax==0.4.38. GPU repro driver ready: `scripts/d8_gpu_repro.py --mode disable-remat` ($5, ~30 min on 1×B200). Stage 2 still uses full-CE workaround until repro confirms. Full writeup: [design/d8_chunked_ce_audit.md](design/d8_chunked_ce_audit.md).
+- **D9**: ~~Investigation pending~~ — **DONE 2026-05-17**. Step-718 NaN traced to a single abnormally-long Stack Exchange entry filling seq_id 2871. Atomic revert handles; Gemma 2 attn-softcap=50 now added as data-layer-agnostic defense. Full writeup: [design/d9_step718_investigation.md](design/d9_step718_investigation.md). Action: roll into Round D5 (Stack Exchange schema fix) + D13 (Gopher repetition filters).
 
 ---
 
@@ -881,8 +881,12 @@ Two reviewer rounds processed code-side: Round A (6 quick wins) + Round B (4 Sta
 | D5 | Stack Exchange `question + chosen_response` | 2 hr | Current loader uses question-only (wastes the answer) |
 | D6 | Real scoring policies for IFEval/HE+/MBPP+ | 1-2 days | Layer 2 only did MMLU-Pro + GSM8K |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Replace shape-heuristic with named-axis-role rules (more predictable mesh behavior) |
-| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16~~ — **CPU audit DONE** 2026-05-17 | 1 hr CPU done; GPU repro pending | CPU disproved pure-algorithm hypothesis; bug is B200/CUDA-specific. Stage 2 uses full-CE. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). |
-| **D9** | ~~step-718 deterministic bad batch~~ — **DONE** 2026-05-17 | 1 hr CPU | Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). |
+| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16~~ — **CPU audit + fp32-logsumexp mitigation + GPU repro driver DONE** 2026-05-17 | 1 hr CPU done; $5 B200 hour pending | CPU disproved pure-algorithm hypothesis. fp32 logsumexp mitigation shipped per jax #13529. GPU driver `scripts/d8_gpu_repro.py` tests openxla/xla #17922 (most likely real root cause). Stage 2 still uses full-CE until GPU repro confirms. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). |
+| **D9** | ~~step-718 deterministic bad batch~~ — **DONE** 2026-05-17 | 1 hr CPU | Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into Round D5. Gemma 2 attn-softcap=50 added as defense. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). |
+| **D10 (NEW post-review 2026-05-17)** | Muon optimizer hybrid port (Muon ≥2D hidden weights; AdamW embeddings/head/scalars) + MuonClip safety net | 2 days code + $10 B200 smoke | Verified evidence: Moonshot 2502.16982 (~2× compute eff.), Kimi K2 2507.20534 (1T params, 15.5T tokens, zero spikes), KellerJordan canonical pattern. **Single biggest unrealized quality lever.** Pre-Stage-2.5 / pre-Stage-3. |
+| **D11 (NEW post-review)** | Apple Cut-Cross-Entropy `custom_vjp` (arXiv 2411.09009) for LM head | 1-2 days | 24 GB → 1 MB loss memory on Gemma 2B. Would kill D8 bug class AND restore chunked-CE memory benefit at 7B+. Required pre-Stage-3. |
+| **D12 (NEW post-review)** | Architecture revision: deeper-thinner (24-28L / hidden 1792 / FFN 3×) for Stage 3 + depth-μP via spectral (arXiv 2603.00541) | 1-2 weeks + fresh wind-tunnel | MobileLLM ICML 2024 + MobileLLM-Pro +7.9% verified. Stage 3 prep ONLY — NOT a Stage 2 blocker. |
+| **D13 (NEW post-review)** | Gopher repetition filters (`frac_chars_in_dup_5_10grams > 0.20`, `byte_entropy ≥ 3.5 bits/byte`) in corpus pipeline | 1 day CPU | Folds with D5 Stack-Exchange schema rebuild. Would have prevented D9 at data layer. |
 
 ---
 

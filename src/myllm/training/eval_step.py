@@ -40,6 +40,7 @@ def make_eval_step(
     ignore_index: int | None = None,
     use_chunked_ce: bool = False,
     chunked_ce_num_chunks: int = 8,
+    final_logit_softcap: float | None = None,
     return_per_token_nll: bool = False,
     state_shardings: Any = None,
     batch_sharding: Any = None,
@@ -107,6 +108,7 @@ def make_eval_step(
                 ignore_index=ignore_index,
                 z_loss_coef=z_loss_coef,
                 loss_mask=loss_mask,
+                final_logit_softcap=final_logit_softcap,
                 return_per_token=return_per_token_nll,
             )
             return {"loss": loss, **ce_metrics}

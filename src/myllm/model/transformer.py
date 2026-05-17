@@ -169,6 +169,14 @@ class TransformerLM(keras.Model):
             logits = self.lm_head(x)
         if output_mult != 1.0:
             logits = logits * output_mult
+        # Gemma-2-style final-logit softcap (arXiv 2408.00118): squashes
+        # extreme logits into [-c, +c] before they reach the loss. Bounds
+        # both the loss's softmax saturation and the z-loss's logsumexp
+        # magnitude. None = disabled (no-op).
+        cap = self.config.final_logit_softcap
+        if cap is not None:
+            cap_t = ops.cast(cap, logits.dtype)
+            logits = cap_t * ops.tanh(logits / cap_t)
         return logits
 
     @classmethod

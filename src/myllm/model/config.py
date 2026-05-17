@@ -67,6 +67,21 @@ class ModelConfig(BaseModel):
     z_loss_coef: float = 1.0e-4
     qk_norm: bool = False
 
+    # Gemma-2-style soft-cap on attention QK logits and final logits:
+    #   y = softcap * tanh(x / softcap)
+    # Bounds extreme values so the softmax can't saturate on a pathological
+    # input (e.g. repetition / low-entropy spans like the step-718 Stack
+    # Exchange single-doc seq that triggered D9). Gemma 2 paper
+    # (arXiv 2408.00118) uses 50.0 for self-attention and 30.0 for the final
+    # layer.
+    #
+    # `None` = disabled (preserves the cuDNN-FlashAttention fast path which
+    # cannot apply softcap on JAX 0.4.38). Setting any non-None value forces
+    # the manual attention path for the QK softcap. The final-logit softcap
+    # is always cheap (one elementwise tanh).
+    attn_logit_softcap: float | None = None
+    final_logit_softcap: float | None = None
+
     init_std: float = 0.02
     scaled_init_for_residuals: bool = False
 

@@ -109,6 +109,7 @@ def chunked_cross_entropy_with_z_loss(
     z_loss_coef: float = 1.0e-4,
     loss_mask: Any | None = None,
     return_per_token: bool = False,
+    final_logit_softcap: float | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Cross-entropy + z-loss that never materialises the full [B, S, V] logit tensor.
 
@@ -163,10 +164,19 @@ def chunked_cross_entropy_with_z_loss(
 
     labels_int = ops.cast(labels, "int32")
 
+    # 2026-05-17 D8 mitigation: run the online-logsumexp accumulators in fp32
+    # regardless of hidden_states.dtype. Per verified JAX issue #13529 and the
+    # Flax #677 thread, bf16 gradient of log_softmax / logsumexp is numerically
+    # unstable (the issue note: "worse for bf16 but also noticeable in
+    # float32"). The matmul that produces chunk_logits stays in bf16 for
+    # speed; we only pay fp32 for the small [B, S] accumulators and the
+    # subsequent log. Standard production pattern (PaLM, OLMo, Megatron).
+    accum_dtype = "float32"
+
     # Sentinel: NEG_INF for the running max so the first chunk's max wins.
     # Don't use float("-inf"): mixed-precision ops can NaN on -inf - -inf.
-    neg_inf = ops.cast(-1.0e30, hidden_states.dtype)
-    running_max = ops.full_like(labels_int, neg_inf, dtype=hidden_states.dtype)
+    neg_inf = ops.cast(-1.0e30, accum_dtype)
+    running_max = ops.full_like(labels_int, neg_inf, dtype=accum_dtype)
     running_sum = ops.zeros_like(running_max)
     label_logits = ops.zeros_like(running_max)
 
@@ -177,14 +187,24 @@ def chunked_cross_entropy_with_z_loss(
         # Slice on a Python int — static under JIT.
         chunk_embed = lm_head_weight[lo : lo + chunk_size]  # [chunk_size, H]
         # Per-chunk logits: hidden @ chunk_embed.T  ->  [B, S, chunk_size]
+        # Matmul stays in bf16 (or whatever hidden_states.dtype is) for speed.
         chunk_logits = ops.matmul(hidden_states, ops.transpose(chunk_embed))
         chunk_logits = chunk_logits * output_mult_t
+        # Lift to fp32 for the reductions. This is the load-bearing cast for D8.
+        chunk_logits_f32 = ops.cast(chunk_logits, accum_dtype)
+        # Gemma-2-style final-logit softcap, applied per-chunk on the fp32
+        # logits BEFORE the online logsumexp + label gather. Math-identical
+        # to softcapping the full [B,S,V] logits because softcap is purely
+        # elementwise. None = disabled.
+        if final_logit_softcap is not None:
+            cap = ops.cast(final_logit_softcap, accum_dtype)
+            chunk_logits_f32 = cap * ops.tanh(chunk_logits_f32 / cap)
 
-        # Online logsumexp update (stable across chunks).
-        chunk_max = ops.max(chunk_logits, axis=-1)  # [B, S]
+        # Online logsumexp update (stable across chunks). All in fp32.
+        chunk_max = ops.max(chunk_logits_f32, axis=-1)  # [B, S]
         new_max = ops.maximum(running_max, chunk_max)
         running_sum = running_sum * ops.exp(running_max - new_max) + ops.sum(
-            ops.exp(chunk_logits - new_max[..., None]), axis=-1
+            ops.exp(chunk_logits_f32 - new_max[..., None]), axis=-1
         )
         running_max = new_max
 
@@ -196,13 +216,13 @@ def chunked_cross_entropy_with_z_loss(
         # from being undefined behavior).
         local_idx_safe = ops.clip(local_idx, 0, chunk_size - 1)
         gathered = ops.take_along_axis(
-            chunk_logits, local_idx_safe[..., None], axis=-1
+            chunk_logits_f32, local_idx_safe[..., None], axis=-1
         )
         gathered = ops.squeeze(gathered, axis=-1)
         label_logits = ops.where(in_chunk, gathered, label_logits)
 
-    log_z = running_max + ops.log(running_sum)  # [B, S]
-    nll = -(label_logits - log_z)  # [B, S]
+    log_z = running_max + ops.log(running_sum)  # [B, S], fp32
+    nll = -(label_logits - log_z)  # [B, S], fp32
 
     # Same reduction as cross_entropy_with_z_loss.
     weight = None

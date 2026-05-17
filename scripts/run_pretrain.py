@@ -1148,6 +1148,7 @@ def main() -> int:
         teacher_weights=teacher_weights,
         use_chunked_ce=args.use_chunked_ce,
         chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+        final_logit_softcap=model_cfg.final_logit_softcap,
         # FSDP contract (2026-05-13 Commit D). When the sharding block
         # above set --fsdp mode, these are populated; the train_step's
         # JIT will declare in_shardings + donate_argnums=(0,) and
@@ -1358,6 +1359,7 @@ def main() -> int:
                     ignore_index=pad_id,
                     use_chunked_ce=args.use_chunked_ce,
                     chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+                    final_logit_softcap=model_cfg.final_logit_softcap,
                     return_per_token_nll=True,
                     state_shardings=state_shardings,
                     batch_sharding=batch_sharding_for_train_step,
@@ -1394,6 +1396,7 @@ def main() -> int:
                         ignore_index=pad_id,
                         use_chunked_ce=args.use_chunked_ce,
                         chunked_ce_num_chunks=args.chunked_ce_num_chunks,
+                        final_logit_softcap=model_cfg.final_logit_softcap,
                         state_shardings=state_shardings,
                         batch_sharding=batch_sharding_for_train_step,
                     )
