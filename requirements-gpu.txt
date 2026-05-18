@@ -1,4 +1,10 @@
-# GPU-pod deps. Install on RunPod after base image, in addition to requirements.txt.
+# GPU-pod deps. Install on RunPod after base image, IN ADDITION TO requirements.txt.
+#
+# IMPORTANT: this file does NOT inherit the base deps from requirements.txt.
+# A clean pod must install BOTH:
+#   pip install -r requirements.txt        # keras, optax, orbax, pydantic, …
+#   pip install -r requirements-gpu.txt    # overlays the CUDA build of JAX + torch
+#
 # Single-venv co-existence of JAX (FSDP training) + PyTorch (teacher audit).
 #
 # Why this exact combo (researched 2026-05-13 after pod whack-a-mole):
