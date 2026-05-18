@@ -129,8 +129,11 @@ def main() -> int:
           f"mb={args.micro_batch} seq={args.seq_len}", flush=True)
     print(f"[d8-repro] jax devices: {jax.devices()}", flush=True)
 
+    # Allow running before `pip install -e .` by adding src/ to sys.path.
+    # When the package IS installed, this is a harmless no-op (installed
+    # location wins via normal import resolution).
     repo_root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(repo_root))
+    sys.path.insert(0, str(repo_root / "src"))
 
     from myllm.model.config import ModelConfig
     from myllm.model.transformer import build_model
