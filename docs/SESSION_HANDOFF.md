@@ -1,4 +1,4 @@
-# Session Handoff (current — last refreshed 2026-05-17)
+# Session Handoff (current — last refreshed 2026-05-18)
 
 > **The live handoff for the next session.** Renamed from
 > `SESSION_HANDOFF_2026-05-14.md` during the 2026-05-17 docs cleanup —
@@ -24,7 +24,10 @@
 8. Suite: **739 passed, 1 skipped**. All commits pushed (HEAD = `8e50333`).
 9. **Stage 2 readiness**: peak_lr locked at 3e-4; hardware/seq/budget decision pending.
 10. **DO NOT** commit Stage 2 GPU spend before a short full-CE throughput smoke (mb=4, no chunked-CE) — chunked-CE C2 numbers don't apply.
-11. **External review processed 2026-05-17** ([§7](#7-external-review-2026-05-17-and-actions-taken)). Verified via 3 parallel WebFetch agents (peer 1B specs, Muon evidence, teacher availability + Gemma softcap values). Took 7 P0 recs as CPU-side work this session: README/config staleness fixed, WSD decay-to-zero (D2Z) locked, chunked-CE fp32 logsumexp (D8 mitigation), Gemma 2 softcaps (50 attn / 30 final) wired end-to-end, watchdog precise-6σ test, D8 GPU repro script ready for $5 B200 hour. Stage 2 plan now adopts reviewer's **8×B200 + seq=4K + 20B tokens + D2Z** recommendation.
+11. **External review processed 2026-05-17** ([§7](#7-external-review-2026-05-17-and-actions-taken)). Verified via 3 parallel WebFetch agents (peer 1B specs, Muon evidence, teacher availability + Gemma softcap values). Took 7 P0 recs as CPU-side work: README/config staleness fixed, WSD decay-to-zero (D2Z) locked, chunked-CE fp32 logsumexp (D8 mitigation), Gemma 2 softcaps (50 attn / 30 final) wired end-to-end, watchdog precise-6σ test, D8 GPU repro script. Stage 2 plan now adopts reviewer's **8×B200 + seq=4K + 20B tokens + D2Z** recommendation.
+12. **Gemma 3/4 correction 2026-05-17** (commit `b6284fd`). Follow-up WebFetch on newer Gemma releases caught that Gemma 3 *"replaces the soft-capping of Gemma 2 with QK-norm"* (arXiv 2503.19786 verbatim). We already ship `qk_norm: true`, so attn-logit softcap is now `null` by default (was 50.0). `final_logit_softcap=30.0` kept (Gemma 4 still ships it).
+13. **D8 GPU verification 2026-05-18** ([commit `4598688`](#)) on 1×B200 SXM. All 3 modes (`baseline`, `disable-remat`, `fp32-cce`) **clean** at mb=1/seq=4K through 10 steps each. fp32-logsumexp mitigation works at single-GPU scale. **D8 → MITIGATED**; production-shape (4×B200 + mb=4 + seq=8K + FSDP) verification deferred to Stage 3 prep ($25-30). Stage 2 stays on full-CE.
+14. **D10 Muon hybrid optimizer shipped 2026-05-18** ([commit `6e58cc4`](#)) — code only; GPU smoke pending. Used **upstream `optax.contrib.muon`** (shipped 0.2.5+) per verified review follow-up; floor bumped. Hidden bucket of existing 3-bucket muP `multi_transform` routes to Muon; embed/head/norms stay on AdamW. MuonClip standalone at `src/myllm/training/muonclip.py`. 9 new tests. Default still `type: adamw`; opt in with `--use-muon` or `type: muon_hybrid`. **No public JAX-Muon training at >=1B exists yet — Stage 2 with Muon = first run.**
 
 ---
 
@@ -160,31 +163,40 @@ Suite: 738 → 739 passed across these two commits. Both regression tests would 
 
 1. ~~**Backfill reviewer packet §6**~~ — **DONE 2026-05-17** (commit `5653251`).
 2. ~~**Investigate step-718 quarantine**~~ — **DONE 2026-05-17** (commit `e696add`). Root cause: Stack Exchange single-doc 8K sequence at shard 0 / seq_id 2871. Folds into D5. See [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md).
-3. ~~**Investigate chunked-CE bug**~~ — **CPU audit DONE 2026-05-17** (commit `0e5080d`). Algorithm clean on CPU; bug is B200-specific. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md).
-4. ~~**Process external review 2026-05-17**~~ — **DONE 2026-05-17**. Verified via 3 parallel WebFetch agents. Took 7 P0 recs CPU-side: README fix + WSD D2Z + chunked-CE fp32 logsumexp (D8 mitigation) + Gemma 2 softcaps (50/30) wired + watchdog 6σ test + D8 GPU repro script. See §7 below.
+3. ~~**Investigate chunked-CE bug**~~ — **CPU audit DONE 2026-05-17** (commit `0e5080d`). Algorithm clean on CPU.
+4. ~~**Process external review 2026-05-17**~~ — **DONE 2026-05-17** (commit `d56e1e0`). 3 parallel WebFetch agents; 7 P0 recs taken CPU-side. See §7.
+5. ~~**Gemma 3/4 correction**~~ — **DONE 2026-05-17** (commit `b6284fd`). attn-logit softcap → null; final-logit softcap=30 kept.
+6. ~~**D8 GPU verification on 1×B200**~~ — **DONE 2026-05-18** (commit `4598688`). 3 modes clean at mb=1/seq=4K; D8 **mitigated**, prod-shape verification deferred to Stage 3 prep.
+7. ~~**D10 Muon hybrid optimizer**~~ — **CODE DONE 2026-05-18** (commit `6e58cc4`). `optax.contrib.muon` on hidden bucket of muP `multi_transform`; AdamW elsewhere. MuonClip standalone. 9 new tests. **GPU smoke ($10 on 1×B200) pending.**
 
-### Stage 2 launch decision (need user input)
+### Next paid commits (the fork)
 
-Three open knobs (reviewer recommendation baked in where available):
+Stage 2 is gated on a single $10 GPU smoke to confirm Muon doesn't blow up at 1B:
 
-| Decision | Options | My lean (post-review) |
+| Step | GPUs | Wall | Cost | Why |
+|---|---|---|---|---|
+| **A. Muon GPU smoke** | 1×B200 | 30-50 min | **~$10** | First public JAX-Muon training at ≥1B. Verify finite loss + reasonable convergence trajectory + no NaN with `--use-muon` at mb=1/seq=4K/50-100 steps. |
+| **B. Stage 2 throughput smoke** | 8×B200 SXM | 30-45 min | **~$15-25** | Lock real MFU at seq=4K/mb=4 with Muon + softcap=30 + D2Z + full-CE. Re-bench because chunked-CE C2 numbers don't apply. |
+| **C. Stage 2 rehearsal** | 8×B200 SXM | ~4-5 hr | **~$160-230** | 20B tokens at 1B-shape with locked-in flags. |
+
+**Total Stage 2 envelope: ~$185-265.** Same as pre-Muon; the smoke is the only added cost.
+
+### Stage 2 locked config (knobs already decided)
+
+| Knob | Value | Source |
 |---|---|---|
-| Hardware | 4× B200 / **8× B200** / 8× H200 SXM | **8×B200** — same total $, half wall-time vs 4×B200; B200 proven by C3 |
-| Seq length | **4096** / 8192 | **4096** — reviewer math: ~67% faster per token; long-context recoverable in Stage 3 via θ-scaling |
-| Token budget | 10B / **20B** / 30B | **20B** — "real" rehearsal; 30B is +50% cost for marginal extra signal |
-| Loss path | full-CE (locked until chunked-CE fix) | Locked by Bug 1 |
-| LR | 3.0e-4 (locked by C3) | Locked |
-| `end_lr_ratio` | 0.0 (D2Z, was 0.1) | **CHANGED 2026-05-17** per Bergsma 2502.15938 |
-| Final-logit softcap | 30.0 (was None) | **KEPT 2026-05-17** — Gemma 4 (2026-04-02) still ships `final_logit_softcapping=30.0` |
-| Attn-logit softcap | None (correction 2026-05-17) | **OFF by default**. Initial post-review pass set 50.0 from Gemma 2. Follow-up Gemma 3/4 verification showed Gemma 3 explicitly replaced this with QK-norm (we already have qk_norm=true). Code path retained as opt-in. |
-| micro_batch | 4 (locked by full-CE memory budget) | Locked |
-| `--corpus-epochs` | 6 (locked by Stage 2 token budget vs 5B corpus) | Locked |
-| `--production` | yes | Locked |
-
-**Recommended Stage 2 path** (post-review):
-1. **D8 GPU repro** first (~$5, ~30 min on 1×B200): `python scripts/d8_gpu_repro.py --mode disable-remat`. If it clears, root cause = openxla/xla #17922; re-enable chunked-CE for Stage 2. If not, stay on full-CE workaround.
-2. Short **full-CE throughput smoke** at seq=4K, mb=4, 8×B200, ~2K steps (~$15-20) to lock MFU at production shape with all new flags (softcaps + D2Z + fp32 logsumexp).
-3. Commit to **20B Stage 2 rehearsal** (~$160-230) once smoke is clean.
+| Hardware | **8×B200 SXM NVLink-5** | reviewer math + C3 proven |
+| Seq length | **4096** | reviewer: ~67% faster per token vs 8K; long-context recoverable in Stage 3 |
+| Token budget | **20B** | "real" rehearsal; 30B is +50% cost for marginal extra signal |
+| Loss path | **full-CE** | D8 mitigated but production-shape verification deferred to Stage 3; mb=4 with full-CE fits comfortably |
+| LR (peak) | **3.0e-4** | locked by C3 sweep |
+| `end_lr_ratio` | **0.0 (D2Z)** | Bergsma 2502.15938 |
+| Optimizer | **Muon hybrid** (pending Step-A smoke) | D10. Fallback: AdamW if smoke shows drift. |
+| Final-logit softcap | **30.0** | Gemma 4 retains |
+| Attn-logit softcap | **null** | Gemma 3 replaced with QK-norm; we already have QK-norm |
+| micro_batch | **4** | full-CE memory budget at seq=4K |
+| `--corpus-epochs` | **6** | 20B / 5B-corpus = ~4 epochs of new + some overlap |
+| `--production` | **yes** | locked |
 
 ### Round D — Stage 3 prep + investigations (parallel with Stage 2)
 
@@ -429,32 +441,45 @@ config that explicitly sets `attn_logit_softcap=50.0`.
 10. `tests/test_watchdog_recovery.py`: precise-6σ-threshold edge case test.
 11. `scripts/d8_gpu_repro.py`: 4-mode B200 repro driver — `baseline`, `disable-remat`, `fsdp`, `fp32-cce` — ready for $5 hour of B200 time.
 
+### Follow-up next day (2026-05-18 — single-GPU D8 verification + Muon D10)
+
+12. **D8 GPU verification on 1×B200** (commit `4598688`): ran `scripts/d8_gpu_repro.py` in 3 modes at mb=1/seq=4K, all clean through 10 steps each. Updated `docs/design/d8_chunked_ce_audit.md` with GPU verification §, three open possibilities (fp32-logsumexp was load-bearing / FSDP reduce-scatter / memory-pressure fusion), and "deferred to Stage 3 prep" status. R2 artifacts at `s3://llm-data/stage2-prep/d8-repro/`.
+13. **Muon hybrid optimizer (D10)** (commit `6e58cc4`):
+    - `src/myllm/training/optimizer.py`: `OptimizerConfig.use_muon`, `muon_beta`, `muon_ns_steps`, `muonclip_threshold`; new `_muon_with_scale` factory; reuses 3-bucket muP `multi_transform`, swaps hidden bucket to `optax.contrib.muon` when `use_muon=True`. muP `1/width_mult` scaling preserved on Muon bucket.
+    - `src/myllm/training/muonclip.py` (NEW): `apply_qk_clip(wq, wk, max_qk_score, threshold=100, alpha=0.5)` — Kimi K2's post-step weight rescale. Standalone, JIT-safe, no train_step integration yet.
+    - `scripts/run_pretrain.py`: read `optimizer.type` from YAML, wire `use_muon` + Muon hyperparams into `OptimizerConfig`; new `--use-muon` CLI override.
+    - `configs/base_1b.yaml`: extended `optimizer:` block with Muon hyperparams. Default still `type: adamw` — opt in via `type: muon_hybrid` or `--use-muon`.
+    - `requirements.txt` / `pyproject.toml`: bumped `optax>=0.2` → `optax>=0.2.5` (when contrib.muon shipped).
+    - 9 new tests: `tests/test_muon_optimizer.py` (4) + `tests/test_muonclip.py` (5). All syntax-clean; pending pytest+optax 0.2.5 environment to run.
+14. **Requirements + repro-script hardening** (commits `ae00d6b`, `a95b9ed`): clarified `requirements-gpu.txt` header (must install both reqs files); fixed `scripts/d8_gpu_repro.py` `sys.path` fallback to point at `src/` not repo root.
+
 ---
 
 ## 8. Recent commits worth orienting against
 
 ```
+6e58cc4  D10: Muon hybrid optimizer + MuonClip safety net (code only — GPU smoke pending)
+4598688  D8: close audit — single-GPU verification clean, prod-shape deferred
+a95b9ed  d8_gpu_repro: fix sys.path fallback to point at src/, not repo root
+ae00d6b  requirements-gpu.txt: clarify it must be installed alongside requirements.txt
+b6284fd  softcap correction: attn off (Gemma 3+ uses QK-norm); final 30.0 kept (Gemma 4)
+d56e1e0  post-review P0 stack: softcaps + D2Z + fp32 logsumexp + D8 GPU repro
+0e5080d  D8 chunked-CE NaN-grad audit (CPU side): algorithm clean, bug is B200-specific
+e696add  D9 step-718 investigation: root cause is Stack Exchange single-doc sequence
+5653251  review packet: backfill §6 with C3 results, mark §7.1 closed, refresh §0+§8+§9
+63590fb  docs/: update cross-references + slim PROJECT_OVERVIEW post-archive
+285e69f  docs/: consolidate — archive historical, slim PROJECT_OVERVIEW, rename HANDOFF
+6fff980  docs: DESIGN.md — comprehensive design doc with Mermaid + Excalidraw
 8e50333  fix: data_position pytree mismatch in EVAL path under --fsdp (hotfix 2/2)
 cbd5477  fix: data_position pytree mismatch under --fsdp (hotfix 1/2 — train_step)
-5fb02d6  SESSION_HANDOFF: refresh after Round A+B + Layer 1+2 + refactor + C1+C2
 52eb857  refactor: move init_state helpers from scripts/ to src/myllm/
 04bfaf5  eval: MMLU-Pro + GSM8K real benchmark adapters (Round D6 / Layer 2)
-302ba05  review packet: backfill per-source PPL + flag scorecard scoring limitation
-7025bb9  infer/predict: add repo-root to sys.path so scripts.run_pretrain resolves
-00f4ad2  eval_checkpoint: add --per-source-val-loss for Round C1 backfill
 574dd8f  Round B: 4 Stage-2-gating P0s from re-audit (no GPU, low risk)
 329b349  Round A: 6 quick wins from R1+R2 review (no GPU, low risk)
-c2f4296  SESSION_HANDOFF: rewrite + trim (924 -> 230 lines)
 d06fe57  post-pilot reviewer packet (2026-05-15)
-f9399e7  Phase 2: docs refresh — Phase 1 done, pilot done
-fbe9c72  Phase 1.2: per-source val loss (P0-1) via per-token NLL
-107a551  Phase 1.5: forward-only eval_step (FSDP-safe, no donation)
-97c59c1  Phase 1.6: G6 cross-mesh restore regression coverage
-082fa20  Phase 1.3 + 1.4: --production + strict resume safety (P0-3)
-be7574c  Phase 1.1: multi-epoch corpus reader (Stage 2 blocker)
 ```
 
-Everything pushed to origin/main. HEAD = `8e50333`.
+Everything pushed to origin/main. HEAD = `6e58cc4`.
 
 ---
 
