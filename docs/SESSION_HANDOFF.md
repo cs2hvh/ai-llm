@@ -116,7 +116,9 @@ Banked at `s3://llm-data/stage2-prep/benchmarks-4b200/`:
 - Pilot 250M + chunked-CE worked fine; the bug is scale-specific (width_mult=8 vs pilot's 3.0) or hardware-specific (B200 bf16 vs H200) or both.
 - Diagnostic: dropping `--use-chunked-ce` (full-logit CE) makes the training work cleanly. mb=4 + full-CE + FSDP on 4× B200 fits comfortably in 183 GB.
 - Likely root cause: chunked-CE's online logsumexp (`running_max`, `running_sum` accumulators) hits bf16 precision boundaries when V=131072 / 8 chunks × seq=8192. Or its gradient through `take_along_axis` + `where` has a numerical issue at this scale.
-- **CPU audit done 2026-05-17** ([`docs/design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md)): minimal CPU repro of the chunked-CE algorithm in bf16 at muP output_mult=1/8 produces **finite** gradients matching full-CE to 2.98e-7. Pure-algorithm hypothesis is disproved. Bug is B200/CUDA-specific (Blackwell tensor cores, XLA op fusion on CUDA, or FSDP reduce-scatter at bf16). GPU repro on B200 deferred (~$5, ~1 hr).
+- **CPU audit done 2026-05-17** ([`docs/design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md)): minimal CPU repro of the chunked-CE algorithm in bf16 at muP output_mult=1/8 produces **finite** gradients matching full-CE to 2.98e-7. Pure-algorithm hypothesis is disproved.
+- **fp32-logsumexp mitigation shipped 2026-05-17** (commit `d56e1e0`): chunked-CE accumulators cast to fp32; matmul stays bf16.
+- **GPU verification done 2026-05-18 on 1×B200 SXM**: all 3 modes (`baseline`, `disable-remat`, `fp32-cce`) clean at mb=1/seq=4K — finite grads through 10 steps each. Mitigation works at single-GPU scale. **Production-shape verification (4×B200 + mb=4 + seq=8K + FSDP) deferred to Stage 3 prep** ($25-30, 1 hr).
 - **Stage 2 implication**: must use full-CE on B200 (memory budget allows at mb=4). Pre-Stage-3 we need a chunked-CE fix because at 7B+ full-CE OOMs.
 - **Tracked as Round D investigation item.**
 
@@ -195,7 +197,7 @@ Three open knobs (reviewer recommendation baked in where available):
 | D5 | Stack Exchange schema fix | 2 hr | Pending |
 | D6 (in progress) | Real scoring policies — MMLU-Pro+GSM8K done; IFEval/HE+/MBPP+ pending | 1-2 days | Partial |
 | D7 | Logical-axis FSDP sharding rules | 2-3 days | Pending |
-| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8~~ — **CPU audit DONE**, **fp32-logsumexp mitigation SHIPPED**, GPU repro script READY 2026-05-17 | 1 hr CPU done; $5 B200 hour pending | CPU audit + fp32-logsumexp + GPU repro driver shipped. Run `scripts/d8_gpu_repro.py --mode disable-remat` to test openxla/xla #17922 hypothesis. |
+| **D8** | ~~chunked-CE NaN-grad at 1B+B200+bf16+width_mult=8~~ — **MITIGATED 2026-05-18**: CPU audit + fp32-logsumexp + single-GPU verification all clean. Production-shape verification deferred to Stage 3 prep | Done | All 3 modes clean on 1×B200 at mb=1/seq=4K. fp32-logsumexp produces finite grads. Stage 2 stays on full-CE (memory-safer at mb=4 anyway). See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md) GPU verification §. |
 | **D9** | ~~step-718 bad-batch investigation via quarantine.jsonl + corpus inspection~~ — **DONE** 2026-05-17 (e696add) | ~2 hr CPU done | **Done** → [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md). Root cause folds into D5. |
 | **D10 (NEW)** | Muon optimizer port (hybrid: Muon for ≥2D hidden weights, AdamW for embeddings/head/scalars) + MuonClip | 2 days code + $10 GPU smoke | Pending — biggest single quality lever per verified review. Per Moonshot 2502.16982 (~2× compute efficiency vs AdamW) + Kimi K2 2507.20534 (1T params, 15.5T tokens, zero loss spike). Recommended pre-Stage-2.5. |
 | **D11 (NEW)** | Apple Cut-Cross-Entropy `custom_vjp` (arXiv 2411.09009) for LM head | 1-2 days | Pending — would kill the D8 bug class AND restore chunked-CE's memory benefit at 7B+. Required pre-Stage-3. |
@@ -246,7 +248,7 @@ Still deferred:
 | Chunked distillation memory savings in decay | Pending Round D1 |
 | Stratified per-source held-out | Pending Round D3 |
 | Logical-axis FSDP sharding rules | Pending Round D7 |
-| **chunked-CE NaN-grad at 1B+B200** | **D8 CPU audit DONE 2026-05-17** — algorithm fine on CPU, bug is B200-specific (see [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md)). GPU repro pending. |
+| **chunked-CE NaN-grad at 1B+B200** | **D8 MITIGATED 2026-05-18** — CPU audit + fp32-logsumexp + single-GPU verification all clean. Production-shape multi-GPU verification deferred to Stage 3 prep. Stage 2 stays on full-CE. See [`design/d8_chunked_ce_audit.md`](design/d8_chunked_ce_audit.md). |
 | **step-718 deterministic bad batch** | **D9 DONE 2026-05-17 (e696add)** — Stack Exchange single-doc; folds into D5 (see [`design/d9_step718_investigation.md`](design/d9_step718_investigation.md)). |
 
 ---

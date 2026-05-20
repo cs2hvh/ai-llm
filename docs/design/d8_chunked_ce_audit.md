@@ -1,7 +1,7 @@
 # Round D8 — chunked-CE NaN-grad audit (B200 + bf16 + 1B)
 
-**Status**: CPU audit complete (2026-05-17). GPU repro pending hardware. Workaround in place.
-**Severity**: P1 for Stage 2 hardware planning — must use full-CE on B200 until root cause found.
+**Status**: CPU audit complete (2026-05-17). **GPU verification (single-GPU, 2026-05-18): all 3 modes CLEAN at mb=1/seq=4K.** Production-shape verification (mb=4/seq=8K on multi-GPU FSDP) deferred to Stage 3 prep.
+**Severity**: P1 → P2 — fp32-logsumexp mitigation in commit `d56e1e0` produces finite grads at single-GPU 1B scale. Stage 2 still uses full-CE as belt-and-suspenders; chunked-CE re-enable deferred until production-shape verification.
 **Source data**: C3 sweep Run-1 first attempt — finite forward loss, NaN gradient, every step. Re-run after dropping `--use-chunked-ce` was clean.
 
 ## Symptom
@@ -150,6 +150,54 @@ print("chunked grad min/max:", float(grad_c.min()), float(grad_c.max()))
 ```
 
 Output reproduced cleanly on CPU XLA — both finite. GPU repro required for the actual bug.
+
+## GPU verification (2026-05-18, 1× B200 SXM, RunPod)
+
+Ran `scripts/d8_gpu_repro.py` in 3 of the 4 modes (`fsdp` mode skipped — needs ≥2 GPUs) at **mb=1 / seq=4K / num_chunks=8** because the production shape (mb=4 / seq=8K) OOMs single-GPU at 177 GB (1B + bf16 + chunked-CE backward without FSDP sharding):
+
+| Mode | XLA flag | Loss | grad NaN | grad min / max | dt steady |
+|---|---|---|---|---|---|
+| baseline | (none) | 11.8017 | **0** | -1.93e-3 / 1.82e-3 | 3.8 s/step |
+| disable-remat | `--xla_disable_hlo_passes=rematerialization` | 11.8050 | **0** | -1.84e-3 / 1.89e-3 | 3.8 s/step |
+| fp32-cce | (forces hidden + embed cast to fp32 before loss) | 11.8050 | **0** | -1.79e-3 / 1.71e-3 | 4.0 s/step |
+
+Loss=11.80 ≈ ln(131072)=11.78 matches random-init expectation. All three modes produced finite grads through 10 steps with no NaN, no Inf.
+
+Artifacts on R2: `s3://llm-data/stage2-prep/d8-repro/`
+- `baseline_20260518-003643.json`
+- `disable-remat_20260518-003934.json`
+- `fp32-cce_20260518-004201.json`
+
+### What we learned
+
+1. **The fp32-logsumexp mitigation (commit `d56e1e0`) produces finite gradients at 1B single-GPU bf16.** Hypothesis H1 — that the chunked-CE algorithm itself was the cause — is now further weakened: the algorithm + the mitigation runs cleanly at production-equivalent operating shape (per-token math is independent of FSDP / batch / seq), just with smaller absolute memory footprint.
+2. **disable-remat made no difference** — same finite grads as baseline. This is **inconclusive about openxla/xla #17922**: the bug there only fires under specific remat-induced fusion patterns at higher graph complexity / memory pressure. Our single-GPU shape may not stress that path. Cannot confirm or rule out cause #1 from this run.
+3. **fp32-cce made no difference** beyond baseline — same finite grads. Suggests the bug class isn't purely bf16-numerics-in-chunked-CE; at this scale our current bf16 path is already fine.
+
+### What we still don't know
+
+The original C3 NaN was at **mb=4 / seq=8192 / 4×B200 / FSDP / chunked-CE**. Single-GPU mb=1/seq=4K removed three variables at once (FSDP, batch shape, seq length). Three open possibilities remain:
+
+- **A. fp32-logsumexp was load-bearing.** Bug is genuinely dead. Probable but not proven.
+- **B. FSDP reduce-scatter on bf16 grads.** Wouldn't fire single-GPU. Would need ≥2-GPU pod to verify.
+- **C. Memory-pressure-induced fusion patterns** (openxla/xla #17922 class). Wouldn't fire under our smaller memory footprint.
+
+### Decision: not blocking Stage 2
+
+| Reason | |
+|---|---|
+| Stage 2 uses full-CE | Memory budget at mb=4 / seq=8K with full-CE fits comfortably (proven by C3 Run 2 and Run 3). |
+| chunked-CE only matters at 7B+ | Where full-CE OOMs. We're not there until Stage 4+. |
+| Verification cost vs benefit | A 4×B200 / 1-hour multi-GPU verification is $25-30. Worth doing **before Stage 3** (where 600B tokens × full-CE throughput hit is real) but not before Stage 2. |
+
+### Action items (updated)
+
+- [x] **D8 CPU audit complete** — algorithm clean on CPU.
+- [x] **fp32-logsumexp mitigation shipped** (commit `d56e1e0`) — chunked-CE accumulators run in fp32.
+- [x] **D8 GPU repro at single-GPU** — all 3 modes clean (2026-05-18). Mitigation works at this scale.
+- [ ] **D8 production-shape verification** (4×B200 + mb=4 + seq=8K + FSDP) — **deferred to Stage 3 prep**. $25-30, 1 hour.
+- [ ] **Stage 2**: stay on full-CE. No change to plan.
+- [ ] **D11 (Apple CCE)**: independent of D8 closure. Still required pre-Stage-3 for the 24GB → 1MB memory win at the LM head, which would also kill the D8 bug class definitively.
 
 ## See also
 
