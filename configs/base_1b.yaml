@@ -106,23 +106,33 @@ mup:
 
 # Training
 optimizer:
-  # Default is the proven AdamW path (Stage 1 pilot + C3 sweep validated).
-  # To enable the Muon hybrid (D10, post-review 2026-05-18):
-  #   - flip `type: muon_hybrid` (or pass `--use-muon` to run_pretrain)
-  #   - Muon optimises the hidden bucket (attn QKVO + FFN gate/up/down);
-  #     embeddings + LM head + RMSNorm gains stay on AdamW
-  #   - muP `1/width_mult` LR scaling on the hidden bucket is preserved
-  #     (Muon ↔ muP composition is DISPUTED in primary sources as of
-  #     2026-05-18 — see src/myllm/training/optimizer.py)
-  #   - MuonClip safety net at threshold=100.0 (Kimi K2) is optional
-  type: adamw
+  # Muon hybrid optimizer (D10, locked 2026-05-20 by GPU smoke A/B test
+  # on 2×B200):
+  #   - Muon (optax.contrib.muon, optax>=0.2.5) on hidden weight matrices
+  #     (attn QKVO + FFN gate/up/down); AdamW on embeddings + LM head +
+  #     RMSNorm gains. Hybrid pattern per KellerJordan/Muon canonical
+  #     guidance.
+  #   - muon_disable_mup_scale: true — the post-review DISPUTED claim
+  #     that Muon's spectral-norm bound makes muP per-layer LR redundant
+  #     for hidden matrices was empirically VALIDATED by the 500-step
+  #     smoke. AdamW δ +5.6735 vs Muon-no-mup-scale δ +5.6826 (Muon
+  #     nominally 0.2% ahead). Keeping muP scaling on Muon dropped Muon
+  #     to 63% of AdamW; turning it off restored parity. Decision locked.
+  #   - muonclip_threshold null (Kimi K2 default 100.0 not needed at
+  #     Stage 2 rehearsal scale; turn on for Stage 3 600B+ if spikes
+  #     observed).
+  #   - First public JAX-Muon training at >=1B scale. Kill-switch
+  #     protocol: if val_loss at step 1000 of Stage 2 is meaningfully
+  #     behind C3's AdamW trajectory at step 1000, abort and relaunch
+  #     with type: adamw.
+  type: muon_hybrid
   beta1: 0.9
   beta2: 0.95
   weight_decay: 0.1
   eps: 1.0e-8
-  # Muon hyperparameters (active only when type=muon_hybrid):
   muon_beta: 0.95         # Muon momentum decay (KellerJordan default)
   muon_ns_steps: 5        # Newton-Schulz iterations (KellerJordan default)
+  muon_disable_mup_scale: true  # LOCKED 2026-05-20 by GPU smoke
   muonclip_threshold: ~   # null = disabled. Kimi K2 production: 100.0
 
 lr_schedule:

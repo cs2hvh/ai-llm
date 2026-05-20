@@ -881,6 +881,9 @@ def main() -> int:
         use_muon=use_muon,
         muon_beta=float(yaml_optimizer_block.get("muon_beta", 0.95)),
         muon_ns_steps=int(yaml_optimizer_block.get("muon_ns_steps", 5)),
+        muon_disable_mup_scale=bool(
+            yaml_optimizer_block.get("muon_disable_mup_scale", False)
+        ),
         muonclip_threshold=yaml_optimizer_block.get("muonclip_threshold"),
     )
     if use_muon:
@@ -889,6 +892,7 @@ def main() -> int:
             source=("cli_override" if cli_use_muon else "yaml"),
             muon_beta=opt_cfg.muon_beta,
             muon_ns_steps=opt_cfg.muon_ns_steps,
+            muon_disable_mup_scale=opt_cfg.muon_disable_mup_scale,
             muonclip_threshold=opt_cfg.muonclip_threshold,
         )
     model, optimizer = init_model_and_optimizer(
