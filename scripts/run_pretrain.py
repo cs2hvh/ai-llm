@@ -561,6 +561,16 @@ def main() -> int:
         help="Number of vocab chunks for --use-chunked-ce. Must divide "
              "model.vocab_size. Production V=131072 / 8 = 16384.",
     )
+    p.add_argument(
+        "--use-muon",
+        action="store_true",
+        help="Override config to use the Muon hybrid optimizer (Muon on "
+             "hidden weight matrices via optax.contrib.muon; AdamW on "
+             "embeddings + LM head + RMSNorm gains). Also activates by "
+             "setting `optimizer.type: muon_hybrid` in the model YAML. "
+             "Round D10 (2026-05-18). No public JAX-Muon training at >=1B "
+             "exists as of 2026-05-18 — treat the first run as a smoke.",
+    )
     # Eval-during-training (MVP: validation loss + perplexity on a held-out
     # batch slice). Benchmark scoring (MMLU/HumanEval) comes in a follow-up
     # once the pilot has shown the wiring is sound.
@@ -857,9 +867,30 @@ def main() -> int:
     else:
         peak_lr_value = 2.0e-4
         log.warning("peak_lr_source", source="hardcoded_fallback", value=peak_lr_value)
+    # Read the YAML's `optimizer` block for type + Muon hyperparams. The
+    # legacy fields (beta1/beta2/wd/eps) are still picked up from the
+    # OptimizerConfig dataclass defaults; only the Muon-specific knobs
+    # surface here for now. See `configs/base_1b.yaml` `optimizer:` for
+    # the schema.
+    yaml_optimizer_block = load_yaml(args.model_config).get("optimizer", {}) or {}
+    yaml_optimizer_type = str(yaml_optimizer_block.get("type", "adamw")).lower()
+    cli_use_muon = getattr(args, "use_muon", False)
+    use_muon = cli_use_muon or yaml_optimizer_type in ("muon", "muon_hybrid")
     opt_cfg = OptimizerConfig(
         peak_lr=float(peak_lr_value),
+        use_muon=use_muon,
+        muon_beta=float(yaml_optimizer_block.get("muon_beta", 0.95)),
+        muon_ns_steps=int(yaml_optimizer_block.get("muon_ns_steps", 5)),
+        muonclip_threshold=yaml_optimizer_block.get("muonclip_threshold"),
     )
+    if use_muon:
+        log.info(
+            "optimizer_use_muon",
+            source=("cli_override" if cli_use_muon else "yaml"),
+            muon_beta=opt_cfg.muon_beta,
+            muon_ns_steps=opt_cfg.muon_ns_steps,
+            muonclip_threshold=opt_cfg.muonclip_threshold,
+        )
     model, optimizer = init_model_and_optimizer(
         model_cfg, opt_cfg, total_steps=args.total_steps,
         lr_schedule_cfg=yaml_lr_schedule,

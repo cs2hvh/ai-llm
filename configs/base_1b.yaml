@@ -106,11 +106,24 @@ mup:
 
 # Training
 optimizer:
+  # Default is the proven AdamW path (Stage 1 pilot + C3 sweep validated).
+  # To enable the Muon hybrid (D10, post-review 2026-05-18):
+  #   - flip `type: muon_hybrid` (or pass `--use-muon` to run_pretrain)
+  #   - Muon optimises the hidden bucket (attn QKVO + FFN gate/up/down);
+  #     embeddings + LM head + RMSNorm gains stay on AdamW
+  #   - muP `1/width_mult` LR scaling on the hidden bucket is preserved
+  #     (Muon ↔ muP composition is DISPUTED in primary sources as of
+  #     2026-05-18 — see src/myllm/training/optimizer.py)
+  #   - MuonClip safety net at threshold=100.0 (Kimi K2) is optional
   type: adamw
   beta1: 0.9
   beta2: 0.95
   weight_decay: 0.1
   eps: 1.0e-8
+  # Muon hyperparameters (active only when type=muon_hybrid):
+  muon_beta: 0.95         # Muon momentum decay (KellerJordan default)
+  muon_ns_steps: 5        # Newton-Schulz iterations (KellerJordan default)
+  muonclip_threshold: ~   # null = disabled. Kimi K2 production: 100.0
 
 lr_schedule:
   type: wsd                # Warmup-Stable-Decay (matches pilot + playbook U5)

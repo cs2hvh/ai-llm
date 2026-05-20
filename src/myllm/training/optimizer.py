@@ -31,6 +31,42 @@ class OptimizerConfig:
     eps: float = 1.0e-8
     grad_clip_global_norm: float = 1.0
 
+    # Muon hybrid optimizer (D10, 2026-05-18 post-review):
+    #
+    # When `use_muon=True`, the **hidden** parameter group (attn QKVO + FFN
+    # gate/up/down weight matrices) is optimised by Muon (Moonshot's
+    # spectral-norm-bounded second-order method, arXiv 2502.16982 — Pareto
+    # ~2× compute-efficient vs AdamW; Kimi K2 arXiv 2507.20534 trained 1T
+    # params / 15.5T tokens / zero loss spikes with MuonClip variant).
+    # The **embedding** and **norm** groups remain on AdamW per
+    # KellerJordan/Muon's canonical guidance: *"Muon is an optimizer for the
+    # hidden weights of a neural network. Other parameters, such as
+    # embeddings, classifier heads, and hidden gains/biases should be
+    # optimized using standard AdamW."*
+    #
+    # muP composition (DISPUTED per post-review verification 2026-05-18):
+    #   The post-review claim that Muon "makes vanilla muP's per-layer LR
+    #   redundant for hidden matrices" was NOT supported by any primary
+    #   source (Moonshot 2502.16982 + KellerJordan/Muon both silent on muP).
+    #   Decision: KEEP the existing 1/width_mult LR scaling on the hidden
+    #   bucket when muP is enabled. Treat this as the conservative default;
+    #   revisit after empirical Stage-2.5 smoke if Muon shows convergence
+    #   drift that disappears with width_mult=1.
+    #
+    # Production proof-of-life: no public JAX-Muon training at >=1B scale
+    # exists as of 2026-05-18. Stage 2 with Muon = first run; budget for
+    # FSDP/Orbax validation before committing the full token budget.
+    use_muon: bool = False
+    # Muon hyperparameters (KellerJordan / Optax defaults).
+    muon_beta: float = 0.95         # momentum decay
+    muon_ns_steps: int = 5          # Newton-Schulz iteration count
+    # MuonClip / QK-clip (Kimi K2's safety net for Muon at long horizon).
+    # When `muonclip_threshold` is non-None, the train_step rescales W_q,
+    # W_k after each Muon step if the observed max attention-logit exceeds
+    # the threshold. Kimi K2 paper uses t=100. None = disabled.
+    # See `myllm.training.muonclip` (TODO) for the post-step routine.
+    muonclip_threshold: float | None = None
+
 
 # Param-group labels used by the muP multi-transform optimizer.
 # Each trainable variable falls into exactly one group:
@@ -182,13 +218,49 @@ def build_optimizer(
             optax.scale(lr_scale),
         )
 
+    def _muon_with_scale(lr_scale: float):
+        """Muon (hidden-weights only) followed by a static per-group multiplier.
+
+        Uses upstream ``optax.contrib.muon`` (shipped in optax 0.2.5+).
+        The contrib alias internally splits Muon and AdamW based on its
+        ``muon_weight_dimension_numbers`` mask; we route at the outer
+        ``multi_transform`` level instead, so we want the contrib to apply
+        Muon to ALL inputs it sees. Passing ``muon_weight_dimension_numbers=
+        optax.contrib.MuonDimensionNumbers()`` (default) routes any 2D-or-
+        higher param through Muon. The hidden bucket contains only weight
+        matrices (Q/K/V/O + SwiGLU gate/up/down), so this is correct.
+
+        muP scaling: same 1/width_mult scale applied post-Muon, matching
+        the AdamW path's convention. See OptimizerConfig.use_muon docstring
+        for why we kept this (Muon ↔ muP composition is DISPUTED in
+        primary sources as of 2026-05-18).
+        """
+        return optax.chain(
+            optax.contrib.muon(
+                learning_rate=lr_fn,
+                beta=config.muon_beta,
+                ns_steps=config.muon_ns_steps,
+                weight_decay=config.weight_decay,
+                # Forward the muP fp32 hygiene from the AdamW path.
+                mu_dtype=_FP32,
+            ),
+            optax.scale(lr_scale),
+        )
+
+    # Hidden bucket: Muon when use_muon is True, AdamW otherwise.
+    hidden_transform = (
+        _muon_with_scale(1.0 / mup_width_mult)
+        if config.use_muon
+        else _adamw_with_scale(1.0 / mup_width_mult)
+    )
+
     return optax.chain(
         optax.clip_by_global_norm(config.grad_clip_global_norm),
         optax.multi_transform(
             transforms={
                 PARAM_GROUP_EMBEDDING: _adamw_with_scale(1.0),
                 PARAM_GROUP_NORM: _adamw_with_scale(1.0),
-                PARAM_GROUP_HIDDEN: _adamw_with_scale(1.0 / mup_width_mult),
+                PARAM_GROUP_HIDDEN: hidden_transform,
             },
             param_labels=param_labels,
         ),
