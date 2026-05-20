@@ -63,6 +63,16 @@ def main() -> int:
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--config", type=str, default="configs/base_1b.yaml")
     parser.add_argument("--out-dir", type=str, default="artifacts/muon_smoke")
+    parser.add_argument(
+        "--muon-no-mup-scale",
+        action="store_true",
+        help="Disable the 1/width_mult LR scaling on the Muon-bucket "
+             "(hidden weight matrices). Tests the DISPUTED post-review "
+             "claim that Muon's spectral-norm-bounded update makes muP "
+             "per-layer LR scaling redundant for hidden matrices. The "
+             "2026-05-20 smoke showed Muon descended ~63%% of AdamW's "
+             "rate WITH the scaling — this flag turns it off to A/B test.",
+    )
     args = parser.parse_args()
 
     os.environ.setdefault("KERAS_BACKEND", "jax")
@@ -117,6 +127,7 @@ def main() -> int:
         use_muon=use_muon,
         muon_beta=0.95,
         muon_ns_steps=5,
+        muon_disable_mup_scale=args.muon_no_mup_scale,
     )
     param_labels = label_model_variables(model)
     width_mult = cfg.mup_width_multiplier()
@@ -250,6 +261,7 @@ def main() -> int:
         "seq_len": args.seq_len,
         "use_muon": use_muon,
         "use_fsdp": use_fsdp,
+        "muon_no_mup_scale": bool(args.muon_no_mup_scale),
         "optax_version": optax.__version__,
         "initial_loss": initial_loss,
         "final_loss": final_loss,

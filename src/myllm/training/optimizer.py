@@ -60,6 +60,16 @@ class OptimizerConfig:
     # Muon hyperparameters (KellerJordan / Optax defaults).
     muon_beta: float = 0.95         # momentum decay
     muon_ns_steps: int = 5          # Newton-Schulz iteration count
+    # When use_muon=True, also disable the 1/width_mult LR scaling that
+    # the hidden bucket inherits from muP. The post-review reviewer
+    # claimed Muon's spectral-norm-bounded update makes muP's per-layer
+    # LR machinery redundant for hidden matrices (DISPUTED 2026-05-18
+    # follow-up agent — no primary source). The 2026-05-20 GPU smoke
+    # showed Muon descended ~63% of AdamW's rate over 50 steps WITH the
+    # muP scaling on, suggesting the scaling may be holding Muon back at
+    # width_mult=8. This flag toggles the scaling off so we can A/B test
+    # the disputed claim empirically. No effect when use_muon=False.
+    muon_disable_mup_scale: bool = False
     # MuonClip / QK-clip (Kimi K2's safety net for Muon at long horizon).
     # When `muonclip_threshold` is non-None, the train_step rescales W_q,
     # W_k after each Muon step if the observed max attention-logit exceeds
@@ -248,11 +258,13 @@ def build_optimizer(
         )
 
     # Hidden bucket: Muon when use_muon is True, AdamW otherwise.
-    hidden_transform = (
-        _muon_with_scale(1.0 / mup_width_mult)
-        if config.use_muon
-        else _adamw_with_scale(1.0 / mup_width_mult)
-    )
+    # The Muon path optionally disables the 1/width_mult scaling per
+    # the disputed muP×Muon claim (see OptimizerConfig.muon_disable_mup_scale).
+    if config.use_muon:
+        muon_hidden_scale = 1.0 if config.muon_disable_mup_scale else (1.0 / mup_width_mult)
+        hidden_transform = _muon_with_scale(muon_hidden_scale)
+    else:
+        hidden_transform = _adamw_with_scale(1.0 / mup_width_mult)
 
     return optax.chain(
         optax.clip_by_global_norm(config.grad_clip_global_norm),
