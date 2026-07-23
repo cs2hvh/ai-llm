@@ -1,9 +1,24 @@
 # Delegation Brief — Verified-Agent Environments & Agentic Data Engine (EA lane)
 
 **For:** the parallel team member · **From:** technical track (Claude/ST) · **Date:** 2026-07-23
-**Process:** you research → we review together → your **final plan becomes an ADR** → you build.
-This brief gives mission, architecture, interfaces, research questions, and deliverables — it is
-deliberately opinionated so you have something concrete to push back on. Nothing here is frozen.
+**Revision: v1.1** (2026-07-23) — amended per the SESSION_SECOND audit; see §8 changelog.
+**Process:** you research → we review together → your **final plan becomes a human-signed ADR**
+→ build. This brief gives mission, architecture, interfaces, research questions, and
+deliverables — deliberately opinionated so you have something concrete to push back on.
+Nothing here is frozen.
+
+**Authority status (v1.1 correction):** this brief authorizes **D1 research + D2 draft-planning
+only**. The boundaries in §2 come from plans that are *adopted by owner direction with caps and
+role-naming still pending formal signature* (G0-M). D3 prototype and D4/F1 implementation are
+**HOLD** until the SESSION_SECOND §4 preconditions clear (named human EA + security/gate
+reviewers, caps signed, canonical plans on main, sama-7b remote + branch protection, approved
+source/image set, lane sub-budget).
+
+**Ownership (v1.1 correction):** a **named human** holds the EA role and owns HAR-20; the ADR
+and all gate evidence carry human signatures. AI sessions (this one and the EA-lane session)
+draft, research, test, and provide **peer QA** — cross-checks between AI sessions are advisory
+and never satisfy the independent-review requirement; a qualified non-author human (plus a
+security reviewer for containment claims) is the reviewer of record.
 
 ---
 
@@ -28,7 +43,7 @@ Phase-1 scope = the **thin foundation** (exec plan P1-70, Linear **HAR-20**): co
 5 adapters + verified trajectories. Your research should also produce the **Phase-3/4 growth
 plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the right skeleton.
 
-## 2. Hard boundaries (non-negotiable, from the signed plans)
+## 2. Hard boundaries (non-negotiable; source plans adopted, caps pending signature)
 
 - **Security envelope** (exec plan §12): per-run isolation; no production credentials —
   synthetic secrets + short-lived tokens; egress deny-by-default with allowlists; pinned
@@ -37,8 +52,17 @@ plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the rig
 - **No GSTN / ONDC / Tally / financial / customer systems** without separate written authority
   — documented sandbox APIs + synthetic data only. (The Indic/Indian-SaaS environments are a
   *design doc* in Phase 1, not an implementation.)
-- **Public MCP server ≠ approved.** Every tool enters the fleet only after license/API-terms
-  review, pinned source commit, SBOM, schema signing, static + dynamic scan in isolation.
+- **Public MCP server ≠ approved, and discovery ≠ acquisition (v1.1).** The "harvest" step
+  stores **URLs + metadata only**. Downloading code/images/schemas, executing tools, or
+  generating training data requires the full chain: source approval → quarantine → admission →
+  decontamination → authorized use. Every tool that eventually enters the fleet needs
+  license/API-terms review, pinned source commit, SBOM, schema signing, static + dynamic scan
+  in isolation.
+- **Containment is a designed boundary, not Kubernetes (v1.1).** K8s is orchestration. Before
+  any D3 execution: a written **threat model** and an explicit isolation choice — dedicated
+  sandbox trust domain; rootless containers; seccomp/AppArmor; gVisor/Kata/Firecracker where the
+  threat model requires; no Docker socket; no host mounts; default-deny NetworkPolicy; scoped
+  broker-minted synthetic credentials; kill switch. IS owns/validates this; it is D1 homework.
 - **Core F1 acceptance** (do not weaken; stretch goals never displace it):
   ≥20 deterministic smoke tasks per family · **20 concurrent rollouts × 1 h** at ≥99% launch /
   ≥95% platform-completion availability (excluding injected task failures) · **zero** isolation
@@ -95,12 +119,17 @@ RLVR rollout API (verl/SkyRL/NeMo-RL-compatible), the 250k long-horizon private 
 
 | Contract | Where | Direction |
 |---|---|---|
-| Trajectory schema | you propose; we co-sign as ADR | you → training data + evals |
-| Run/rollout manifest | `sama-7b/schemas/run_manifest.schema.json` (extend, don't fork) | shared |
-| Admission + signed ledger | HAR-15 implementation (mine) | your trajectories flow through it |
-| Eval-registry fingerprints | HAR-16 (mine) — your task/generator fingerprints must be exported BEFORE any trajectory becomes training data; ≥20% of task families held out **by generator family** | you → me |
+| Trajectory/rollout schema (v1.1) | **separate versioned schema you propose** (do NOT overload the training `run_manifest` — it stays a training-run contract) + a small shared **provenance envelope** common to both; human-signed ADR | you → training data + evals |
+| Provenance envelope | extracted from `sama-7b/schemas/run_manifest.schema.json` commons (hashes, pins, label) | shared |
+| Admission + signed ledger | HAR-15 (ST-lane builds the code; **DL role owns** approval/admission/removal — EA delivers *pre-admission trajectory packages*, never self-admits) | your packages → DL gate |
+| Eval-registry fingerprints | HAR-16 — interface will be **formally versioned** before you depend on it; task/generator fingerprints exported BEFORE any trajectory becomes training data; ≥20% of task families held out **by generator family** | you → me |
 | AGENTS.md rules | `sama-7b/AGENTS.md` | binding on both of us |
-| Cross-review | you review my eval/scorer work; I review your env/verifier work (satisfies the non-author-review rule with two people) | mutual |
+| Peer QA (v1.1) | EA session cross-checks eval/scorer work; ST session cross-checks env/verifier work — **advisory only**; the reviewer of record for any gate-critical claim is a qualified non-author human (+ security reviewer for containment) | mutual, advisory |
+
+**RACI (v1.1, per exec plan):** EA = environment contracts, adapters, task generation,
+verifiers, pre-admission trajectory packages. DL = source approval, quarantine/admission,
+decontamination, removal lineage, signed ledgers. IS = containment, secrets, network, registry,
+incident controls. ST = training integration.
 
 ## 5. Research questions your final plan must answer
 
@@ -135,7 +164,9 @@ RLVR rollout API (verl/SkyRL/NeMo-RL-compatible), the 250k long-horizon private 
 10. Trajectory schema: align with (or justify diverging from) Toucan / daVinci-Dev / OpenHands
     formats so public data and our engine output are unifiable.
 11. Perturbed-trace generation (tool-error-recovery objective, Lane-4 IP candidate): design the
-    failure-injection taxonomy; this is a candidate invention record — keep design notes dated.
+    failure-injection taxonomy. **(v1.1) Invention-candidate design notes live in the restricted
+    vault only** — git/Linear/Notion/session files carry sanitized requirements + controlled
+    references, never the disclosure content.
 12. Indic/Indian-SaaS environment design doc: which sandbox APIs exist (Tally dev sandbox?
     GSTN sandbox? ONDC staging?), synthetic-data strategy, legal prerequisites — design only.
 
@@ -165,7 +196,7 @@ RLVR rollout API (verl/SkyRL/NeMo-RL-compatible), the 250k long-horizon private 
 | D1 | **Research memo**: answers to §5 with primary sources; license audit table; cost model | ~1 week | async comments (Harshit + Claude) |
 | D2 | **Final plan** (architecture chosen, milestones→F1, budget, risks) | +3–4 days | live review → **ADR-0xx signed**; Linear children created under HAR-20 |
 | D3 | **Prototype**: control contract + 1 adapter (recommend repo/git via SWE-rebench subset) + 20 deterministic tasks + replay demo + 1 injected-failure case | ~wk 4–5 | demo + code review (Claude) |
-| D4 | **F1 acceptance**: full §2 core criteria + the 1k-trajectory engine smoke + growth report | wk 7–8 | F1 gate packet (`gates/F1/environments/`) |
+| D4 | **F1 acceptance**: full §2 core criteria (incl. **100** verified trajectories) + growth report. **(v1.1) The 1k-trajectory data-engine smoke is STRETCH — it informs Stage-2.5 readiness and never blocks F1** | wk 7–8 | F1 gate packet (`gates/F1/environments/`) |
 
 **Working agreements:** you own Linear HAR-20 (split it into 1–5-day children after D2);
 status lands in `docs/SESSION_MAIN.md` §7 like everyone's; anything you want from the training
@@ -173,4 +204,23 @@ track goes in SESSION_MAIN §5 Redirections or a Linear comment; privileged mate
 partner data) never enters this repo/Linear/Notion.
 
 *Push back freely in D1 — especially on the framework choice and the K8s-vs-rented question.
-The architecture above is a strong prior from verified research, not a decision.*
+The architecture above is a strong prior from verified research, not a decision. The
+SESSION_SECOND observation that our internal contract must not depend directly on OpenEnv's
+stability (experimental, APIs-subject-to-change) is accepted: the likely direction is a small
+framework-neutral internal contract with thin adapters toward OpenEnv/SkyRL/Harbor.*
+
+---
+
+## 8. v1.1 changelog (2026-07-23) — SESSION_SECOND audit accepted in full
+
+All nine findings of `docs/SESSION_SECOND.md` §1 accepted:
+(1) human EA owns the lane; AI cross-checks are advisory peer QA, humans are reviewers of
+record; (2) "signed plans" → adopted-pending-signature; authority scoped to D1/D2, D3/D4 HOLD;
+(3) branch problem acknowledged — plans/research published to `main` same day (cherry-picked);
+sama-7b remote remains an owner action; (4) 100 verified trajectories = F1 core; 1k engine
+smoke = stretch (the brief had conflated the T6 engine target with the T8 gate); (5) RACI
+tightened (EA/DL/IS/ST split); (6) discovery ≠ acquisition — metadata-first harvest;
+(7) threat model + explicit isolation choice required before any D3 execution; K8s is not a
+security boundary; (8) trajectory schema separated from the training run-manifest via a shared
+provenance envelope; HAR-15/16 interfaces to be formally versioned before dependence;
+(9) invention notes restricted to the vault.

@@ -116,9 +116,19 @@ as evidence for an architecture/optimizer decision.
 | 5 | Cluster credentials for me/CI | IS | T3/T4/T5 |
 | 6 | Counsel engagement (2 briefs); hire reqs; partner outreach | FO/PO | G0 evidence |
 | 7 | Jul 27: Kimi K3 weights/license check (HAR-12) | any | Lane-2 operator input (non-blocking) |
+| 8 | **Name the human EA-lane owner + IS/security reviewer + non-author gate reviewer** (SESSION_SECOND §4.1) | FO | EA D3/D4; all gate-critical review |
+| 9 | Approve EA minimal source/image set (licenses, digests, SBOMs, storage line) + lane sub-budget with stop rules (SESSION_SECOND §4.8–9) | FO/DL/IS | EA D3 |
 
 **Redirections (team writes here, I obey next session):**
 - *(empty — add bullets; I check this section first every session)*
+
+**EA-lane status (from `SESSION_SECOND.md` — their comms surface, integrated here):**
+D1 research memo = GO (in progress). D3 prototype / D4 implementation = **HOLD** until rows
+2/3/8/9 above clear. Their audit of the delegation brief was accepted in full → brief v1.1
+(see its §8 changelog). Agreed contract points: framework-neutral internal adapter contract
+(no direct OpenEnv dependence); separate trajectory schema + shared provenance envelope
+(training run-manifest not overloaded); EA delivers pre-admission packages, DL admits;
+AI cross-checks are advisory — humans are reviewers of record.
 
 ## 6. Standing rules I operate under (summary — canonical text in AGENTS.md)
 
@@ -148,5 +158,14 @@ humans own decisions · verify-before-locking (external claims get primary-sourc
   parallel team member — research brief at `docs/DELEGATION_BRIEF_ENV_ENGINE.md`; process
   D1 research memo → D2 plan review → ADR → build. Cross-review pact established (EA reviews
   eval/scorer work; ST/Claude reviews env/verifier work).
+
+### 2026-07-23 — Session 1 (later): SESSION_SECOND audit integrated
+- EA-lane session audited the delegation brief (`docs/SESSION_SECOND.md`) — **all 9 findings
+  accepted**; brief amended to v1.1 (ownership/authority wording, discovery≠acquisition,
+  threat-model-before-D3, schema separation, 100-vs-1k scope fix, RACI, vault rule).
+- Fixed their branch finding: plans + research corpus **cherry-picked onto `main`** so the
+  read-first set is on the authoritative branch (accounting fix stays on the review PR).
+- SESSION_SECOND.md committed verbatim as the EA lane's comms surface; new owner blockers
+  (name human EA/reviewers; approve source set + sub-budget) added to §5.
 
 *(Next session appends here; §§0–5 get refreshed in place.)*
