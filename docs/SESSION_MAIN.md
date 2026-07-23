@@ -17,18 +17,23 @@
 
 1. **Program launched end-to-end today**: research (30 verified agents) → FINAL_PROGRAM_PLAN
    → Phase-1 two-lane split (org lane = `PHASE_1_G0_S0_EXECUTION_PLAN.md`, technical lane =
-   `PHASE_1_PLAN.md` v2, T0–T9) → Linear normalized (HAR-5…30, G0/S0/F1 milestones) →
-   Notion hub + decision/risk registers → **Phase 1 mobilization started (G0-M)**.
+   `PHASE_1_PLAN.md` v2, T0–T9) → Linear restructured (HAR-5…30, G0/S0/F1 milestones;
+   DoR fields — assignees/estimates/due dates — still incomplete) → Notion hub +
+   decision/risk registers → **Phase-1 mobilization begun under owner direction; the G0-M
+   caps signature (A4) is still pending — only zero-GPU / zero-spend work has been performed**.
 2. **Legacy repo frozen** at tag `legacy-pilot-pre-audit-00a825f` (pushed).
-3. **Accounting bug fixed** (world-size double-count in `benchmark_throughput.py`; legacy C2
-   "30%/46% MFU" was really **~7.5%/11.5%**). Fix + 13 passing regression tests + errata on
-   branch **`audit/throughput-accounting-fix`** — **PR awaiting human review** (this review IS
+3. **Accounting bug fixed** (world-size double-count in `benchmark_throughput.py`). Legacy C2
+   "30%/46% MFU" becomes **~7.5%/11.5% as world-size-corrected estimates** — definitive values
+   await recomputation from raw timings under a validated FLOP model (errata discipline).
+   Fix + 13 passing regression tests + errata on branch **`audit/throughput-accounting-fix`** —
+   **branch pushed; the PR itself is NOT yet opened** (owner opens + reviews; that review is
    the R05 independent-review gate): https://github.com/cs2hvh/ai-llm/pull/new/audit/throughput-accounting-fix
 4. **Fresh program repo scaffolded** at **`ai-llm/sama-7b/`** (nested for convenience, but
    with its **own git history** — commit `c811f0a`, 14/14 tests passing; the outer repo
    .gitignores it so the lineages stay separate). Contains: AGENTS.md contract, 6-quantity
-   accounting schema, eval registry v0 draft, run-manifest schema, CI tier-1, ADR-000,
-   salvage register. **Needs a private GitHub remote (owner action)** for team visibility/CI.
+   accounting schema, eval registry v0 draft, run-manifest schema, **CI tier-1 workflow file
+   (defined but unexercised — no remote, no runs yet)**, ADR-000, salvage register.
+   **Needs a private GitHub remote (owner action)** for team visibility/CI.
 5. **Nothing GPU-side has run.** All work so far is zero-GPU, inside the proposed G0-M caps.
    The caps themselves (**A4: 600 GPU-h / 20 TB / $25k mobilization; 2,850 GPU-h / 50 TB /
    $300k phase**) still need the owner's signature.
@@ -57,7 +62,7 @@ approve spend, or touch anything public — humans do. Anyone on the team can re
 | Fresh lineage (T0 / HAR-7) | 🟡 local only | `ai-llm/sama-7b/` @ `c811f0a` (own git, outer-ignored; 14/14 tests) — needs GitHub remote |
 | Eval registry v0 (T6.1 / HAR-16) | 🟡 draft | `sama-7b/evals/registry/registry_v0_draft.yaml` |
 | ADR-000 G0-M record | 🟡 active, caps unsigned | `sama-7b/docs/decisions/ADR-000-…` |
-| Linear board | ✅ normalized | HAR-5…30; HAR-7/8/9/16 In Progress |
+| Linear board | 🟡 restructured; DoR incomplete (assignees/estimates/due dates pending role naming) | HAR-5…30; HAR-7/8/9/16/20 In Progress |
 | Notion hub + registers | ✅ live | hub page + Decision (14 rows) + Risk (18 rows) DBs |
 | GPU / data / spend | ⬜ none consumed | caps ledger at 0 |
 
@@ -123,8 +128,12 @@ as evidence for an architecture/optimizer decision.
 - *(empty — add bullets; I check this section first every session)*
 
 **EA-lane status (from `SESSION_SECOND.md` — their comms surface, integrated here):**
-D1 research memo = GO (in progress). D3 prototype / D4 implementation = **HOLD** until rows
-2/3/8/9 above clear. Their audit of the delegation brief was accepted in full → brief v1.1
+D1 research memo = GO (tracker synced: HAR-20 In Progress, scope = D1/D2 only, D1 due
+2026-07-30). D3 prototype / D4 implementation = **HOLD** until rows 2/3/8/9 above clear.
+Second-pass audit (2026-07-23 evening) accepted in full → brief v1.2 + this doc's
+overstatement fixes. Note for the EA session's next reconciliation pass: **finding §1.3
+(plans absent from main) is now resolved** — canonical plans are on `origin/main`; the
+`sama-7b` remote remains genuinely open (owner). Their audit of the delegation brief was accepted in full → brief v1.1
 (see its §8 changelog). Agreed contract points: framework-neutral internal adapter contract
 (no direct OpenEnv dependence); separate trajectory schema + shared provenance envelope
 (training run-manifest not overloaded); EA delivers pre-admission packages, DL admits;
@@ -158,6 +167,16 @@ humans own decisions · verify-before-locking (external claims get primary-sourc
   parallel team member — research brief at `docs/DELEGATION_BRIEF_ENV_ENGINE.md`; process
   D1 research memo → D2 plan review → ADR → build. Cross-review pact established (EA reviews
   eval/scorer work; ST/Claude reviews env/verifier work).
+
+### 2026-07-23 — Session 1 (evening): second-pass audit → brief v1.2 + accuracy fixes
+- EA session's second-pass review: 9 resolved items confirmed; 7 brief contradictions + 5
+  SESSION_MAIN overstatements flagged. **All fixed**: brief v1.2 (§8a changelog — own→drive
+  wording, human reviewer-of-record on D3, 1k→stretch in diagram, correct security citations,
+  decoupling claim softened, K8s labeled proposed); this doc corrected (G0-M "begun under
+  owner direction, caps pending" not "started"; "branch pushed, PR not yet opened"; MFU as
+  corrected *estimates*; CI "defined but unexercised"; Linear "restructured, DoR incomplete").
+- Linear HAR-20 synced with reality: In Progress, D1-scope note, due 2026-07-30, description
+  citations fixed.
 
 ### 2026-07-23 — Session 1 (later): SESSION_SECOND audit integrated
 - EA-lane session audited the delegation brief (`docs/SESSION_SECOND.md`) — **all 9 findings

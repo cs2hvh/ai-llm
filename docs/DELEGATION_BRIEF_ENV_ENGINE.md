@@ -24,7 +24,8 @@ security reviewer for containment claims) is the reviewer of record.
 
 ## 1. Mission (why this lane matters more than it looks)
 
-You own the **EA lane**: the sandboxed environments where the model will eventually act, the
+You **drive** the **EA lane** — under its **named human owner** (EA role; currently unnamed,
+a G0-M blocker): the sandboxed environments where the model will eventually act, the
 verifiers that decide whether it acted *correctly*, and the data engine that turns environments
 into training trajectories. Three reasons this is the highest-leverage parallel work:
 
@@ -36,8 +37,10 @@ into training trajectories. Three reasons this is the highest-leverage parallel 
    lane) found every documented agentic-RL success was a multi-person, multi-week infra effort
    *even when reusing open components*; DeepSWE crashed the Docker daemon at 512 concurrent and
    had to rewrite on K8s mid-project. Starting now, in parallel, is how we avoid that.
-3. **It is long-lead but cleanly decoupled.** Your interfaces to the training track are four
-   schemas (§4). We can go weeks without blocking each other.
+3. **It is long-lead and independently researchable** (v1.2: not "cleanly decoupled" —
+   *research* proceeds without blocking, but *implementation* depends on the HAR-15/HAR-16
+   interfaces landing, DL source approvals, IS containment sign-off, and human review). The
+   interfaces to the training track are the four schemas in §4.
 
 Phase-1 scope = the **thin foundation** (exec plan P1-70, Linear **HAR-20**): control contract +
 5 adapters + verified trajectories. Your research should also produce the **Phase-3/4 growth
@@ -45,7 +48,8 @@ plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the rig
 
 ## 2. Hard boundaries (non-negotiable; source plans adopted, caps pending signature)
 
-- **Security envelope** (exec plan §12): per-run isolation; no production credentials —
+- **Security envelope** (exec plan P1-20/P1-70; master plan v2 §12 MCP supply-chain contract):
+  per-run isolation; no production credentials —
   synthetic secrets + short-lived tokens; egress deny-by-default with allowlists; pinned
   images/commits + SBOM + malware/secret scans; resource/time quotas; fleet kill switch;
   authority broker **outside** model control.
@@ -83,8 +87,9 @@ plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the rig
 │   init(seed)→deterministic state · capabilities() · step(action)→obs             │
 │   predicted_delta vs attested_delta · audit events · timeout/quota · replay(log) │
 │   reversibility class: rollback | compensating | read-only reset | prohibited    │
-│ Controller (K8s): pod pool, image pre-pull + local registry + GC, per-rollout    │
-│   timeouts, retry/quarantine for flaky tasks, metrics, kill switch               │
+│ Controller (PROPOSED: K8s orchestration — D1 decides; containment boundary is a  │
+│   separate D1 threat-model choice): pod pool, image pre-pull + registry + GC,    │
+│   per-rollout timeouts, retry/quarantine for flaky tasks, metrics, kill switch   │
 └──────────────────────────────────────────────────────────────────────────────────┘
    │ adapters (reuse-first — build almost nothing from scratch)
    ├─ repo/git ............ SWE-rebench pre-built images (21k tasks/7.5k images),
@@ -107,8 +112,8 @@ plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the rig
 │ MCP tool harvest (3k+ public, supply-chain contract) → synthetic tool evolution  │
 │ → task/agent/rubric generation → sim + real-exec trajectories → rubric filter    │
 │ → admission pipeline → ledger-signed training shards                             │
-│ Phase-1 target: pipeline proven end-to-end with ~1k filtered trajectories        │
-│ (quality bar, not volume). Indic/Indian-SaaS envs: DESIGN DOC only.              │
+│ Phase-1 CORE: pipeline proven end-to-end (quality bar, small volume).            │
+│ ~1k filtered trajectories = STRETCH. Indic/Indian-SaaS envs: DESIGN DOC only.    │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -195,10 +200,11 @@ incident controls. ST = training integration.
 |---|---|---|---|
 | D1 | **Research memo**: answers to §5 with primary sources; license audit table; cost model | ~1 week | async comments (Harshit + Claude) |
 | D2 | **Final plan** (architecture chosen, milestones→F1, budget, risks) | +3–4 days | live review → **ADR-0xx signed**; Linear children created under HAR-20 |
-| D3 | **Prototype**: control contract + 1 adapter (recommend repo/git via SWE-rebench subset) + 20 deterministic tasks + replay demo + 1 injected-failure case | ~wk 4–5 | demo + code review (Claude) |
+| D3 | **Prototype**: control contract + 1 adapter (recommend repo/git via SWE-rebench subset) + 20 deterministic tasks + replay demo + 1 injected-failure case | ~wk 4–5 | demo + **human reviewer-of-record** (named at G0-M) with Claude peer QA; IS/security review of containment claims |
 | D4 | **F1 acceptance**: full §2 core criteria (incl. **100** verified trajectories) + growth report. **(v1.1) The 1k-trajectory data-engine smoke is STRETCH — it informs Stage-2.5 readiness and never blocks F1** | wk 7–8 | F1 gate packet (`gates/F1/environments/`) |
 
-**Working agreements:** you own Linear HAR-20 (split it into 1–5-day children after D2);
+**Working agreements:** HAR-20 is owned by the named human EA; you drive it day-to-day
+(split into 1–5-day children after D2);
 status lands in `docs/SESSION_MAIN.md` §7 like everyone's; anything you want from the training
 track goes in SESSION_MAIN §5 Redirections or a Linear comment; privileged material (counsel,
 partner data) never enters this repo/Linear/Notion.
@@ -210,6 +216,14 @@ stability (experimental, APIs-subject-to-change) is accepted: the likely directi
 framework-neutral internal contract with thin adapters toward OpenEnv/SkyRL/Harbor.*
 
 ---
+
+## 8a. v1.2 changelog (2026-07-23, second-pass audit) — remaining contradictions closed
+
+Mission/working-agreements "own" wording → human-EA-owns/you-drive (§1, §7); D3 review column
+→ human reviewer-of-record + IS security review, Claude = peer QA; data-engine diagram 1k →
+STRETCH; security citation corrected to exec-plan P1-20/P1-70 + master-plan v2 §12; "cleanly
+decoupled" → independently-researchable-with-implementation-dependencies; controller K8s
+labeled PROPOSED/D1-decides.
 
 ## 8. v1.1 changelog (2026-07-23) — SESSION_SECOND audit accepted in full
 
