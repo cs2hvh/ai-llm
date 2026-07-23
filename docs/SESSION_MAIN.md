@@ -39,6 +39,11 @@
    $300k phase**) still need the owner's signature.
 6. All Phase-1 runs will carry `label: diagnostic` — nothing before Phase 2's pre-registered
    experiments is architecture evidence. I will hold this line even if a result looks exciting.
+7. **T2 P0 oracles IMPLEMENTED** (Session 2): dense + GDN-hybrid reference models with
+   float64 gradcheck (incl. the delta-rule recurrence across a segment reset), packed-vs-
+   unpacked exactness, cross-segment leak proofs, bit-determinism, tensor census — **32/32
+   tests, ~4s, ruff clean** (`sama-7b` commits `09a3f95`+`f8ae733`). **Awaiting human
+   review** per DoD (HAR-22 has the reviewer ask).
 
 ## 1. Lanes and who does what
 
@@ -62,7 +67,8 @@ approve spend, or touch anything public — humans do. Anyone on the team can re
 | Fresh lineage (T0 / HAR-7) | 🟡 local only | `ai-llm/sama-7b/` @ `c811f0a` (own git, outer-ignored; 14/14 tests) — needs GitHub remote |
 | Eval registry v0 (T6.1 / HAR-16) | 🟡 draft | `sama-7b/evals/registry/registry_v0_draft.yaml` |
 | ADR-000 G0-M record | 🟡 active, caps unsigned | `sama-7b/docs/decisions/ADR-000-…` |
-| Linear board | 🟡 restructured; DoR incomplete (assignees/estimates/due dates pending role naming) | HAR-5…30; HAR-7/8/9/16/20 In Progress |
+| T2 oracles (HAR-22) | 🔍 implemented, awaiting non-author review | `sama-7b/src/sama/oracle/` @ `f8ae733`; 32/32 tests, gradcheck + leak proofs |
+| Linear board | 🟡 restructured; DoR incomplete (assignees/estimates/due dates pending role naming) | HAR-5…30; HAR-7/8/9/16/20/22 In Progress |
 | Notion hub + registers | ✅ live | hub page + Decision (14 rows) + Risk (18 rows) DBs |
 | GPU / data / spend | ⬜ none consumed | caps ledger at 0 |
 
@@ -71,7 +77,7 @@ approve spend, or touch anything public — humans do. Anyone on the team can re
 Stated ahead of time so the team can veto *before* I build. Order chosen so that everything
 remains zero-GPU and review-friendly until the caps are signed and cluster access exists.
 
-1. **T2 — P0 reference oracles (HAR-22; my next build).** Intent: in the fresh repo, a
+1. ~~**T2 — P0 reference oracles (HAR-22)**~~ — **DONE (pending review), Session 2.** Was: in the fresh repo, a
    `<20M`-param FP32 *dense* decoder and a *GDN-class hybrid* reference, CPU-runnable, with:
    finite-difference gradient checks on every operator; property tests for **recurrent-state
    reset at document-packing boundaries** (the failure mode I most expect to bite at scale);
@@ -167,6 +173,24 @@ humans own decisions · verify-before-locking (external claims get primary-sourc
   parallel team member — research brief at `docs/DELEGATION_BRIEF_ENV_ENGINE.md`; process
   D1 research memo → D2 plan review → ADR → build. Cross-review pact established (EA reviews
   eval/scorer work; ST/Claude reviews env/verifier work).
+
+### 2026-07-23 — Session 2: T2 P0 oracles built and green
+- Owner said "start with ur work" → executed the §3.1 intent exactly as pre-declared.
+- `sama-7b` venv stood up (CPU torch); `src/sama/oracle/{ops,gdn,model}.py` landed:
+  segment-causal attention (GQA), boundary-safe depthwise conv (explicit tap loop),
+  gated delta-rule block with autograd-safe state reset (public-art formulation;
+  production parametrization deferred to S0 pre-registration), dense + 3:1 hybrid LMs,
+  tensor census, gate-saturation telemetry, and a loud placeholder pinning the future
+  chunked-scan parity obligation.
+- **32/32 tests in ~4s**: float64 gradcheck (conv / attention / GDN-with-reset / full
+  stack), packed==unpacked exactness, causality, cross-segment leak proofs (every doc-A
+  position perturbed → doc-B bit-unchanged), bit-determinism, census, <20M budget.
+- Ruff clean after codifying the PyTorch naming convention (N806/N812) in pyproject —
+  a lint-pipe exit-code slip let one commit land pre-lint; fixed in the follow-up commit
+  (process note for CI: lint must gate, not pipe).
+- Commits `09a3f95` + `f8ae733` (sama-7b lineage). HAR-22 → In Progress with reviewer ask.
+- Next per §3: HAR-16 eval-surface enumeration → freeze proposal, then HAR-15 admission
+  skeleton, HAR-25 scorer fixtures.
 
 ### 2026-07-23 — Session 1 (evening): second-pass audit → brief v1.2 + accuracy fixes
 - EA session's second-pass review: 9 resolved items confirmed; 7 brief contradictions + 5
