@@ -143,5 +143,10 @@ humans own decisions · verify-before-locking (external claims get primary-sourc
   schema, 14 tests), eval registry draft, run-manifest schema, CI tier-1, ADR-000, salvage
   register. Phase 1 (G0-M scope) is running; GPU-side work correctly blocked on caps/access.
 - Created this doc as the standing team-communication surface.
+- Nested the program repo at `ai-llm/sama-7b/` (own git history, outer-ignored).
+- **Delegated the EA lane** (verified-agent environments + data engine, T8/HAR-20) to the
+  parallel team member — research brief at `docs/DELEGATION_BRIEF_ENV_ENGINE.md`; process
+  D1 research memo → D2 plan review → ADR → build. Cross-review pact established (EA reviews
+  eval/scorer work; ST/Claude reviews env/verifier work).
 
 *(Next session appends here; §§0–5 get refreshed in place.)*
