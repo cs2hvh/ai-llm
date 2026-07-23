@@ -24,10 +24,11 @@
    "30%/46% MFU" was really **~7.5%/11.5%**). Fix + 13 passing regression tests + errata on
    branch **`audit/throughput-accounting-fix`** — **PR awaiting human review** (this review IS
    the R05 independent-review gate): https://github.com/cs2hvh/ai-llm/pull/new/audit/throughput-accounting-fix
-4. **Fresh program repo scaffolded** locally at `D:\work\sama-7b` (commit `c811f0a`,
-   14/14 tests passing): AGENTS.md contract, 6-quantity accounting schema, eval registry v0
-   draft, run-manifest schema, CI tier-1, ADR-000, salvage register. **Needs a private GitHub
-   remote (owner action)** — until then the team can't see it; this doc is the bridge.
+4. **Fresh program repo scaffolded** at **`ai-llm/sama-7b/`** (nested for convenience, but
+   with its **own git history** — commit `c811f0a`, 14/14 tests passing; the outer repo
+   .gitignores it so the lineages stay separate). Contains: AGENTS.md contract, 6-quantity
+   accounting schema, eval registry v0 draft, run-manifest schema, CI tier-1, ADR-000,
+   salvage register. **Needs a private GitHub remote (owner action)** for team visibility/CI.
 5. **Nothing GPU-side has run.** All work so far is zero-GPU, inside the proposed G0-M caps.
    The caps themselves (**A4: 600 GPU-h / 20 TB / $25k mobilization; 2,850 GPU-h / 50 TB /
    $300k phase**) still need the owner's signature.
@@ -53,7 +54,7 @@ approve spend, or touch anything public — humans do. Anyone on the team can re
 | Legacy freeze (pre-audit tag) | ✅ pushed | `legacy-pilot-pre-audit-00a825f` |
 | Accounting fix (T1 / HAR-9) | 🔍 **on PR, review = the gate** | branch `audit/throughput-accounting-fix`, `src/myllm/utils/accounting.py`, `tests/test_throughput_accounting.py` (13/13 local) |
 | Program docs versioned | 🔍 same PR (commit 2) | all plans + `docs/research/7b_pivot/` |
-| Fresh lineage (T0 / HAR-7) | 🟡 local only | `D:\work\sama-7b` @ `c811f0a` (14/14 tests) — needs GitHub remote |
+| Fresh lineage (T0 / HAR-7) | 🟡 local only | `ai-llm/sama-7b/` @ `c811f0a` (own git, outer-ignored; 14/14 tests) — needs GitHub remote |
 | Eval registry v0 (T6.1 / HAR-16) | 🟡 draft | `sama-7b/evals/registry/registry_v0_draft.yaml` |
 | ADR-000 G0-M record | 🟡 active, caps unsigned | `sama-7b/docs/decisions/ADR-000-…` |
 | Linear board | ✅ normalized | HAR-5…30; HAR-7/8/9/16 In Progress |
@@ -110,7 +111,7 @@ as evidence for an architecture/optimizer decision.
 |---|---|---|---|
 | 1 | Review + merge the audit PR (link in §0.3) | any qualified reviewer ≠ author | HAR-9/8 close; trusted numbers |
 | 2 | Sign/replace A4 caps (Notion Decision Register row A4) | FO | all GPU + spend |
-| 3 | Create private GitHub repo `sama-7b` + push local `c811f0a`; then branch protection + runners | FO/IS | team visibility, CI |
+| 3 | Create private GitHub repo `sama-7b`; then `cd ai-llm/sama-7b && git remote add origin <url> && git push -u origin main`; branch protection + runners | FO/IS | team visibility, CI |
 | 4 | Reserve exact B300 node window | IS | T3 CP proxy, T5 262K proof (red risk R06) |
 | 5 | Cluster credentials for me/CI | IS | T3/T4/T5 |
 | 6 | Counsel engagement (2 briefs); hire reqs; partner outreach | FO/PO | G0 evidence |

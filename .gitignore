@@ -34,3 +34,6 @@ credentials.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Nested fresh-lineage program repo (own .git — NEVER tracked by this legacy repo)
+sama-7b/
