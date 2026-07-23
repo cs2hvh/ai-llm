@@ -70,7 +70,12 @@
 - **Abandoned**: scorecard run — placeholder scoring "non-empty = success" gave accuracy 1.0 on every sample. Round B4 wired the predict_fn; per-benchmark `score()` methods for IFEval/HumanEval+/MBPP+ still scaffolds.
 - **Spent**: ~$8.
 
-### C2 (4× B200 NVLink-5 on Vast.ai) — DONE
+### C2 (4× B200 NVLink-5 on Vast.ai) — DONE — ⚠️ ERRATA 2026-07-23
+
+> **The MFU/throughput numbers below are inflated ×4 (world size) by the
+> accounting bug in gotcha 11.** True values: seq=8192 row ≈ 55.3K tok/s
+> aggregate / ~7.5% MFU; seq=4096 row ≈ 84K tok/s / ~11.5% MFU. Raw step
+> times and HBM numbers remain valid. Do not reuse for economics.
 
 Banked at `s3://llm-data/stage2-prep/benchmarks-4b200/`:
 
@@ -233,6 +238,7 @@ Patterns to carry forward:
 8. **NEW: chunked-CE on B200 bf16 at 1B+ produces NaN gradients.** Symptom: finite forward loss but NaN gradient → atomic revert fires every step → no learning. Use full-CE on B200 until D8 lands a fix.
 9. **NEW: `state_shardings` under `--fsdp` MUST NOT include `data_position`.** The loop pops it before JIT. Including it triggers "different numbers of pytree children" ValueError. Pattern: any future loop-managed state field that the loop wants to keep OUTSIDE the JIT'd pytree must also be excluded from `state_shardings`. See hotfix-2 (commit `8e50333`) for the pattern in eval.
 10. **NEW: step-718 of the composed pilot corpus (sequence_id ≈ 4 × 718 = 2872 at mb=4) deterministically NaN's the gradient.** Atomic revert handles it. Worth understanding before scaling corpus size to Stage 3 (5B → 600B).
+11. **ERRATA 2026-07-23: benchmark_throughput.py double-counted world size.** `micro_batch` is the GLOBAL batch (one `[mb, seq]` array split across devices by `data_sharding`), but `tokens_per_step` multiplied by `n_devices` again — inflating all multi-GPU throughput/MFU by ~world size. **C2's "30%/46% MFU on 4×B200" was really ~7.5%/11.5%; aggregate 221K tok/s was really ~55K.** Fixed on branch `audit/throughput-accounting-fix` (`src/myllm/utils/accounting.py` + `tests/test_throughput_accounting.py`). Raw logs untouched. Never reuse pre-fix multi-GPU numbers for economics. Program rule going forward: global tokens counted exactly once, unit-tested.
 
 ---
 

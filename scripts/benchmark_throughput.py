@@ -383,7 +383,14 @@ def main() -> int:
     step_times: list[float] = []
     losses: list[float] = []
     n_devices = len(jax.devices())
-    tokens_per_step = micro_batch * seq_len * n_devices
+    # AUDIT FIX 2026-07-23: micro_batch is the GLOBAL batch — batch_pairs
+    # yields one [micro_batch, seq] array that the jitted train_step receives
+    # under data_sharding (SPLIT across devices, not replicated). The old
+    # `* n_devices` here double-counted by world size, inflating aggregate
+    # throughput and MFU ~n_devices. See src/myllm/utils/accounting.py and
+    # docs/SESSION_HANDOFF.md §3 gotcha 11. Historical multi-GPU numbers from
+    # this script (e.g. C2) are inflated and must not be reused.
+    tokens_per_step = micro_batch * seq_len
 
     total_steps = args.warmup_steps + args.measure_steps
     iterator = iter(data_iter)
@@ -420,8 +427,10 @@ def main() -> int:
     p50 = step_times[len(step_times) // 2]
     p95 = step_times[int(len(step_times) * 0.95)]
     p99 = step_times[int(len(step_times) * 0.99)]
-    tps_per_device = tokens_per_step / mean_t / max(1, n_devices)
-    tps_aggregate = tokens_per_step / mean_t
+    from myllm.utils.accounting import compute_throughput
+    _tp = compute_throughput(micro_batch, seq_len, max(1, n_devices), mean_t)
+    tps_per_device = _tp.tokens_per_sec_per_device
+    tps_aggregate = _tp.tokens_per_sec_aggregate
     peak_mem = _peak_gpu_memory_bytes()
 
     # MFU.
@@ -437,7 +446,7 @@ def main() -> int:
             "model_config": args.model_config,
             "synthetic_data": args.synthetic_data,
             "packed_corpus_root": args.packed_corpus_root,
-            "micro_batch_per_device": micro_batch,
+            "global_micro_batch": micro_batch,  # renamed 2026-07-23: this was never per-device
             "sequence_length": seq_len,
             "tokens_per_step": tokens_per_step,
             "warmup_steps": args.warmup_steps,
