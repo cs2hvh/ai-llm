@@ -44,6 +44,11 @@
    unpacked exactness, cross-segment leak proofs, bit-determinism, tensor census — **32/32
    tests, ~4s, ruff clean** (`sama-7b` commits `09a3f95`+`f8ae733`). **Awaiting human
    review** per DoD (HAR-22 has the reviewer ask).
+8. **T6.1 eval registry + decontamination fingerprints IMPLEMENTED** (Session 3): complete
+   37-suite eval surface (`registry_v0.json`, status **draft**) + the 8/13-gram fingerprint
+   exporter with the public/salted-private modes the EA memo requires. 50/50 tests, ruff
+   clean (`sama-7b` `60605e2`). **Registry is NOT frozen** — freeze needs pinned revisions,
+   vault content for private probes, and a human sign-off; it then unblocks all corpus work.
 
 ## 1. Lanes and who does what
 
@@ -68,6 +73,7 @@ approve spend, or touch anything public — humans do. Anyone on the team can re
 | Eval registry v0 (T6.1 / HAR-16) | 🟡 draft | `sama-7b/evals/registry/registry_v0_draft.yaml` |
 | ADR-000 G0-M record | 🟡 active, caps unsigned | `sama-7b/docs/decisions/ADR-000-…` |
 | T2 oracles (HAR-22) | 🔍 implemented, awaiting non-author review | `sama-7b/src/sama/oracle/` @ `f8ae733`; 32/32 tests, gradcheck + leak proofs |
+| T6.1 registry+fingerprints (HAR-16) | 🔍 implemented (registry status=draft, freeze pending sign-off) | `sama-7b/src/sama/evals/` + `evals/registry/registry_v0.json` @ `60605e2`; 50/50 tests |
 | Linear board | 🟡 restructured; DoR incomplete (assignees/estimates/due dates pending role naming) | HAR-5…30; HAR-7/8/9/16/20/22 In Progress |
 | Notion hub + registers | ✅ live | hub page + Decision (14 rows) + Risk (18 rows) DBs |
 | GPU / data / spend | ⬜ none consumed | caps ledger at 0 |
@@ -85,11 +91,11 @@ remains zero-GPU and review-friendly until the caps are signed and cluster acces
    10-minute budget. These oracles become the parity anchor for every later BF16/MXFP8/CP
    claim — S0 hard-gate 1. *Deliberately framework-thin PyTorch so both Bridge and TorchTitan
    can be compared against the same oracle.*
-2. **T6.1 — eval-surface enumeration to freeze (HAR-16).** Intent: turn the draft registry
-   into the complete versioned surface (exact dataset revisions + split hashes), build the
-   fingerprint exporter (salvaged 8/13-gram xxhash64 concept, fresh implementation), with the
-   private-suite fingerprints behind a salted interface. I will ask for explicit sign-off
-   before declaring it FROZEN, because freezing wrongly blocks all corpus work.
+2. ~~**T6.1 — eval-surface enumeration + fingerprint exporter (HAR-16)**~~ — **DONE (pending
+   review + freeze sign-off), Session 3.** Complete 37-suite registry (status=draft) + the
+   8/13-gram exporter with public + salted-private modes (the EA-lane interface). I did NOT
+   freeze it — freeze needs pinned revisions, vault content for private probes, and a human
+   sign-off, and it blocks all corpus work once set.
 3. **Admission state machine skeleton (HAR-15).** Intent: the six-state data contract as
    code with deny-by-default entrypoints and the golden-path fixtures (admit doc/repo/
    trajectory, reject prohibited, simulate takedown) — runnable in CI without any real data.
@@ -133,6 +139,29 @@ as evidence for an architecture/optimizer decision.
 **Redirections (team writes here, I obey next session):**
 - *(empty — add bullets; I check this section first every session)*
 
+**Peer-QA of EA-lane D1 memo (2026-07-23, ADVISORY — a human EA owns sign-off):**
+Verdict: **strong; supports moving to D2.** It correctly upgrades the brief's central idea —
+own the *protocol/evidence/authority/provenance* (their "SEP" + TrajectoryBundle), keep
+frameworks as replaceable adapters. Standout rigor: the verifier-quality statistics (F1's 100
+trajectories give only a ~2.95% upper bound at zero errors — cannot certify the 99.5%/0.1%
+targets, so those become a later powered gate, not F1); "K8s schedules but does not contain";
+discovery-metadata-only before acquisition; pass@k vs pass^k vs platform-completion kept
+distinct; the ungameable availability denominators. I concur with all of it.
+Two interface commitments it creates for MY lane, which I accept:
+  (a) **HAR-16 must expose a fingerprint interface the EA lane consumes** — public n-grams +
+      a *salted* interface for private-suite fingerprints (prompts/generators never leave the
+      restricted store). Building exactly that now.
+  (b) **run_manifest and TrajectoryBundle stay separate contracts sharing a small provenance
+      envelope** — I'll keep `run_manifest.schema.json`'s provenance section extensible so the
+      envelope can be co-defined at D2, not forked.
+Three things for the primary session / owner (not blockers on D1, but on their D3):
+  - the memo's §17 "open items that block D3" is correct and mostly maps to our existing owner
+    blockers (roles, caps, remote, interfaces) — no new asks, good.
+  - their proposed lane caps ($5k external / 4 TB / 30–50 GPU-h) sit *inside* the pending A4
+    caps; fold into the A4 signature rather than approving separately.
+  - verifier statistical-target *scope* (global vs per-family vs per-digest) is a real open
+    decision — belongs in their D2 ADR, flagging so it isn't lost.
+
 **EA-lane status (from `SESSION_SECOND.md` — their comms surface, integrated here):**
 D1 research memo = GO (tracker synced: HAR-20 In Progress, scope = D1/D2 only, D1 due
 2026-07-30). D3 prototype / D4 implementation = **HOLD** until rows 2/3/8/9 above clear.
@@ -173,6 +202,42 @@ humans own decisions · verify-before-locking (external claims get primary-sourc
   parallel team member — research brief at `docs/DELEGATION_BRIEF_ENV_ENGINE.md`; process
   D1 research memo → D2 plan review → ADR → build. Cross-review pact established (EA reviews
   eval/scorer work; ST/Claude reviews env/verifier work).
+
+### 2026-07-24 — Session 3: EA-D1 peer review + T6.1 registry & fingerprints
+- Reviewed the EA lane's D1 research memo (`docs/research/7b_pivot/ea_lane_d1_research_memo.md`,
+  1,194 lines) + their SESSION_SECOND second-pass audit. Verdict: strong, supports D2; full
+  advisory peer-QA in §5 above. Accepted two interface commitments it creates for my lane
+  (salted fingerprint interface; run_manifest↔TrajectoryBundle shared provenance envelope).
+- Built **T6.1 / HAR-16**: `src/sama/evals/fingerprint.py` (8/13-gram decontamination, public +
+  salted-private modes — the private salt lets the data pipeline detect eval contamination
+  without ever seeing private prompts) and `registry.py` (loader + freeze_blockers) and
+  `evals/registry/registry_v0.json` (complete 37-suite surface, status=draft). 18 new tests,
+  50/50 total, ruff clean, commit `60605e2`. Registry deliberately NOT frozen (human gate).
+- One design decision worth noting: short eval items (< min n-gram length) are fingerprinted at
+  their own length and matched via `FingerprintSet.match()` (windows at ns ∪ short_lengths),
+  rather than a length-blind whole-text hash that would miss short items embedded in longer
+  corpus text. A test caught the naive version.
+- Next per §3: HAR-15 admission-state-machine skeleton, then HAR-25 scorer fixtures.
+
+### 2026-07-24 — Session 4: verification pass (owner-requested "verify what you did")
+- Re-ran both suites: sama-7b **50/50**, legacy accounting **13/13** (on the audit branch —
+  that test file only exists there, by design). ruff clean.
+- **Mutation-tested 5 core claims — all 5 deliberate breaks were caught** by the tests
+  (world-size double-count reintroduced; private-fingerprint salt removed; GDN segment-reset
+  removed; attention segment-mask removed; freeze-allowed-in-draft): the tests have teeth,
+  not just green checkmarks.
+- **Verified SESSION_SECOND's D1-complete claims** against reality: canonical plans on
+  origin/main ✅; sama-7b remote still absent ✅ (open blocker, correctly flagged); HAR-20
+  In Progress, due 2026-07-30 ✅; their Clopper–Pearson stats exact ✅ (n≈2,995 for a 0.1%
+  one-sided bound; ~2.95% at n=100 — F1's 100 trajectories cannot certify the 0.1% target,
+  a genuinely important correction). Accepted their 2 nits on my brief → v1.2 (header fixed;
+  data-engine diagram reordered discovery-first).
+- **Superseded one EA finding**: their §1.8 "HAR-16 is a draft registry without a fingerprint
+  exporter" is now stale — exporter + salted interface shipped in `60605e2`. (HAR-15 admission
+  interface genuinely still absent — next up.)
+- **Found + fixed a doc-sync slip**: last session's SESSION_MAIN Session-3 update had landed
+  only on the audit branch, not main. Restored onto main here. No code affected; HAR-16 code
+  was safely committed in sama-7b throughout.
 
 ### 2026-07-23 — Session 2: T2 P0 oracles built and green
 - Owner said "start with ur work" → executed the §3.1 intent exactly as pre-declared.

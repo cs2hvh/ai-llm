@@ -1,7 +1,7 @@
 # Delegation Brief — Verified-Agent Environments & Agentic Data Engine (EA lane)
 
 **For:** the parallel team member · **From:** technical track (Claude/ST) · **Date:** 2026-07-23
-**Revision: v1.1** (2026-07-23) — amended per the SESSION_SECOND audit; see §8 changelog.
+**Revision: v1.2** (2026-07-23) — amended per the SESSION_SECOND audits; see §8a/§8 changelogs.
 **Process:** you research → we review together → your **final plan becomes a human-signed ADR**
 → build. This brief gives mission, architecture, interfaces, research questions, and
 deliverables — deliberately opinionated so you have something concrete to push back on.
@@ -109,7 +109,8 @@ plan** (RL-scale fleet, Workflow Genome) so the thin version is built on the rig
 └──────────────────────────────────────────────────────────────────────────────────┘
    │
 ┌─────────────────────────────── DATA ENGINE v0 ──────────────────────────────────┐
-│ MCP tool harvest (3k+ public, supply-chain contract) → synthetic tool evolution  │
+│ MCP metadata DISCOVERY (URLs/metadata only) → DL approval → capped quarantine    │
+│   + scans → sealed dynamic test → approved-for-execution → synthetic evolution   │
 │ → task/agent/rubric generation → sim + real-exec trajectories → rubric filter    │
 │ → admission pipeline → ledger-signed training shards                             │
 │ Phase-1 CORE: pipeline proven end-to-end (quality bar, small volume).            │

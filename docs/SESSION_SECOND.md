@@ -8,17 +8,17 @@
 > signatory, reviewer-of-record, or gate decider. Human ownership rules in
 > `sama-7b/AGENTS.md` remain binding.
 >
-> **Started:** 2026-07-23 · **Last refreshed:** 2026-07-23
+> **Started:** 2026-07-23 · **Last refreshed:** 2026-07-23 (D1 research complete)
 
 ---
 
 ## 0. Current conclusion
 
-`DELEGATION_BRIEF_ENV_ENGINE.md` is a strong research brief, but it is not yet a safe
-implementation authorization.
+**D1 is complete:** the evidence-backed memo is
+`docs/research/7b_pivot/ea_lane_d1_research_memo.md`. The delegation brief is a strong research
+brief, but it is not yet a safe implementation authorization.
 
-- **GO now:** D1 research memo, threat model, license/source audit, cost model, interface
-  proposals, and a D2 draft plan/ADR.
+- **GO now:** human/primary-session review of D1 and a D2 draft plan/ADR decision packet.
 - **HOLD:** D3 prototype and D4/F1 implementation until the human authority, repository,
   security, source-approval, and shared-contract blockers below are resolved.
 - No GPU work, bulk data/tool acquisition, sandbox execution, external spend, or production/live
@@ -26,34 +26,35 @@ implementation authorization.
 
 ## 1. Verified findings the primary session should know
 
-1. **Human ownership and review are mandatory.** The brief currently says the parallel member
-   owns the EA lane/HAR-20 and that two AI sessions can satisfy independent cross-review. That
-   conflicts with `sama-7b/AGENTS.md`: AI sessions may provide peer QA, but a named human EA owns
-   the lane, a human signs the ADR, and a qualified non-author human/security reviewer validates
-   gate-critical evidence.
-2. **Authorization wording is too strong.** The brief says its boundaries come from "signed
-   plans," while the execution plan still records owner decisions/caps as pending. Research and
-   drafting may proceed. T8 implementation requires explicit authorization and named capacity.
-3. **The Git branch state blocks clean parallel work.** `origin/main` contains the delegation
-   brief but does not contain its seven read-first plans/research files. Those currently exist on
-   `origin/audit/throughput-accounting-fix`. The nested `sama-7b` repository is local-only at
-   `c811f0a` with no remote. Before parallel code changes, publish the authoritative plan set,
-   create the private remote, and use separate feature branches/worktrees.
-4. **Core versus stretch is inconsistent.** F1 core is five adapters, at least 20 deterministic
-   tasks per family, the 20-concurrent one-hour reliability run, zero security breach, injected
-   failure cases, and **100 verified trajectories**. The brief incorrectly makes a 1,000-
-   trajectory smoke mandatory in D4; 1,000 remains stretch/growth evidence and cannot block F1.
-5. **RACI boundaries need tightening.** EA covers environment contracts, adapters, task
+1. **Human ownership and review are mandatory.** The brief's v1.2 substance now agrees with
+   `sama-7b/AGENTS.md`: AI sessions may provide peer QA, but a named human EA owns the lane, a
+   human signs the ADR, and a qualified non-author human/security reviewer validates gate-critical
+   evidence. The actual people still need to be named.
+2. **Authorization is D1/D2 only.** The brief now records the correction: owner decisions/caps
+   remain pending, research and drafting may proceed, and T8 implementation requires explicit
+   authorization plus named capacity.
+3. **The canonical-plan branch blocker is cleared; the nested-repo blocker remains.**
+   `origin/main` now contains the authoritative plan/research set. The nested `sama-7b`
+   repository remains local-only with no remote. Before parallel code changes, create the private
+   remote and use protected branches plus separate feature branches/worktrees.
+4. **Core versus stretch is now corrected in prose.** F1 core is five adapters, at least 20
+   deterministic tasks per family, the 20-concurrent one-hour reliability run, zero security
+   breach, injected failure cases, and **100 verified trajectories**. The 1,000-trajectory target
+   remains stretch/growth evidence and cannot block F1.
+5. **RACI boundaries are now recorded.** EA covers environment contracts, adapters, task
    generation, verifiers, and pre-admission trajectory packages. DL owns source approval,
-   quarantine/admission, decontamination, removal lineage, and signed ledgers. IS owns containment,
-   secrets, network controls, registries, and incident controls. ST owns training integration.
-6. **Discovery is not acquisition.** A 3,000-tool MCP "harvest" may initially store URLs and
-   metadata only. Code, images, schemas, tool execution, or generated training data must follow:
-   source approval → quarantine → admission → decontamination → authorized use.
-7. **Kubernetes is orchestration, not a security boundary.** Before D3, the plan needs a threat
-   model and an explicit isolation choice: dedicated sandbox trust domain, rootless containers,
-   seccomp/AppArmor plus gVisor/Kata/Firecracker as appropriate, no Docker socket, no host mounts,
-   default-deny network policy, scoped broker-minted synthetic credentials, and a kill switch.
+   quarantine/admission, decontamination, removal lineage, and signed ledgers. IS owns
+   containment, secrets, network controls, registries, and incident controls. ST owns training
+   integration.
+6. **Discovery is not acquisition.** The correction is accepted, but the delegation diagram still
+   needs visual/order reconciliation. Initial MCP discovery stores URLs and metadata only. Code,
+   images, schemas, tool execution, or generated training data must follow source approval →
+   quarantine → admission → decontamination → authorized use.
+7. **Kubernetes is orchestration, not a security boundary.** The brief now requires, before D3,
+   a threat model and an explicit isolation choice: dedicated sandbox trust domain, rootless
+   containers, seccomp/AppArmor plus gVisor/Kata/Firecracker as appropriate, no Docker socket,
+   no host mounts, default-deny network policy, scoped broker-minted synthetic credentials, and
+   a kill switch.
 8. **The four claimed interfaces are not implemented.** HAR-15 admission/ledger is absent,
    HAR-16 is a draft registry without a fingerprint exporter, and the current run manifest is a
    training-run schema rather than a rollout contract. Prefer a shared provenance envelope plus a
@@ -115,19 +116,22 @@ implementation authorization.
 
 1. Name the human EA, IS/security reviewer, and non-author gate reviewer.
 2. Reconcile/sign the G0-M authority and relevant caps.
-3. Publish the canonical plans to the authoritative branch.
+3. Canonical plans are now on `origin/main` (**cleared 2026-07-23**).
 4. Create the private `sama-7b` remote, protected `main`, CI, and isolated branch/worktree.
-5. Correct the brief's ownership, §12 references, 100-versus-1,000 scope, and RACI.
+5. Reconcile the brief's stale v1.1 header and its data-engine diagram/order wording; the
+   substantive ownership, scope, security, RACI, and reference corrections are already recorded
+   in its v1.2 changelog.
 6. Approve the rollout/trajectory contract and schema ownership boundaries.
 7. Land or formally version the HAR-15 admission interface and HAR-16 fingerprint interface.
 8. Approve a minimal source/image set, its licenses/API terms, container digests, SBOMs, scans,
    storage allowance, and sandbox threat model.
 9. Allocate a lane sub-budget with burn accounting, stop rules, and a capacity-based schedule.
 
-## 5. Intended next work
+## 5. D1 handoff and next work
 
-The next safe deliverable is **D1: EA-lane research memo**. It should answer all 15 questions in
-the delegation brief while separating:
+The D1 memo is complete at
+`docs/research/7b_pivot/ea_lane_d1_research_memo.md`. It answers all 15 questions while
+separating:
 
 - Phase-1 core from later Workflow Genome growth;
 - measured facts from estimates;
@@ -138,9 +142,16 @@ the delegation brief while separating:
 - rule/state verifiers from rubric-judge quality filters;
 - advisory AI cross-checks from accountable human review.
 
-No architecture selection should be frozen until D1 is reviewed. The likely design direction is
-a small internal, framework-neutral contract with adapters for experimental OpenEnv/SkyRL/Harbor
-integration, rather than making any one evolving framework the program's permanent interface.
+Its recommended D2 direction is a SAMA-owned, framework-neutral environment protocol and
+trajectory evidence bundle; Harbor is the leading first repo/terminal adapter, while
+OpenEnv/NeMo Gym and verl/SkyRL/NeMo-RL remain compatibility/trainer adapters. A managed
+public/synthetic F1 fleet or company-controlled BYOC for proprietary material is preferred before
+a dedicated multi-cell CPU trust domain at sustained scale. No architecture selection should be
+frozen until human and IS review.
+
+The next safe deliverable is the **D2 draft plan/ADR packet**. It must resolve the protocol/schema
+ownership, isolation/provider choice, verifier statistical target, minimal admitted source/image
+set, human staffing, lane caps, and D3 entry criteria. It must not start D3.
 
 ## 6. Session log
 
@@ -151,7 +162,31 @@ integration, rather than making any one evolving framework the program's permane
   run-manifest schema, and Linear HAR-20.
 - Independently cross-checked research evidence, canonical-plan/security consistency, and
   execution readiness.
-- Confirmed HAR-20 remains Backlog and the lane is safe for research/draft planning only.
+- At that audit point HAR-20 was Backlog; `SESSION_MAIN.md` now records it **In Progress** with
+  D1/D2-only scope and a 2026-07-30 D1 due date.
 - Recorded the corrections and parallel boundary in this file. No implementation or tracker
   mutation was performed.
+
+### 2026-07-23 — D1 research memo completed
+
+- Completed primary-source review of OpenEnv, Harbor, SkyRL, verl, NeMo Gym/NeMo-RL,
+  OpenHands, managed sandbox vendors, Kubernetes/gVisor/Firecracker controls, MCP Registry,
+  candidate corpora and Indic sandbox/onboarding surfaces.
+- Proposed SEP: a SAMA-owned trainer-neutral contract with independently attested state deltas,
+  authority/reversibility, two replay modes, fail-closed verification, and a remotely anchored
+  tamper-evident trajectory bundle.
+- Recomputed 20/200/2,000 capacity and usage-cost estimates; proposed review-only $5k external,
+  4 TB physical-storage high-water and 30-planned/50-max GPU-hour lane lines with stop rules.
+- Demonstrated that 100 F1 trajectories cannot certify a 0.1% false-reward target: with zero
+  observed false accepts, about 2,995 known-negative cases are required for a one-sided 95%
+  upper bound below 0.1%.
+- Corrected the data-engine order to metadata discovery → DL approval → quarantine/scans →
+  admission/decontamination → simulation/execution → EA pre-admission package → DL corpus
+  admission. No downloads, execution, infrastructure, spend, schema changes, tracker mutations
+  or live-system access occurred.
+- Advisory peer QA then tightened controller HA and externally anchored audit evidence, separated
+  logical/physical/core storage ledgers, corrected Prime/image/unit assumptions, removed a replay
+  quarantine contradiction, defined verifier denominators/confidence bounds, separated runtime
+  execution approval from corpus admission, and added revocable raw-data indirection. This remains
+  AI peer QA, not the required human/security review.
 
